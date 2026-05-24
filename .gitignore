@@ -1,0 +1,34 @@
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Model files (BIG - 6.4 GB, don't commit!)
+models/OpenVINO/
+*.bin
+*.onnx
+*.xml
+
+# Logs
+logs/
+*.log
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Docker
+*.pid
