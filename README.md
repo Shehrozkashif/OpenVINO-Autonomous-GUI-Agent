@@ -114,6 +114,3 @@ python scripts/benchmarks/latency_benchmark.py
 
 ## ⚖️ License
 This project is licensed under the [Apache License 2.0](LICENSE). See the LICENSE file for details.
-
----
-*Disclaimer: This is a proof-of-concept for Intel hardware optimization. Always use failsafes (Top-left corner mouse move) when running desktop agents.*
