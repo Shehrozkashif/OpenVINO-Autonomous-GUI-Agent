@@ -27,8 +27,5 @@ By participating in this project, you agree to abide by our Code of Conduct. (Li
 ## Development Setup
 Please refer to the [README.md](README.md) for environment setup and model preparation.
 
-## Security
-If you discover a security vulnerability, please do not open a public issue. Instead, follow our security reporting process. (Link to be added)
-
 ---
 *Thank you for your contributions!*
