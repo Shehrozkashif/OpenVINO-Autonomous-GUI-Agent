@@ -53,6 +53,11 @@ class DesktopController:
     def screenshot_base64(self) -> str:
         return self._call("screenshot", {})["image_base64"]
 
+    def scroll(self, x: int, y: int, clicks: int = 3, direction: str = "down") -> bool:
+        result = self._call("scroll", {"x": x, "y": y, "clicks": clicks, "direction": direction})
+        logger.info(f"[ACTION] scroll {direction} at ({x},{y}) → {result}")
+        return True
+
     def is_server_running(self) -> bool:
         try:
             r = self.client.get(f"{self.server_url}/health", timeout=3.0)

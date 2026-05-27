@@ -22,8 +22,8 @@ class OVMSResponse(BaseModel):
 class OVMSClient:
     def __init__(
         self,
-        vlm_url: str = "http://localhost:8001",
-        llm_url: str = "http://localhost:8002",
+        vlm_url: str = "http://localhost:8002",
+        llm_url: str = "http://localhost:8001",
         timeout: float = 60.0
     ):
         self.vlm_url = vlm_url
