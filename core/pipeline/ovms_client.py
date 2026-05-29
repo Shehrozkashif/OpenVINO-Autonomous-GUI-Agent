@@ -35,7 +35,8 @@ class OVMSClient:
         prompt: str,
         image_base64: str,
         max_tokens: int = 60,
-        temperature: float = 0.1
+        temperature: float = 0.1,
+        system_prompt: str = None,
     ) -> OVMSResponse:
         """Send screenshot + question to Phi-3.5-Vision. Used by Grounding + Reflection."""
         start = time.time()

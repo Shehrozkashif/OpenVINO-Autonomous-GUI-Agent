@@ -38,8 +38,14 @@ from core.grounding.som_engine import SoMEngine
 
 
 # ── VLM prompt templates ──────────────────────────────────────────────────────
-# These prompts are tuned for Qwen2.5-VL which is much better at spatial
-# reasoning than general VLMs. Keep prompts short — the model is concise.
+# Tuned for UI-TARS-1.5-7B (ByteDance) — purpose-built GUI grounding model,
+# ScreenSpot-V2: 94.2%. Based on Qwen2.5-VL architecture.
+
+# System prompt that activates UI-TARS grounding mode
+_UITARS_SYSTEM_PROMPT = (
+    "You are a GUI agent. Your job is to locate UI elements in screenshots "
+    "and return their exact screen coordinates. Be precise."
+)
 
 _VLM_TEXT_LABEL_PROMPT = (
     'In this screenshot, I need to click on: "{target}".\n'
@@ -57,17 +63,17 @@ _VLM_ZONE_PROMPT = (
     "Reply with ONLY a single digit (1-9)."
 )
 
-# Stage 4 coordinate prompt — works with Qwen2.5-VL's spatial training.
-# The model outputs normalized floats; we multiply back to screen pixels.
+# UI-TARS grounding prompt — asks for normalized coordinates.
+# UI-TARS may respond with JSON, <point>x y</point>, or (x1,y1),(x2,y2) bbox.
+# The parser in _stage4_vlm_coords handles all three formats.
 _VLM_COORD_PROMPT = (
-    'In this screenshot, find the UI element: "{target}"\n\n'
-    "Output ONLY this JSON and nothing else:\n"
-    '{{"x": <float 0.0-1.0>, "y": <float 0.0-1.0>, "confidence": <float 0.0-1.0>, "found": true|false}}\n\n'
-    "Rules:\n"
-    "- x=0.0 is LEFT edge, x=1.0 is RIGHT edge\n"
-    "- y=0.0 is TOP edge, y=1.0 is BOTTOM edge\n"
-    "- x,y must be the CENTER of the element\n"
-    "- If not visible: {{\"x\":0.0,\"y\":0.0,\"confidence\":0.0,\"found\":false}}"
+    'In this screenshot, locate the UI element: "{target}"\n\n'
+    "Output ONLY valid JSON:\n"
+    '{{"x": <float 0.0-1.0>, "y": <float 0.0-1.0>, "confidence": <float 0.0-1.0>, "found": true}}\n\n'
+    "x=0.0 is LEFT edge, x=1.0 is RIGHT edge\n"
+    "y=0.0 is TOP edge, y=1.0 is BOTTOM edge\n"
+    "x,y = CENTER of the element\n"
+    'If element not visible: {{"found": false}}'
 )
 
 
@@ -202,6 +208,7 @@ class HybridGroundingEngine:
                 image_base64=image_b64,
                 max_tokens=15,
                 temperature=0.05,
+                system_prompt=_UITARS_SYSTEM_PROMPT,
             )
             label = resp.content.strip().strip('"\'').strip()
             logger.debug(f"[Hybrid/S2] VLM text label for '{target}': '{label}'")
@@ -289,55 +296,94 @@ class HybridGroundingEngine:
         screen_h: int,
     ) -> Optional[Tuple[int, int, float, str]]:
         """
-        Stage 4: VLM direct coordinate prediction with normalized coordinates [0.0-1.0].
-        Qwen2.5-VL has strong spatial training; this stage works well with it.
+        Stage 4: UI-TARS direct coordinate prediction.
+        UI-TARS-1.5-7B (ScreenSpot-V2: 94.2%) may output:
+          - JSON:  {"x": 0.5, "y": 0.3, ...}
+          - Point: <point>960 540</point>  (pixel coords)
+          - BBox:  (x1,y1),(x2,y2)        (pixel coords, take centre)
+        All three are parsed; result scaled to actual screen resolution.
         """
         try:
             prompt = _VLM_COORD_PROMPT.format(target=target)
             resp = self.vlm.query_vlm(
                 prompt=prompt,
                 image_base64=image_b64,
-                max_tokens=80,
+                max_tokens=120,
                 temperature=0.0,
+                system_prompt=_UITARS_SYSTEM_PROMPT,
             )
 
             text = resp.content.strip()
 
-            # Strip reasoning tokens that thinking models emit before the answer
+            # Strip chain-of-thought tokens
             if "</think>" in text:
                 text = text.split("</think>")[-1].strip()
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-            json_match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-            if not json_match:
-                logger.debug(f"[Hybrid/S4] No JSON in response: '{text[:80]}'")
-                return None
-
-            # Tolerate trailing commas before closing brace
-            json_str = re.sub(r",\s*([\]}])", r"\1", json_match.group())
-            data = json.loads(json_str)
-
-            if not data.get("found", False):
-                return None
-
-            x_norm = float(data.get("x", 0.0))
-            y_norm = float(data.get("y", 0.0))
-            conf = float(data.get("confidence", 0.65))
-
-            # Reject obviously wrong coordinates
-            if not (0.0 < x_norm < 1.0 and 0.0 < y_norm < 1.0):
-                logger.debug(f"[Hybrid/S4] Coordinates out of range: ({x_norm},{y_norm})")
-                return None
-
-            x = int(x_norm * screen_w)
-            y = int(y_norm * screen_h)
-            logger.info(
-                f"[Hybrid/S4-VLM-Coords] '{target}' → norm({x_norm:.3f},{y_norm:.3f}) "
-                f"→ screen({x},{y}) conf={conf:.2f}"
-            )
-            return (x, y, conf, "vlm_coords")
+            result = self._parse_vlm_coords(text, screen_w, screen_h)
+            if result:
+                x, y, conf = result
+                logger.info(
+                    f"[Hybrid/S4-VLM-Coords] '{target}' → screen({x},{y}) conf={conf:.2f}"
+                )
+                return (x, y, conf, "vlm_coords")
         except Exception as e:
             logger.warning(f"[Hybrid/S4-VLM-Coords] Error: {e}")
+        return None
+
+    def _parse_vlm_coords(
+        self, text: str, screen_w: int, screen_h: int
+    ) -> Optional[Tuple[int, int, float]]:
+        """
+        Parse coordinates from VLM output. Handles three formats emitted by UI-TARS:
+          1. JSON  {"x": 0.5, "y": 0.3, "confidence": 0.9, "found": true}
+          2. Point <point>cx cy</point>  (absolute pixels or 0-1000 scale)
+          3. BBox  (x1,y1),(x2,y2)      (absolute pixels, take centre)
+        Returns (screen_x, screen_y, confidence) or None.
+        """
+        # ── Format 1: JSON ────────────────────────────────────────────────────
+        json_match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        if json_match:
+            try:
+                json_str = re.sub(r",\s*([\]}])", r"\1", json_match.group())
+                data = json.loads(json_str)
+                if not data.get("found", True):
+                    return None
+                x_norm = float(data.get("x", 0.0))
+                y_norm = float(data.get("y", 0.0))
+                conf = float(data.get("confidence", 0.7))
+                if 0.0 < x_norm < 1.0 and 0.0 < y_norm < 1.0:
+                    return (int(x_norm * screen_w), int(y_norm * screen_h), conf)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # ── Format 2: <point>cx cy</point> ───────────────────────────────────
+        point_match = re.search(r'<point>\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s*</point>', text)
+        if point_match:
+            px, py = float(point_match.group(1)), float(point_match.group(2))
+            # UI-TARS uses 0-1000 scale; if values ≤ 1.0 they are already normalised
+            if px <= 1.0 and py <= 1.0:
+                return (int(px * screen_w), int(py * screen_h), 0.85)
+            elif px <= 1000 and py <= 1000:
+                return (int(px / 1000 * screen_w), int(py / 1000 * screen_h), 0.85)
+            # Absolute pixel coords (rare if model output matches image size)
+            return (min(int(px), screen_w - 1), min(int(py), screen_h - 1), 0.80)
+
+        # ── Format 3: bounding box (x1,y1),(x2,y2) ───────────────────────────
+        bbox_match = re.search(
+            r'\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\),\s*\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\)',
+            text
+        )
+        if bbox_match:
+            x1, y1, x2, y2 = (float(bbox_match.group(i)) for i in range(1, 5))
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            if cx <= 1.0 and cy <= 1.0:
+                return (int(cx * screen_w), int(cy * screen_h), 0.85)
+            elif cx <= 1000 and cy <= 1000:
+                return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.85)
+            return (min(int(cx), screen_w - 1), min(int(cy), screen_h - 1), 0.80)
+
+        logger.debug(f"[Hybrid/S4] Unrecognised VLM coord format: '{text[:100]}'")
         return None
 
     def _stage5_vlm_zone(
@@ -360,6 +406,7 @@ class HybridGroundingEngine:
                 image_base64=image_b64,
                 max_tokens=5,
                 temperature=0.05,
+                system_prompt=_UITARS_SYSTEM_PROMPT,
             )
             raw = resp.content.strip()
             nums = re.findall(r'\b([1-9])\b', raw)

@@ -1,16 +1,22 @@
 # core/pipeline/ollama_client.py
 """
-Ollama backend — dual-model setup for best performance on current hardware.
+Dual-backend setup for AMD GPU server (48GB VRAM total).
 
-LLM (text reasoning): llama3.1:8b  — runs on GPU (~4.7GB VRAM), fast planning
-VLM (vision/grounding): qwen2.5vl:3b — runs on CPU (visual encoder needs 7.3GB CUDA)
+LLM (text reasoning):   llama3.1:8b via Ollama  — ~4.7GB VRAM, fast planning/routing
+VLM (visual grounding): UI-TARS-1.5-7B via vLLM — ~14GB VRAM, 94.2% ScreenSpot-V2
 
-Ollama automatically swaps between them. They are never loaded simultaneously,
-so total VRAM never exceeds 4.7GB.
+Why two backends:
+  UI-TARS-1.5-7B is purpose-built for GUI grounding (beats OpenAI CUA on benchmarks)
+  but is not available on Ollama. vLLM exposes the same OpenAI-compatible /v1 API.
 
 Setup:
-    ollama pull llama3.1:8b    # for router / planner / reflector
-    ollama pull qwen2.5vl:3b   # for visual grounding only
+    # LLM — Ollama (port 11434)
+    ollama pull llama3.1:8b
+    ollama serve
+
+    # VLM — vLLM (port 8000)
+    pip install vllm
+    vllm serve ByteDance-Seed/UI-TARS-1.5-7B --port 8000
 """
 import time
 from typing import List
@@ -20,28 +26,35 @@ from loguru import logger
 
 from core.pipeline.ovms_client import OVMSResponse
 
-# Default models — tuned for RTX 2060 (6GB VRAM) + AMD CPU
-_DEFAULT_LLM = "llama3.1:8b"    # GPU: fast text reasoning, JSON output
-_DEFAULT_VLM = "qwen2.5vl:3b"   # CPU: visual grounding (needs large CUDA buffer)
+_DEFAULT_LLM = "qwen3:14b"                          # best JSON reasoning, 9GB VRAM
+_DEFAULT_VLM = "ByteDance-Seed/UI-TARS-1.5-7B"     # 94.2% GUI grounding, 14GB VRAM
+
+_DEFAULT_LLM_BASE_URL = "http://localhost:11434"   # Ollama
+_DEFAULT_VLM_BASE_URL = "http://localhost:8000"    # vLLM
 
 
 class OllamaClient:
     """
-    Dual-model Ollama backend.
-    - query_llm() uses the LLM (llama3.1:8b) — text planning, routing, reflection
-    - query_vlm() uses the VLM (qwen2.5vl:3b) — vision grounding only
+    Dual-backend client.
+    - query_llm() → Ollama (llama3.1:8b) for planning, routing, reflection
+    - query_vlm() → vLLM  (UI-TARS-1.5-7B) for visual grounding
+    Both use the OpenAI-compatible /v1/chat/completions endpoint.
     """
 
     def __init__(
         self,
         vlm_model: str = _DEFAULT_VLM,
         llm_model: str = _DEFAULT_LLM,
-        base_url: str = "http://localhost:11434",
+        llm_base_url: str = _DEFAULT_LLM_BASE_URL,
+        vlm_base_url: str = _DEFAULT_VLM_BASE_URL,
+        # legacy single-URL param kept for backward compat
+        base_url: str = None,
         timeout: float = 600.0,
     ):
         self.vlm_model = vlm_model
         self.llm_model = llm_model
-        self.base_url = base_url
+        self.llm_base_url = base_url or llm_base_url
+        self.vlm_base_url = base_url or vlm_base_url
         self.client = httpx.Client(timeout=timeout)
 
     def query_vlm(
@@ -50,26 +63,31 @@ class OllamaClient:
         image_base64: str,
         max_tokens: int = 200,
         temperature: float = 0.0,
+        system_prompt: str = None,
     ) -> OVMSResponse:
-        """Send screenshot + prompt to qwen2.5vl for visual grounding."""
+        """Send screenshot + prompt to UI-TARS-1.5-7B (vLLM) for visual grounding."""
         start = time.time()
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+                },
+                {"type": "text", "text": prompt},
+            ],
+        })
         payload = {
             "model": self.vlm_model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }],
+            "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
         }
-        resp = self.client.post(f"{self.base_url}/v1/chat/completions", json=payload)
+        resp = self.client.post(f"{self.vlm_base_url}/v1/chat/completions", json=payload)
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
@@ -88,7 +106,7 @@ class OllamaClient:
         max_tokens: int = 1024,
         temperature: float = 0.7,
     ) -> OVMSResponse:
-        """Send text messages to llama3.1:8b for planning and reasoning."""
+        """Send text messages to qwen3:14b (Ollama) for planning and reasoning."""
         start = time.time()
         payload = {
             "model": self.llm_model,
@@ -97,7 +115,7 @@ class OllamaClient:
             "temperature": temperature,
             "stream": False,
         }
-        resp = self.client.post(f"{self.base_url}/v1/chat/completions", json=payload)
+        resp = self.client.post(f"{self.llm_base_url}/v1/chat/completions", json=payload)
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
@@ -112,26 +130,33 @@ class OllamaClient:
 
     def check_health(self) -> dict:
         results = {}
+        # Check Ollama (LLM)
         try:
-            r = self.client.get(f"{self.base_url}/api/tags", timeout=5.0)
-            if r.status_code != 200:
+            r = self.client.get(f"{self.llm_base_url}/api/tags", timeout=5.0)
+            if r.status_code == 200:
+                pulled = [m["name"] for m in r.json().get("models", [])]
+                base = self.llm_model.split(":")[0]
+                ok = any(base in m for m in pulled)
+                results[f"LLM ({self.llm_model})"] = (
+                    "OK" if ok else f"NOT PULLED — run: ollama pull {self.llm_model}"
+                )
+            else:
                 results["Ollama"] = f"HTTP {r.status_code}"
-                return results
-
-            pulled = [m["name"] for m in r.json().get("models", [])]
-
-            def _present(name: str) -> bool:
-                base = name.split(":")[0]
-                return any(base in m for m in pulled)
-
-            results[f"LLM ({self.llm_model})"] = (
-                "OK" if _present(self.llm_model)
-                else f"NOT PULLED — run: ollama pull {self.llm_model}"
-            )
-            results[f"VLM ({self.vlm_model})"] = (
-                "OK" if _present(self.vlm_model)
-                else f"NOT PULLED — run: ollama pull {self.vlm_model}"
-            )
         except Exception as e:
-            results["Ollama"] = f"UNREACHABLE — is 'ollama serve' running? ({e})"
+            results["Ollama (LLM)"] = f"UNREACHABLE — is 'ollama serve' running? ({e})"
+
+        # Check vLLM (VLM)
+        try:
+            r = self.client.get(f"{self.vlm_base_url}/v1/models", timeout=5.0)
+            if r.status_code == 200:
+                models = [m["id"] for m in r.json().get("data", [])]
+                ok = any(self.vlm_model in m for m in models)
+                results[f"VLM ({self.vlm_model})"] = (
+                    "OK" if ok else f"NOT LOADED — run: vllm serve {self.vlm_model} --port 8000"
+                )
+            else:
+                results["vLLM (VLM)"] = f"HTTP {r.status_code}"
+        except Exception as e:
+            results["vLLM (VLM)"] = f"UNREACHABLE — is 'vllm serve' running? ({e})"
+
         return results

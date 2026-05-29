@@ -10,7 +10,7 @@ from loguru import logger
 
 from core.protocols.a2a import InferenceClient, SubTask
 
-ROUTER_SYSTEM_PROMPT = """You are a desktop automation task coordinator.
+ROUTER_SYSTEM_PROMPT = """You are a desktop automation task coordinator. /no_think
 Break down user instructions into the MINIMUM number of sub-tasks needed.
 
 Rules:

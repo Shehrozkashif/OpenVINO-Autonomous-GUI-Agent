@@ -30,7 +30,7 @@ else:
     _LAUNCHER_NAME = "GNOME Activities search"
     _TERM_NAME = "Terminal"
 
-PLANNING_SYSTEM_PROMPT = f"""You are a desktop automation planner running on {_OS_CONTEXT}.
+PLANNING_SYSTEM_PROMPT = f"""You are a desktop automation planner running on {_OS_CONTEXT}. /no_think
 Generate the minimum steps needed to complete a task using mouse and keyboard.
 
 Available action_types and their required fields (set all others to null):

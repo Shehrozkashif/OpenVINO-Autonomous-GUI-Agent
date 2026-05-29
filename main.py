@@ -39,14 +39,17 @@ def _auto_detect_backend():
         r = httpx.get("http://localhost:11434/api/tags", timeout=2.0)
         if r.status_code == 200:
             models = [m["name"] for m in r.json().get("models", [])]
-            has_llm = any("llama3.1" in m or "llama3.2" in m for m in models)
-            has_vlm = any("qwen2.5vl" in m for m in models)
-            if has_llm and has_vlm:
-                logger.info("[STARTUP] Auto-detected Ollama — llama3.1 (LLM) + qwen2.5vl (VLM)")
+            has_llm = any(
+                k in m for m in models
+                for k in ("qwen3", "llama3.1", "llama3.2", "llama3.3")
+            )
+            # VLM now served by vLLM (UI-TARS), not Ollama — only check LLM here
+            if has_llm:
+                llm_name = next((m for m in models if any(k in m for k in ("qwen3", "llama3"))), "llm")
+                logger.info(f"[STARTUP] Auto-detected Ollama LLM: {llm_name}  |  VLM: UI-TARS-1.5-7B via vLLM")
                 return "Ollama (Dev — qwen2.5vl)"
-            elif has_vlm:
-                logger.warning("[STARTUP] Ollama: qwen2.5vl found but llama3.1:8b missing — run: ollama pull llama3.1:8b")
-                return "Ollama (Dev — qwen2.5vl)"
+            else:
+                logger.warning("[STARTUP] No LLM found in Ollama — run: ollama pull qwen3:14b")
     except Exception:
         pass
 
