@@ -3,86 +3,119 @@
 Planning Agent — generates precise step sequences for sub-tasks.
 Uses Chain-of-Thought prompting for complex multi-step tasks.
 """
+
 import json
+import platform
 import re
 from typing import List
 
 from loguru import logger
 
-from core.pipeline.ovms_client import OVMSClient
-from core.protocols.a2a import ActionStep, SubTask
+from core.protocols.a2a import ActionStep, InferenceClient, SubTask
 
-PLANNING_SYSTEM_PROMPT = """You are a desktop automation planner.
-Generate precise atomic steps for a given sub-task.
+_OS = platform.system()   # "Windows", "Linux", or "Darwin"
+if _OS == "Windows":
+    _OS_CONTEXT = "Microsoft Windows 11 desktop"
+    _LAUNCHER_KEY = "winleft"
+    _LAUNCHER_NAME = "Windows Start menu"
+    _TERM_NAME = "PowerShell or Command Prompt"
+elif _OS == "Darwin":
+    _OS_CONTEXT = "macOS desktop"
+    _LAUNCHER_KEY = "command+space"
+    _LAUNCHER_NAME = "Spotlight search"
+    _TERM_NAME = "Terminal"
+else:
+    _OS_CONTEXT = "Linux desktop (Ubuntu/GNOME)"
+    _LAUNCHER_KEY = "super"
+    _LAUNCHER_NAME = "GNOME Activities search"
+    _TERM_NAME = "Terminal"
 
-Available action_types:
-- click: click a UI element (requires target)
-- double_click: open a file/folder (requires target)
-- type: type text (requires value)
-- key_press: press a key (requires key, e.g. "enter", "escape", "f5")
-- hotkey: key combination (requires key, e.g. "ctrl+s", "ctrl+shift+n")
-- scroll: scroll wheel (requires target + direction in value: "up" or "down")
-- wait: pause execution (requires value: seconds as string, e.g. "1.5")
-- screenshot: capture screen state
+PLANNING_SYSTEM_PROMPT = f"""You are a desktop automation planner running on {_OS_CONTEXT}.
+Generate the minimum steps needed to complete a task using mouse and keyboard.
 
-Chain-of-Thought process:
-1. What is the starting state?
-2. What exact UI elements need interaction?
-3. Correct order?
-4. What verifies each step?
+Available action_types and their required fields (set all others to null):
+- click / right_click / double_click  →  "target": text visible on screen or clear description
+- type                                 →  "value": the text to type
+- key_press                            →  "key": key name e.g. "enter", "escape", "tab"
+- hotkey                               →  "key": combo e.g. "ctrl+s", "alt+f4"
+- scroll                               →  "target": element, "value": "up" or "down"
+- wait                                 →  "value": seconds as string e.g. "1.5"
 
-Output ONLY a JSON array, nothing else:
+CRITICAL — writing the "target" field:
+When the user message includes "Text currently visible on screen", use those EXACT words as click targets.
+A target that matches visible text is found instantly. A target invented from memory may be wrong.
+Example: if screen shows "Compose" and you need to click the compose button → target = "Compose button"
+
+Output ONLY a valid JSON array. "id" must be an integer. All fields required, use null for unused.
 [
-  {
-    "id": 1,
-    "action_type": "click",
-    "target": "the File menu at the top left",
-    "value": null,
-    "key": null,
-    "description": "Click File menu to open it",
-    "verification": "File dropdown menu appears"
-  }
+  {{"id": 1, "action_type": "click", "target": "...", "value": null, "key": null, "description": "...", "verification": ""}},
+  ...
 ]"""
 
 
 class PlanningAgent:
-    def __init__(self, ovms_client: OVMSClient):
+    def __init__(self, ovms_client: InferenceClient):
         self.ovms = ovms_client
 
-    def plan(self, subtask: SubTask, context: dict = None) -> List[ActionStep]:
+    def plan(self, subtask: SubTask, context: dict = None,
+             screen_context: str = None) -> List[ActionStep]:
         logger.info(f"[PLANNING] Planning: '{subtask.description}'")
-        ctx = f"\nCurrent context: {json.dumps(context)}" if context else ""
+        user_content = f"Generate steps for: {subtask.description}"
+        if screen_context:
+            user_content += (
+                f"\n\nText currently visible on screen (use these exact labels as "
+                f"click targets when relevant): {screen_context}"
+            )
+        if context:
+            user_content += f"\nAdditional context: {json.dumps(context)}"
         messages = [
             {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
-            {"role": "user", "content":
-             f"Generate steps for: {subtask.description}{ctx}"}
+            {"role": "user", "content": user_content},
         ]
-        resp = self.ovms.query_llm(messages, max_tokens=1024, temperature=0.3)
+        resp = self.ovms.query_llm(messages, max_tokens=2048, temperature=0.3)
         steps = self._parse_steps(resp.content, subtask.id)
         logger.info(f"[PLANNING] {len(steps)} steps generated")
         for s in steps:
             logger.info(f"  [{s.id}] {s.action_type}: {s.description}")
         return steps
 
-    def replan(self, failed_step: ActionStep, error: str,
-               remaining: List[ActionStep]) -> List[ActionStep]:
+    def replan(
+        self, failed_step: ActionStep, error: str, remaining: List[ActionStep]
+    ) -> List[ActionStep]:
         logger.warning(f"[PLANNING] Replanning after step {failed_step.id} failure")
         messages = [
             {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
-            {"role": "user", "content":
-             f"Step {failed_step.id} ('{failed_step.description}') failed.\n"
-             f"Error: {error}\n"
-             f"Remaining planned steps: {[s.description for s in remaining]}\n\n"
-             f"Generate a corrected sequence to recover and continue."}
+            {
+                "role": "user",
+                "content": f"Step {failed_step.id} ('{failed_step.description}') failed.\n"
+                f"Error: {error}\n"
+                f"Remaining planned steps: {[s.description for s in remaining]}\n\n"
+                f"Generate a corrected sequence to recover and continue.",
+            },
         ]
-        resp = self.ovms.query_llm(messages, max_tokens=512, temperature=0.3)
+        resp = self.ovms.query_llm(messages, max_tokens=2048, temperature=0.3)
         return self._parse_steps(resp.content, failed_step.subtask_id)
 
     def _parse_steps(self, text: str, subtask_id: int) -> List[ActionStep]:
-        arr_match = re.search(r'\[.*?\]', text, re.DOTALL)
-        if not arr_match:
+        # Remove reasoning block if </think> is present
+        if "</think>" in text:
+            text = text.split("</think>")[-1]
+        else:
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        start_idx = text.find('[')
+        end_idx = text.rfind(']')
+        if start_idx == -1 or end_idx == -1 or start_idx > end_idx:
             raise ValueError(f"No JSON array in planning response: {text[:200]}")
-        data = json.loads(arr_match.group())
+
+        json_str = text[start_idx:end_idx+1]
+        # Fix trailing commas common in LLM output
+        json_str = re.sub(r",\s*([\]}])", r"\1", json_str)
+
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"[PLANNING] JSON parse error: {e}\nRaw string: {json_str}")
+            raise
         steps = []
         for item in data:
             item["subtask_id"] = subtask_id

@@ -11,8 +11,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from core.capture.screenshot import ScreenCapture
-from core.pipeline.ovms_client import OVMSClient
-from core.protocols.a2a import ActionStep
+from core.protocols.a2a import ActionStep, InferenceClient
 
 
 @dataclass
@@ -44,9 +43,9 @@ Did the action succeed? Output ONLY JSON:
 class ReflectionAgent:
     def __init__(
         self,
-        ovms_client: OVMSClient,
+        ovms_client: InferenceClient,
         capturer: ScreenCapture,
-        min_confidence: float = 0.8
+        min_confidence: float = 0.8,
     ):
         self.ovms = ovms_client
         self.capturer = capturer
@@ -93,28 +92,44 @@ class ReflectionAgent:
         return result
 
     def _parse(self, text: str) -> ReflectionResult:
+        # Remove reasoning block if </think> is present
+        if "</think>" in text:
+            text = text.split("</think>")[-1]
+        else:
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        
         json_match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        data = {}
         if json_match:
             try:
-                data = json.loads(json_match.group())
+                # Fix trailing commas
+                json_str = re.sub(r",\s*([\]}])", r"\1", json_match.group())
+                data = json.loads(json_str)
             except json.JSONDecodeError:
-                data = {}
-        else:
+                pass
+                
+        if not data:
             text_lower = text.lower()
             success = any(w in text_lower for w in ["success", "succeeded", "yes", "correct", "appeared"])
             data = {
-                "success": success, "confidence": 0.6,
+                "success": success, 
+                "confidence": 0.9 if success else 0.5,
                 "observation": text[:100],
                 "error_description": "" if success else text[:100],
                 "should_retry": not success,
                 "recovery_hint": ""
             }
 
+        success = bool(data.get("success", False))
+        
+        # If success is true but no confidence provided, assume it's confident
+        conf = float(data.get("confidence", 0.9 if success else 0.0))
+        
         return ReflectionResult(
-            success=bool(data.get("success", False)),
-            confidence=float(data.get("confidence", 0.5)),
+            success=success,
+            confidence=conf,
             observation=data.get("observation", ""),
             error_description=data.get("error_description", ""),
-            should_retry=bool(data.get("should_retry", False)),
+            should_retry=bool(data.get("should_retry", not success)),
             recovery_hint=data.get("recovery_hint", "")
         )

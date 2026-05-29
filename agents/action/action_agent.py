@@ -34,6 +34,12 @@ class ActionExecutionAgent:
                     return False
                 return self.controller.click(x, y)
 
+            elif step.action_type == "right_click":
+                if x is None or y is None:
+                    logger.error(f"[ACTION] right_click step {step.id} missing coordinates")
+                    return False
+                return self.controller.right_click(x, y)
+
             elif step.action_type == "double_click":
                 if x is None or y is None:
                     logger.error(f"[ACTION] double_click step {step.id} missing coordinates")
@@ -47,17 +53,19 @@ class ActionExecutionAgent:
                 return self.controller.type_text(step.value)
 
             elif step.action_type == "key_press":
-                if not step.key:
+                # Tolerate models that accidentally put the key name in value instead of key
+                key = step.key or step.value
+                if not key:
                     logger.error(f"[ACTION] key_press step {step.id} has no key")
                     return False
-                return self.controller.press_key(step.key)
+                return self.controller.press_key(key)
 
             elif step.action_type == "hotkey":
-                if not step.key:
+                key = step.key or step.value
+                if not key:
                     logger.error(f"[ACTION] hotkey step {step.id} has no key")
                     return False
-                # key format: "ctrl+s" or "ctrl+shift+n"
-                keys = step.key.split("+")
+                keys = key.split("+")
                 return self.controller.hotkey(*keys)
 
             elif step.action_type == "scroll":

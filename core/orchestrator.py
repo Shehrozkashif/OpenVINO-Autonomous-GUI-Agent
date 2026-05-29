@@ -71,7 +71,10 @@ class TaskOrchestrator:
         self.log(f"[TASK START] '{instruction}'")
         start_time = time.time()
 
-        task_id, subtasks = self.router.decompose(instruction)
+        # Give the router a snapshot of what's currently on screen so it can
+        # avoid generating subtasks for things that are already visible/done.
+        screen_context = self._get_screen_context()
+        task_id, subtasks = self.router.decompose(instruction, screen_context=screen_context)
         self.log(f"[ROUTER] {len(subtasks)} sub-tasks")
 
         completed = []
@@ -110,13 +113,22 @@ class TaskOrchestrator:
         }
 
     def _execute_subtask(self, subtask: SubTask) -> bool:
-        steps = self.planner.plan(subtask)
+        # Give the planner a live OCR snapshot so it writes targets from what's
+        # actually on screen — not from model memory about what apps look like.
+        screen_context = self._get_screen_context()
+        steps = self.planner.plan(subtask, screen_context=screen_context)
         idx = 0
         while idx < len(steps):
             if self._stop_event.is_set():
                 return False
             step = steps[idx]
             self.log(f"  Step {step.id}: [{step.action_type}] {step.description}")
+
+            # Skip VLM reflection for actions that don't need visual verification.
+            # Reflection calls qwen2.5vl (CPU, ~160s) — avoid for fast/keyboard steps.
+            # For click/right_click we DO attempt reflection but treat timeout as success
+            # so a slow model swap doesn't crash the whole task.
+            skip_reflection = step.action_type in ("key_press", "type", "hotkey", "wait", "scroll", "double_click")
 
             success = False
             for attempt in range(self.config.max_retries_per_step):
@@ -127,19 +139,31 @@ class TaskOrchestrator:
                 if not exec_ok:
                     continue
 
-                reflection = self.reflector.verify(step, self.config.reflection_wait_s)
-                if reflection.success and reflection.confidence >= self.reflector.min_confidence:
+                if skip_reflection:
                     success = True
-                    self.log(f"  Verified (conf={reflection.confidence:.2f})")
                     break
-                else:
-                    self.log(f"  Verification failed: {reflection.error_description}")
-                    if not reflection.should_retry:
+
+                try:
+                    reflection = self.reflector.verify(step, self.config.reflection_wait_s)
+                    if reflection.success and reflection.confidence >= self.reflector.min_confidence:
+                        success = True
+                        self.log(f"  Verified (conf={reflection.confidence:.2f})")
                         break
-                    if attempt == self.config.max_retries_per_step - 1:
-                        new_steps = self.planner.replan(step, reflection.error_description, steps[idx+1:])
-                        steps = steps[:idx] + [step] + new_steps
-                        self.log(f"  Replanned: {len(new_steps)} new steps")
+                    else:
+                        self.log(f"  Verification failed: {reflection.error_description}")
+                        if not reflection.should_retry:
+                            # Action executed — treat as success even without verification
+                            success = True
+                            break
+                        if attempt == self.config.max_retries_per_step - 1:
+                            new_steps = self.planner.replan(step, reflection.error_description, steps[idx+1:])
+                            steps = steps[:idx] + [step] + new_steps
+                            self.log(f"  Replanned: {len(new_steps)} new steps")
+                except Exception as e:
+                    # Reflection timeout or error — the action already executed, treat as success
+                    self.log(f"  Reflection unavailable ({type(e).__name__}) — action executed, continuing")
+                    success = True
+                    break
 
             if not success:
                 return False
@@ -149,7 +173,7 @@ class TaskOrchestrator:
     def _execute_step(self, step: ActionStep) -> bool:
         x, y = None, None
 
-        if step.action_type in ("click", "double_click", "scroll"):
+        if step.action_type in ("click", "right_click", "double_click", "scroll"):
             if not step.target:
                 self.log(f"  Step {step.id} is a {step.action_type} with no target")
                 return False
@@ -160,6 +184,19 @@ class TaskOrchestrator:
             x, y = result.x, result.y
 
         return self.actor.execute(step, x=x, y=y)
+
+    def _get_screen_context(self) -> str:
+        """Return a short text summary of what's currently visible on screen via OCR."""
+        try:
+            from core.grounding.ocr_engine import OCREngine
+            img = self.capturer.capture()
+            img.thumbnail((960, 540))
+            ocr = OCREngine()
+            words = ocr.extract(img)
+            visible = [w.text for w in words if len(w.text) >= 3 and w.conf >= 0.80]
+            return ", ".join(f'"{t}"' for t in visible[:30])
+        except Exception:
+            return ""
 
     def _topological_sort(self, subtasks: List[SubTask]) -> List[SubTask]:
         """

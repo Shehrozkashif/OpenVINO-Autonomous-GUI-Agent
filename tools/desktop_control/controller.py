@@ -29,6 +29,11 @@ class DesktopController:
         logger.info(f"[ACTION] click ({x},{y}) → {result}")
         return True
 
+    def right_click(self, x: int, y: int) -> bool:
+        result = self._call("mouse_click", {"x": x, "y": y, "button": "right"})
+        logger.info(f"[ACTION] right_click ({x},{y}) → {result}")
+        return True
+
     def double_click(self, x: int, y: int) -> bool:
         result = self._call("mouse_click", {"x": x, "y": y, "clicks": 2})
         logger.info(f"[ACTION] double_click ({x},{y}) → {result}")

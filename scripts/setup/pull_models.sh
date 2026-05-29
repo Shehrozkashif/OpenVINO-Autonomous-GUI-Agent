@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/setup/pull_models.sh
 # Downloads OpenVINO-optimized models from HuggingFace Hub.
-# Must be run from project root with venv active.
+# These models are loaded directly by the agent via openvino-genai natively.
 
 set -e
 
@@ -19,7 +19,9 @@ import os
 
 MODELS_DIR = os.path.join(os.getcwd(), "models", "OpenVINO")
 models = [
-    ("OpenVINO/Phi-3.5-vision-instruct-int4-ov", "Phi-3.5-vision-instruct-int4-ov"),
+    # VLM: Qwen2.5-VL — trained for UI grounding, gives correct screen coordinates
+    ("OpenVINO/Qwen2.5-VL-7B-Instruct-int4-ov", "Qwen2.5-VL-7B-Instruct-int4-ov"),
+    # LLM: DeepSeek-R1 — used by router and planner for task decomposition
     ("OpenVINO/DeepSeek-R1-Distill-Qwen-7B-int4-ov", "DeepSeek-R1-Distill-Qwen-7B-int4-ov"),
 ]
 for repo_id, local_name in models:

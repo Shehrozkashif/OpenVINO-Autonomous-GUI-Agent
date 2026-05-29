@@ -1,22 +1,27 @@
 # agents/grounding/grounding_agent.py
 """
 UI Grounding Agent — converts natural language element descriptions to screen coordinates.
-Uses Phi-3.5-Vision via OVMS.
+
+Uses a three-stage Hybrid Grounding Engine:
+  Stage 1 — OCR Direct:    Fuzzy-match target text in live OCR output  (conf ~0.95)
+  Stage 2 — VLM → OCR:    VLM identifies text label → OCR locates it   (conf ~0.85)
+  Stage 3 — VLM Zone:     VLM picks screen zone (1-9) → zone center    (conf ~0.50)
+
 """
 import base64
 import io
-import json
-import re
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import imagehash
+import pyautogui
 from loguru import logger
 from PIL import Image
 
 from core.capture.screenshot import ScreenCapture
-from core.pipeline.ovms_client import OVMSClient
+from core.grounding.hybrid_grounding import HybridGroundingEngine
+from core.protocols.a2a import InferenceClient
 
 
 @dataclass
@@ -27,178 +32,143 @@ class GroundingResult:
     found: bool
     latency_ms: float
     target: str
+    method: str = "unknown"
 
 
 class ElementCache:
-    """Cache UI element coordinates to avoid redundant VLM calls."""
+    """Cache UI element coordinates to avoid redundant VLM/OCR calls."""
 
     def __init__(self, ttl_seconds: int = 300):
         self._cache: Dict[str, tuple] = {}
         self._ttl = ttl_seconds
 
-    def get(self, target: str, screen_hash: str) -> Optional[Tuple[int, int]]:
+    def get(self, target: str, screen_hash: str) -> Optional[Tuple[int, int, float, str]]:
         if target not in self._cache:
             return None
-        x, y, ts, cached_hash = self._cache[target]
+        x, y, conf, method, ts, cached_hash = self._cache[target]
         if screen_hash != cached_hash or (time.time() - ts) > self._ttl:
             del self._cache[target]
             return None
-        return x, y
+        return x, y, conf, method
 
-    def put(self, target: str, x: int, y: int, screen_hash: str):
-        self._cache[target] = (x, y, time.time(), screen_hash)
+    def put(self, target: str, x: int, y: int, conf: float, method: str, screen_hash: str):
+        self._cache[target] = (x, y, conf, method, time.time(), screen_hash)
 
     def invalidate(self):
         self._cache.clear()
 
 
-GROUNDING_PROMPT = """Look at this screenshot. Find the UI element: "{target}"
-
-Output ONLY valid JSON in this exact format, no other text:
-{{"x": <integer>, "y": <integer>, "confidence": <float 0.0-1.0>, "found": <true|false>}}
-
-Rules:
-- x, y must be the CENTER pixel of the element
-- confidence 1.0 = certain, 0.0 = not found
-- If element not visible: {{"x": 0, "y": 0, "confidence": 0.0, "found": false}}"""
-
-
 class UIGroundingAgent:
     """
-    The agent's ability to "see" and locate UI elements.
+    Locates UI elements from natural language descriptions using the
+    three-stage Hybrid Grounding Engine (OCR + VLM).
 
-    Workflow per grounding request:
-    1. Check element cache (skip VLM if same screen + same target)
-    2. Capture screenshot
-    3. Send screenshot + prompt to VLM via OVMS
-    4. Parse response → GroundingResult
-    5. Validate coordinates are within screen bounds
-    6. Cache on success
+    Constructor accepts any client that implements `query_vlm()` —
+    both OVMSClient and DirectOpenVINOClient work transparently.
     """
+
+    # Display resolution for VLM input (balance quality vs inference time)
+    _DISPLAY_W = 1280
+    _DISPLAY_H = 720
 
     def __init__(
         self,
-        ovms_client: OVMSClient,
+        ovms_client: InferenceClient,
         capturer: ScreenCapture,
-        min_confidence: float = 0.7
+        min_confidence: float = 0.5,
     ):
-        self.ovms = ovms_client
+        self.client = ovms_client
         self.capturer = capturer
         self.cache = ElementCache()
+        self.engine = HybridGroundingEngine(vlm_client=ovms_client)
         self.min_confidence = min_confidence
-        import pyautogui
         self.screen_w, self.screen_h = pyautogui.size()
+        logger.info(
+            f"[GROUNDING] Initialized. Screen: {self.screen_w}×{self.screen_h}. "
+            f"OCR available: {self.engine.ocr.is_available()}"
+        )
 
-    def ground(self, target: str, max_retries: int = 2) -> GroundingResult:
+    def ground(self, target: str, max_retries: int = 1) -> GroundingResult:
         """
-        Find a UI element by natural language description.
-        target: e.g. "the Save button", "search bar at the top", "X close button"
+        Locate a UI element by natural language description.
+
+        Args:
+            target: e.g. "the Save button", "browser address bar", "File menu"
+            max_retries: number of additional attempts if first fails
+
+        Returns:
+            GroundingResult with (x, y) in screen coordinates.
         """
         start = time.time()
 
-        # Capture + hash for cache lookup
-        screenshot_b64 = self.capturer.capture_as_base64(quality=90)
-        img_data = base64.b64decode(screenshot_b64)
-        img = Image.open(io.BytesIO(img_data))
-        current_hash = str(imagehash.phash(img))
+        # 1. Capture screen
+        screenshot = self.capturer.capture()
+        display = screenshot.copy()
+        display.thumbnail((self._DISPLAY_W, self._DISPLAY_H), Image.LANCZOS)
+        dw, dh = display.width, display.height
 
-        # Check cache
-        cached = self.cache.get(target, current_hash)
+        # 2. Check cache
+        h = str(imagehash.phash(display))
+        cached = self.cache.get(target, h)
         if cached:
-            logger.info(f"[GROUNDING] Cache hit for '{target}' → {cached}")
+            x, y, conf, method = cached
+            logger.info(f"[GROUNDING] Cache hit: '{target}' → ({x},{y}) via {method}")
             return GroundingResult(
-                x=cached[0], y=cached[1], confidence=1.0, found=True,
-                latency_ms=(time.time() - start) * 1000, target=target
+                x=x, y=y, confidence=conf, found=True,
+                latency_ms=(time.time() - start) * 1000,
+                target=target, method=f"cache/{method}"
             )
 
-        prompt = GROUNDING_PROMPT.format(target=target)
+        # 3. Encode display image for VLM
+        img_b64 = self._encode(display)
 
+        # 4. Run hybrid engine
         for attempt in range(max_retries + 1):
             try:
-                resp = self.ovms.query_vlm(
-                    prompt=prompt,
-                    image_base64=screenshot_b64,
-                    max_tokens=60,
-                    temperature=0.1
+                result = self.engine.locate(
+                    target=target,
+                    image=display,
+                    image_b64=img_b64,
+                    screen_w=self.screen_w,
+                    screen_h=self.screen_h,
+                    display_w=dw,
+                    display_h=dh,
                 )
-                result = self._parse_response(resp.content, target, start)
+            except Exception as e:
+                logger.warning(f"[GROUNDING] Attempt {attempt+1} error: {e}")
+                result = None
 
-                if result.found:
-                    # Clamp to screen bounds
-                    result.x = max(0, min(result.x, self.screen_w - 1))
-                    result.y = max(0, min(result.y, self.screen_h - 1))
-                    self.cache.put(target, result.x, result.y, current_hash)
-
+            if result is not None:
+                x, y, conf, method = result
+                # Clamp to screen
+                x = max(0, min(x, self.screen_w - 1))
+                y = max(0, min(y, self.screen_h - 1))
+                self.cache.put(target, x, y, conf, method, h)
                 logger.info(
-                    f"[GROUNDING] '{target}' → ({result.x},{result.y}) "
-                    f"conf={result.confidence:.2f} found={result.found}"
+                    f"[GROUNDING] '{target}' → ({x},{y}) conf={conf:.2f} "
+                    f"method={method} attempt={attempt+1} "
+                    f"latency={1000*(time.time()-start):.0f}ms"
                 )
-                return result
+                return GroundingResult(
+                    x=x, y=y, confidence=conf, found=conf >= self.min_confidence,
+                    latency_ms=(time.time() - start) * 1000,
+                    target=target, method=method
+                )
 
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                logger.warning(f"[GROUNDING] Parse error attempt {attempt+1}: {e}")
-                if attempt == max_retries:
-                    return GroundingResult(
-                        x=0, y=0, confidence=0.0, found=False,
-                        latency_ms=(time.time() - start) * 1000, target=target
-                    )
-
-    def _parse_response(self, text: str, target: str, start: float) -> GroundingResult:
-        """Extract JSON from VLM response (VLMs sometimes add surrounding text)."""
-        json_match = re.search(r'\{[^{}]*\}', text)
-        if json_match:
-            data = json.loads(json_match.group())
-        else:
-            # Fallback: try "x,y" format
-            coord_match = re.search(r'(\d+)\s*,\s*(\d+)', text)
-            if coord_match:
-                data = {
-                    "x": int(coord_match.group(1)),
-                    "y": int(coord_match.group(2)),
-                    "confidence": 0.75,
-                    "found": True
-                }
-            else:
-                raise ValueError(f"Cannot parse VLM response: {text[:100]}")
-
+        logger.warning(f"[GROUNDING] All stages failed for '{target}'")
         return GroundingResult(
-            x=int(data.get("x", 0)),
-            y=int(data.get("y", 0)),
-            confidence=float(data.get("confidence", 0.0)),
-            found=bool(data.get("found", False)),
+            x=0, y=0, confidence=0.0, found=False,
             latency_ms=(time.time() - start) * 1000,
-            target=target
+            target=target, method="failed"
         )
 
     def ground_multiple(self, targets: List[str]) -> List[GroundingResult]:
-        """Ground multiple elements from a single screenshot (more efficient than N calls)."""
-        start = time.time()
-        screenshot_b64 = self.capturer.capture_as_base64(quality=90)
+        """Ground multiple targets — captures screen once, reuses cache for same hash."""
+        return [self.ground(t) for t in targets]
 
-        targets_list = "\n".join(f'{i+1}. "{t}"' for i, t in enumerate(targets))
-        prompt = f"""Look at this screenshot. Find ALL of these UI elements:
-{targets_list}
+    # ── helpers ───────────────────────────────────────────────────────────────
 
-Output ONLY a JSON array, one object per element, in order:
-[{{"target":"...", "x":<int>, "y":<int>, "confidence":<float>, "found":<bool>}}, ...]"""
-
-        try:
-            resp = self.ovms.query_vlm(prompt, screenshot_b64, max_tokens=300)
-            arr_match = re.search(r'\[.*?\]', resp.content, re.DOTALL)
-            if not arr_match:
-                raise ValueError("No JSON array in response")
-            data = json.loads(arr_match.group())
-            results = []
-            for item in data:
-                results.append(GroundingResult(
-                    x=int(item.get("x", 0)),
-                    y=int(item.get("y", 0)),
-                    confidence=float(item.get("confidence", 0.0)),
-                    found=bool(item.get("found", False)),
-                    latency_ms=(time.time() - start) * 1000,
-                    target=item.get("target", "")
-                ))
-            return results
-        except Exception as e:
-            logger.error(f"[GROUNDING] ground_multiple failed: {e} — falling back to individual calls")
-            return [self.ground(t) for t in targets]
+    def _encode(self, image: Image.Image, quality: int = 85) -> str:
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=quality)
+        return base64.b64encode(buf.getvalue()).decode()

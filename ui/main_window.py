@@ -125,8 +125,13 @@ class DesktopGUIAgent(QMainWindow):
         l.addRow("Inference Device:", self.device_combo)
 
         self.vlm_combo = QComboBox()
-        self.vlm_combo.addItems(["Phi-3.5-Vision INT4 (OVMS)", "Direct OpenVINO (Phase 9)"])
-        l.addRow("Vision Model:", self.vlm_combo)
+        self.vlm_combo.addItems([
+            "Ollama (Dev — qwen2.5vl)",   # RTX 2060 / any GPU via Ollama
+            "Direct OpenVINO",             # Intel GPU/NPU via openvino-genai
+            "OVMS",                        # OVMS Docker containers
+        ])
+        self.vlm_combo.setCurrentText(self.settings.value("pipeline", "Ollama (Dev — qwen2.5vl)"))
+        l.addRow("Pipeline Mode:", self.vlm_combo)
 
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(self._save_settings)
@@ -171,9 +176,16 @@ class DesktopGUIAgent(QMainWindow):
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.log_view.clear()
-        threading.Thread(
-            target=self._worker, args=(instruction,), daemon=True
-        ).start()
+        self.showMinimized()
+        # Delay thread start by 500 ms so the window manager fully hides
+        # the agent window before keypresses/clicks begin.  Using QTimer
+        # keeps the main thread responsive (no blocking sleep).
+        QTimer.singleShot(
+            500,
+            lambda: threading.Thread(
+                target=self._worker, args=(instruction,), daemon=True
+            ).start(),
+        )
 
     def _worker(self, instruction: str):
         try:
@@ -198,20 +210,27 @@ class DesktopGUIAgent(QMainWindow):
         )
 
     def _on_done(self, result: dict):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         status = "Task complete" if result["success"] else "Task failed"
-        self.tray.showMessage("Agent", result.get("summary", status), 3000)
+        self.tray.showMessage("Agent", result.get("summary", status), QSystemTrayIcon.MessageIcon.Information, 3000)
         self.history_view.append(
             f"[{result['task_id']}] {'OK' if result['success'] else 'FAIL'} "
             f"({result['elapsed_s']:.1f}s) {result.get('summary', '')}"
         )
 
     def _on_error(self, msg: str):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         QMessageBox.critical(self, "Error", msg)
 
     def _save_settings(self):
         self.settings.setValue("device", self.device_combo.currentText())
+        self.settings.setValue("pipeline", self.vlm_combo.currentText())
         QMessageBox.information(self, "Saved", "Settings saved. Restart to apply.")

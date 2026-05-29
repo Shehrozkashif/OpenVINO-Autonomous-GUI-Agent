@@ -7,11 +7,31 @@ Start with: python -m tools.desktop_control.server
 """
 import base64
 import io
+import platform
 import time
 from typing import Any, Dict
 
+# On Windows, tell the process it is DPI-aware so pyautogui and mss both use
+# physical pixels. Without this, pyautogui uses logical (scaled) coordinates
+# while mss captures physical pixels, causing clicks to land in wrong places
+# on HiDPI displays (e.g. 2K/4K panels common on Intel AI PCs).
+if platform.system() == "Windows":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        pass
+
 import pyautogui
 import mss
+
+# Normalize key names that differ between Linux and Windows
+_KEY_ALIASES: dict = {}
+if platform.system() == "Windows":
+    _KEY_ALIASES = {
+        "super": "winleft",
+        "win":   "winleft",
+    }
 from fastapi import FastAPI, HTTPException
 from PIL import Image
 from pydantic import BaseModel
@@ -69,6 +89,7 @@ def type_text(text: str, interval: float = 0.05) -> dict:
 @tool
 def press_key(key: str) -> dict:
     """Press a single key. Examples: enter, escape, tab, f5, delete."""
+    key = _KEY_ALIASES.get(key.lower(), key)
     pyautogui.press(key)
     return {"key": key}
 
@@ -76,6 +97,7 @@ def press_key(key: str) -> dict:
 @tool
 def hotkey(keys: list) -> dict:
     """Press key combination. Example: keys=["ctrl", "s"] for Ctrl+S."""
+    keys = [_KEY_ALIASES.get(k.lower(), k) for k in keys]
     pyautogui.hotkey(*keys)
     return {"hotkey": "+".join(keys)}
 
@@ -91,7 +113,7 @@ def scroll(x: int, y: int, clicks: int = 3, direction: str = "down") -> dict:
 @tool
 def screenshot() -> dict:
     """Capture screen and return base64 JPEG."""
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         raw = sct.grab(sct.monitors[1])
         img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
     buf = io.BytesIO()

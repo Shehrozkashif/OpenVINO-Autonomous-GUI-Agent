@@ -15,12 +15,12 @@ class ScreenCapture:
 
     def capture(self) -> Image.Image:
         """Capture full screen as PIL Image."""
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             raw = sct.grab(sct.monitors[self.monitor])
             return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
     def capture_as_base64(self, quality: int = 85) -> str:
-        """Capture screen and return as base64 JPEG string (for sending to OVMS)."""
+        """Capture screen and return as base64 JPEG string (for sending to VLM)."""
         img = self.capture()
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)
@@ -32,7 +32,7 @@ class ScreenCapture:
 
     def capture_region(self, x: int, y: int, width: int, height: int) -> Image.Image:
         """Capture a specific screen region (for Reflection Agent zoom-in)."""
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             raw = sct.grab({"left": x, "top": y, "width": width, "height": height})
             return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
@@ -66,6 +66,6 @@ class ScreenCapture:
         """
         import pyautogui
         logical_w, _ = pyautogui.size()     # OS logical resolution
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             physical_w = sct.monitors[self.monitor]["width"]  # actual pixels
         return physical_w / logical_w        # typically 1.0 or 2.0
