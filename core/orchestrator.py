@@ -92,6 +92,9 @@ class TaskOrchestrator:
             if success:
                 completed.append(subtask.id)
                 self.log(f"[SUBTASK {subtask.id}] Complete")
+                # Give the OS time to settle (window open, page load, etc.)
+                # before the next subtask captures its screen context.
+                time.sleep(4.0)
             else:
                 self.log(f"[SUBTASK {subtask.id}] Failed — stopping task")
                 failed = True
@@ -124,11 +127,9 @@ class TaskOrchestrator:
             step = steps[idx]
             self.log(f"  Step {step.id}: [{step.action_type}] {step.description}")
 
-            # Skip VLM reflection for actions that don't need visual verification.
-            # Reflection calls qwen2.5vl (CPU, ~160s) — avoid for fast/keyboard steps.
-            # For click/right_click we DO attempt reflection but treat timeout as success
-            # so a slow model swap doesn't crash the whole task.
-            skip_reflection = step.action_type in ("key_press", "type", "hotkey", "wait", "scroll", "double_click")
+            # Every step is verified by VLM after execution.
+            # Only 'wait' is skipped — there is nothing visual to check after a sleep.
+            skip_reflection = step.action_type == "wait"
 
             success = False
             for attempt in range(self.config.max_retries_per_step):
@@ -145,14 +146,25 @@ class TaskOrchestrator:
 
                 try:
                     reflection = self.reflector.verify(step, self.config.reflection_wait_s)
-                    if reflection.success and reflection.confidence >= self.reflector.min_confidence:
+                    # 'type' and 'hotkey': VLM often can't confirm small text fields
+                    # or transient hotkey effects. Only fail at very high confidence (≥0.95).
+                    # 'key_press: enter/super': also high threshold — app launch timing varies.
+                    _key = (step.key or "").lower()
+                    _is_launcher_key = step.action_type == "key_press" and _key in ("super", "enter")
+                    if step.action_type in ("type", "hotkey") or _is_launcher_key:
+                        fail_threshold = 0.95
+                    else:
+                        fail_threshold = self.reflector.min_confidence
+                    if reflection.success or reflection.confidence < fail_threshold:
                         success = True
-                        self.log(f"  Verified (conf={reflection.confidence:.2f})")
+                        conf_str = f"{reflection.confidence:.2f}"
+                        state = "Verified" if reflection.success else "Uncertain→proceeding"
+                        self.log(f"  {state} (conf={conf_str})")
+                        time.sleep(0.4)   # let OS process the action before next step
                         break
                     else:
                         self.log(f"  Verification failed: {reflection.error_description}")
                         if not reflection.should_retry:
-                            # Action executed — treat as success even without verification
                             success = True
                             break
                         if attempt == self.config.max_retries_per_step - 1:
@@ -160,8 +172,7 @@ class TaskOrchestrator:
                             steps = steps[:idx] + [step] + new_steps
                             self.log(f"  Replanned: {len(new_steps)} new steps")
                 except Exception as e:
-                    # Reflection timeout or error — the action already executed, treat as success
-                    self.log(f"  Reflection unavailable ({type(e).__name__}) — action executed, continuing")
+                    self.log(f"  Reflection error ({type(e).__name__}) — treating as success")
                     success = True
                     break
 
@@ -186,15 +197,31 @@ class TaskOrchestrator:
         return self.actor.execute(step, x=x, y=y)
 
     def _get_screen_context(self) -> str:
-        """Return a short text summary of what's currently visible on screen via OCR."""
+        """Return a short list of UI labels currently visible on screen via OCR.
+
+        Only includes short words (≤ 25 chars) that look like UI labels — not
+        long terminal lines or code, which confuse the planner/router.
+        """
         try:
             from core.grounding.ocr_engine import OCREngine
             img = self.capturer.capture()
             img.thumbnail((960, 540))
             ocr = OCREngine()
             words = ocr.extract(img)
-            visible = [w.text for w in words if len(w.text) >= 3 and w.conf >= 0.80]
-            return ", ".join(f'"{t}"' for t in visible[:30])
+            # Keep short, high-confidence tokens that look like UI labels
+            visible = [
+                w.text for w in words
+                if 2 <= len(w.text) <= 25
+                and w.conf >= 0.85
+                and not any(c in w.text for c in ('/', '\\', '=', '{', '}', '$', '#'))
+            ]
+            # Deduplicate while preserving order
+            seen, unique = set(), []
+            for t in visible:
+                if t.lower() not in seen:
+                    seen.add(t.lower())
+                    unique.append(t)
+            return ", ".join(f'"{t}"' for t in unique[:25])
         except Exception:
             return ""
 

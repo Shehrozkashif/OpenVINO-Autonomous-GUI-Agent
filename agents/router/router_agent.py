@@ -10,21 +10,40 @@ from loguru import logger
 
 from core.protocols.a2a import InferenceClient, SubTask
 
-ROUTER_SYSTEM_PROMPT = """You are a desktop automation task coordinator. /no_think
-Break down user instructions into the MINIMUM number of sub-tasks needed.
+_SUBTASK_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "id":          {"type": "integer"},
+            "description": {"type": "string"},
+            "depends_on":  {"type": "array", "items": {"type": "integer"}},
+        },
+        "required": ["id", "description", "depends_on"],
+    },
+}
+
+ROUTER_SYSTEM_PROMPT = """You are a desktop automation task coordinator.
+Break down user instructions into sub-tasks — one distinct action per sub-task.
 
 Rules:
-1. Each sub-task is one coherent action
-2. Sub-tasks in logical order with depends_on set correctly
-3. NEVER add wait, verify, confirm, close, or exit steps unless explicitly asked
-4. "click X" or "type X" = exactly 1 sub-task if X is already visible on screen
-5. "open X and do Y" = 2 sub-tasks maximum
-6. Every object MUST have: id (integer), description (string), depends_on (array)
+1. Each sub-task must describe ONE distinct action (open app, click element, type text, navigate, etc.)
+2. Sub-tasks in logical order; set depends_on correctly so later steps wait for earlier ones
+3. NEVER merge two different actions into one sub-task (e.g. "open app and type text" = 2 sub-tasks)
+4. NEVER add wait, verify, confirm, or close steps unless explicitly asked
+5. Every object MUST have: id (integer), description (string), depends_on (integer array)
 
-IMPORTANT — output valid JSON only. Use double quotes for all strings. Example:
-[
-  {"id": 1, "description": "click the Issues tab", "depends_on": []}
-]"""
+DECOMPOSITION EXAMPLES:
+  "open Firefox and go to wikipedia.org"
+    → [{"id":1,"description":"open Firefox","depends_on":[]},
+       {"id":2,"description":"navigate to wikipedia.org in Firefox","depends_on":[1]}]
+
+  "open Files and navigate to Downloads"
+    → [{"id":1,"description":"open the Files file manager","depends_on":[]},
+       {"id":2,"description":"click on the Downloads folder","depends_on":[1]}]
+
+  "take a screenshot"
+    → [{"id":1,"description":"take a screenshot","depends_on":[]}]"""
 
 
 class RouterAgent:
@@ -48,8 +67,19 @@ class RouterAgent:
             {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
-        resp = self.ovms.query_llm(messages, max_tokens=512, temperature=0.1)
-        subtasks = self._parse_subtasks(resp.content)
+        resp = self.ovms.query_llm(messages, max_tokens=512, temperature=0.1,
+                                   response_schema=_SUBTASK_SCHEMA)
+        try:
+            subtasks = self._parse_subtasks(resp.content)
+        except (ValueError, json.JSONDecodeError):
+            logger.warning("[ROUTER] Parse failed — retrying with schema-only prompt")
+            retry_messages = [
+                {"role": "system", "content": "Output ONLY a JSON array of sub-tasks."},
+                {"role": "user", "content": f"Sub-tasks for: {instruction}"},
+            ]
+            resp = self.ovms.query_llm(retry_messages, max_tokens=512, temperature=0.0,
+                                       response_schema=_SUBTASK_SCHEMA)
+            subtasks = self._parse_subtasks(resp.content)
 
         logger.info(f"[ROUTER] Decomposed into {len(subtasks)} sub-tasks:")
         for st in subtasks:
@@ -90,8 +120,8 @@ class RouterAgent:
 
     def summarize_completion(self, task_id: str, completed: list, success: bool) -> str:
         messages = [
-            {"role": "system", "content": "Write a brief one-line task summary."},
-            {"role": "user", "content": f"Task {'succeeded' if success else 'failed'}. Sub-tasks: {completed}."},
+            {"role": "system", "content": "Write a brief one-line task summary. No JSON."},
+            {"role": "user", "content": f"Task {'succeeded' if success else 'failed'}. Sub-tasks completed: {completed}."},
         ]
         resp = self.ovms.query_llm(messages, max_tokens=100, temperature=0.3)
         return re.sub(r"<think>.*?</think>", "", resp.content, flags=re.DOTALL).strip()

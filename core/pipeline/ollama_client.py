@@ -1,20 +1,21 @@
 # core/pipeline/ollama_client.py
 """
-Dual-backend setup for AMD GPU server (48GB VRAM total).
+Dual-backend setup for local GPU inference.
 
-LLM (text reasoning):   llama3.1:8b via Ollama  — ~4.7GB VRAM, fast planning/routing
-VLM (visual grounding): UI-TARS-1.5-7B via vLLM — ~14GB VRAM, 94.2% ScreenSpot-V2
+LLM (text reasoning):   qwen3:14b via Ollama       — planning, routing, reflection
+VLM (visual grounding): UI-TARS-1.5-7B via vLLM    — primary (port 8000, if running)
+                        qwen2.5vl:7b via Ollama     — auto-fallback when vLLM absent
 
-Why two backends:
-  UI-TARS-1.5-7B is purpose-built for GUI grounding (beats OpenAI CUA on benchmarks)
-  but is not available on Ollama. vLLM exposes the same OpenAI-compatible /v1 API.
+Auto-detection at startup: if vLLM (port 8000) is not reachable, VLM queries are
+routed to Ollama with qwen2.5vl:7b — same Qwen2.5-VL base architecture as UI-TARS.
 
 Setup:
-    # LLM — Ollama (port 11434)
-    ollama pull llama3.1:8b
+    # LLM + VLM (Ollama-only, no Docker/vLLM needed)
+    ollama pull qwen3:14b
+    ollama pull qwen2.5vl:7b
     ollama serve
 
-    # VLM — vLLM (port 8000)
+    # Optional: UI-TARS via vLLM for best GUI grounding accuracy
     pip install vllm
     vllm serve ByteDance-Seed/UI-TARS-1.5-7B --port 8000
 """
@@ -26,24 +27,46 @@ from loguru import logger
 
 from core.pipeline.ovms_client import OVMSResponse
 
-_DEFAULT_LLM = "qwen3:14b"                          # best JSON reasoning, 9GB VRAM
-_DEFAULT_VLM = "ByteDance-Seed/UI-TARS-1.5-7B"     # 94.2% GUI grounding, 14GB VRAM
+_DEFAULT_LLM = "qwen3:14b"
+_DEFAULT_VLM_VLLM = "ByteDance-Seed/UI-TARS-1.5-7B"   # vLLM primary
+_DEFAULT_VLM_OLLAMA = "qwen2.5vl-gui"                  # Ollama fallback (4096-ctx, GPU-friendly)
 
 _DEFAULT_LLM_BASE_URL = "http://localhost:11434"   # Ollama
 _DEFAULT_VLM_BASE_URL = "http://localhost:8000"    # vLLM
 
 
+def _pick_ollama_vlm(ollama_base_url: str) -> str:
+    """Return the best available vision model from Ollama.
+
+    Prefers qwen2.5vl-gui (4096-ctx build) so the VLM loads on GPU.
+    Falls back to full qwen2.5vl:7b or llava variants if not available.
+    """
+    # Base prefixes in priority order — matched with or without tag suffix
+    preferred_bases = ["qwen2.5vl-gui", "qwen2.5vl", "llava"]
+    try:
+        r = httpx.get(f"{ollama_base_url}/api/tags", timeout=3.0)
+        if r.status_code == 200:
+            pulled = [m["name"] for m in r.json().get("models", [])]
+            for base in preferred_bases:
+                match = next((m for m in pulled if m == base or m.startswith(base + ":") or m.startswith(base + "-")), None)
+                if match:
+                    return match
+    except Exception:
+        pass
+    return _DEFAULT_VLM_OLLAMA
+
+
 class OllamaClient:
     """
     Dual-backend client.
-    - query_llm() → Ollama (llama3.1:8b) for planning, routing, reflection
-    - query_vlm() → vLLM  (UI-TARS-1.5-7B) for visual grounding
-    Both use the OpenAI-compatible /v1/chat/completions endpoint.
+    - query_llm() → Ollama (qwen3:14b) for planning, routing, reflection
+    - query_vlm() → vLLM (UI-TARS) if running, else Ollama (qwen2.5vl:7b)
+    Both backends use the OpenAI-compatible /v1/chat/completions endpoint.
     """
 
     def __init__(
         self,
-        vlm_model: str = _DEFAULT_VLM,
+        vlm_model: str = None,
         llm_model: str = _DEFAULT_LLM,
         llm_base_url: str = _DEFAULT_LLM_BASE_URL,
         vlm_base_url: str = _DEFAULT_VLM_BASE_URL,
@@ -51,11 +74,32 @@ class OllamaClient:
         base_url: str = None,
         timeout: float = 600.0,
     ):
-        self.vlm_model = vlm_model
         self.llm_model = llm_model
         self.llm_base_url = base_url or llm_base_url
-        self.vlm_base_url = base_url or vlm_base_url
         self.client = httpx.Client(timeout=timeout)
+
+        # Auto-detect VLM backend: prefer vLLM (UI-TARS), fall back to Ollama
+        _vlm_url = base_url or vlm_base_url
+        _vllm_available = False
+        try:
+            r = self.client.get(f"{_vlm_url}/v1/models", timeout=2.0)
+            if r.status_code == 200:
+                _vllm_available = True
+        except Exception:
+            pass
+
+        if _vllm_available:
+            self.vlm_base_url = _vlm_url
+            self.vlm_model = vlm_model or _DEFAULT_VLM_VLLM
+            logger.info(f"[OllamaClient] VLM backend: vLLM ({self.vlm_model}) at {self.vlm_base_url}")
+        else:
+            # Fall back to Ollama for VLM — same endpoint, different model
+            self.vlm_base_url = self.llm_base_url
+            self.vlm_model = vlm_model or _pick_ollama_vlm(self.llm_base_url)
+            logger.info(
+                f"[OllamaClient] vLLM not detected — VLM via Ollama: {self.vlm_model} "
+                f"at {self.vlm_base_url}"
+            )
 
     def query_vlm(
         self,
@@ -105,58 +149,85 @@ class OllamaClient:
         messages: List[dict],
         max_tokens: int = 1024,
         temperature: float = 0.7,
+        response_schema: dict = None,
     ) -> OVMSResponse:
-        """Send text messages to qwen3:14b (Ollama) for planning and reasoning."""
+        """Send text messages to the LLM via Ollama's native /api/chat.
+
+        Uses Ollama native API (not OpenAI-compat) so we can pass:
+          think=False  — prevents qwen3 from filling content with chain-of-thought
+          format=schema — structured output via JSON Schema (guarantees correct structure)
+
+        response_schema: optional JSON Schema dict; if provided enforces output structure.
+        """
         start = time.time()
         payload = {
             "model": self.llm_model,
             "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
             "stream": False,
+            "think": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
         }
-        resp = self.client.post(f"{self.llm_base_url}/v1/chat/completions", json=payload)
+        if response_schema is not None:
+            payload["format"] = response_schema
+
+        resp = self.client.post(f"{self.llm_base_url}/api/chat", json=payload)
         resp.raise_for_status()
         data = resp.json()
-        content = data["choices"][0]["message"]["content"]
+        content = data.get("message", {}).get("content") or ""
         latency_ms = (time.time() - start) * 1000
         logger.debug(f"[LLM] → {content[:100]} ({latency_ms:.0f}ms)")
         return OVMSResponse(
             content=content,
             model=self.llm_model,
             latency_ms=latency_ms,
-            tokens_generated=data.get("usage", {}).get("completion_tokens", 0),
+            tokens_generated=data.get("eval_count", 0),
         )
 
     def check_health(self) -> dict:
         results = {}
-        # Check Ollama (LLM)
+        _vlm_via_ollama = self.vlm_base_url == self.llm_base_url
+
+        # Check Ollama (always used for LLM; also VLM when vLLM is absent)
         try:
             r = self.client.get(f"{self.llm_base_url}/api/tags", timeout=5.0)
             if r.status_code == 200:
                 pulled = [m["name"] for m in r.json().get("models", [])]
-                base = self.llm_model.split(":")[0]
-                ok = any(base in m for m in pulled)
+
+                # LLM check
+                llm_base = self.llm_model.split(":")[0]
+                llm_ok = any(llm_base in m for m in pulled)
                 results[f"LLM ({self.llm_model})"] = (
-                    "OK" if ok else f"NOT PULLED — run: ollama pull {self.llm_model}"
+                    "OK" if llm_ok else f"NOT PULLED — run: ollama pull {self.llm_model}"
                 )
+
+                # VLM via Ollama check
+                if _vlm_via_ollama:
+                    vlm_base = self.vlm_model.split(":")[0]
+                    vlm_ok = any(vlm_base in m for m in pulled)
+                    results[f"VLM ({self.vlm_model}) via Ollama"] = (
+                        "OK" if vlm_ok else f"NOT PULLED — run: ollama pull {self.vlm_model}"
+                    )
             else:
                 results["Ollama"] = f"HTTP {r.status_code}"
         except Exception as e:
-            results["Ollama (LLM)"] = f"UNREACHABLE — is 'ollama serve' running? ({e})"
+            results["Ollama"] = f"UNREACHABLE — is 'ollama serve' running? ({e})"
 
-        # Check vLLM (VLM)
-        try:
-            r = self.client.get(f"{self.vlm_base_url}/v1/models", timeout=5.0)
-            if r.status_code == 200:
-                models = [m["id"] for m in r.json().get("data", [])]
-                ok = any(self.vlm_model in m for m in models)
-                results[f"VLM ({self.vlm_model})"] = (
-                    "OK" if ok else f"NOT LOADED — run: vllm serve {self.vlm_model} --port 8000"
-                )
-            else:
-                results["vLLM (VLM)"] = f"HTTP {r.status_code}"
-        except Exception as e:
-            results["vLLM (VLM)"] = f"UNREACHABLE — is 'vllm serve' running? ({e})"
+        # Check vLLM only when it's the active VLM backend
+        if not _vlm_via_ollama:
+            try:
+                r = self.client.get(f"{self.vlm_base_url}/v1/models", timeout=5.0)
+                if r.status_code == 200:
+                    models = [m["id"] for m in r.json().get("data", [])]
+                    ok = any(self.vlm_model in m for m in models)
+                    results[f"VLM ({self.vlm_model}) via vLLM"] = (
+                        "OK" if ok else f"NOT LOADED — run: vllm serve {self.vlm_model} --port 8000"
+                    )
+                else:
+                    results["vLLM"] = f"HTTP {r.status_code}"
+            except Exception as e:
+                results["vLLM"] = f"UNREACHABLE — is 'vllm serve' running? ({e})"
 
         return results

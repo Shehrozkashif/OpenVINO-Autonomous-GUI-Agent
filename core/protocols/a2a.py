@@ -71,6 +71,7 @@ class InferenceClient(Protocol):
         messages: List[dict],
         max_tokens: int = 1024,
         temperature: float = 0.7,
+        response_schema: dict = None,
     ) -> OVMSResponse: ...
 
     def query_vlm(

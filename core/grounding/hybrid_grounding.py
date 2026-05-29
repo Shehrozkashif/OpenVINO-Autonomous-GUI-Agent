@@ -132,22 +132,23 @@ class HybridGroundingEngine:
             if result:
                 return result
 
-        # ── Stage 2: VLM semantic → OCR ──────────────────────────────────────
-        if self.vlm and words:
-            result = self._stage2_vlm_semantic_ocr(
-                target, image_b64, words, scale_x, scale_y
+        # ── Stage 2: VLM direct coordinate prediction ────────────────────────
+        # Ask VLM for exact normalized (x,y) coordinates.  Runs before semantic
+        # OCR because qwen2.5vl reliably outputs pixel-level locations for any
+        # visible element — icons, fields, toolbars — not just text labels.
+        if self.vlm:
+            result = self._stage4_vlm_coords(
+                target, image_b64, screen_w, screen_h
             )
             if result:
                 return result
 
-        # ── Stage 3: VLM Coordinate Prediction ───────────────────────────────
-        # Ask VLM directly for normalized (0-1) coordinates of the target.
-        # More reliable than SoM for small models — no region-number reasoning needed.
-        # NOTE: SoM removed — it consistently fails with models <7B because the model
-        # defaults to region #1 regardless of the actual target location.
-        if self.vlm:
-            result = self._stage4_vlm_coords(
-                target, image_b64, screen_w, screen_h
+        # ── Stage 3: VLM semantic → OCR ──────────────────────────────────────
+        # Ask VLM what text label the element shows, then locate that text with
+        # OCR.  Useful when the VLM coord stage returned low-confidence or None.
+        if self.vlm and words:
+            result = self._stage2_vlm_semantic_ocr(
+                target, image_b64, words, scale_x, scale_y
             )
             if result:
                 return result
@@ -232,62 +233,6 @@ class HybridGroundingEngine:
             logger.warning(f"[Hybrid/S2] Error: {e}")
         return None
 
-    def _stage3_som(
-        self,
-        target: str,
-        image: Image.Image,
-        screen_w: int,
-        screen_h: int,
-        display_w: int,
-        display_h: int,
-    ) -> Optional[Tuple[int, int, float, str]]:
-        """
-        Stage 3: Set-of-Mark (SoM) region selection.
-        """
-        try:
-            regions = self.som.detect_regions(image)
-            if not regions:
-                logger.debug("[Hybrid/S3-SoM] No candidate regions detected.")
-                return None
-            
-            annotated_img = self.som.annotate(image, regions)
-            buf = io.BytesIO()
-            annotated_img.save(buf, format="JPEG", quality=85)
-            annotated_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-            
-            prompt = (
-                f"Look at this screenshot where interactive elements are outlined and numbered.\n"
-                f"I want to select the element described as: \"{target}\".\n"
-                f"Which number box (1 to {len(regions)}) corresponds to that element?\n"
-                f"Reply with ONLY the integer number, e.g. '7'."
-            )
-            
-            resp = self.vlm.query_vlm(
-                prompt=prompt,
-                image_base64=annotated_b64,
-                max_tokens=5,
-                temperature=0.05
-            )
-            
-            index = self.som.parse_region_number(resp.content, len(regions))
-            if index is not None:
-                region = self.som.get_region(regions, index)
-                if region:
-                    scale_x = screen_w / display_w
-                    scale_y = screen_h / display_h
-                    x = int(region.cx * scale_x)
-                    y = int(region.cy * scale_y)
-                    logger.info(
-                        f"[Hybrid/S3-SoM] '{target}' → Selected Region #{index} "
-                        f"at screen({x},{y})"
-                    )
-                    return (x, y, 0.75, "som")
-            else:
-                logger.debug(f"[Hybrid/S3-SoM] VLM responded with invalid index: '{resp.content}'")
-        except Exception as e:
-            logger.warning(f"[Hybrid/S3-SoM] Error: {e}")
-        return None
-
     def _stage4_vlm_coords(
         self,
         target: str,
@@ -352,7 +297,7 @@ class HybridGroundingEngine:
                 x_norm = float(data.get("x", 0.0))
                 y_norm = float(data.get("y", 0.0))
                 conf = float(data.get("confidence", 0.7))
-                if 0.0 < x_norm < 1.0 and 0.0 < y_norm < 1.0:
+                if 0.0 <= x_norm <= 1.0 and 0.0 <= y_norm <= 1.0:
                     return (int(x_norm * screen_w), int(y_norm * screen_h), conf)
             except (json.JSONDecodeError, ValueError):
                 pass

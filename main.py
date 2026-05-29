@@ -103,7 +103,7 @@ def build_orchestrator() -> TaskOrchestrator:
         reflector=reflector,
         capturer=capturer,
         task_memory=memory,
-        config=OrchestratorConfig(max_retries_per_step=3, reflection_wait_s=0.5)
+        config=OrchestratorConfig(max_retries_per_step=3, reflection_wait_s=1.5)
     )
 
 

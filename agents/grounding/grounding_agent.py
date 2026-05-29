@@ -15,11 +15,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import imagehash
-import pyautogui
 from loguru import logger
 from PIL import Image
 
-from core.capture.screenshot import ScreenCapture
+from core.capture.screenshot import ScreenCapture, _screen_size
 from core.grounding.hybrid_grounding import HybridGroundingEngine
 from core.protocols.a2a import InferenceClient
 
@@ -82,7 +81,7 @@ class UIGroundingAgent:
         self.cache = ElementCache()
         self.engine = HybridGroundingEngine(vlm_client=ovms_client)
         self.min_confidence = min_confidence
-        self.screen_w, self.screen_h = pyautogui.size()
+        self.screen_w, self.screen_h = _screen_size()
         logger.info(
             f"[GROUNDING] Initialized. Screen: {self.screen_w}×{self.screen_h}. "
             f"OCR available: {self.engine.ocr.is_available()}"

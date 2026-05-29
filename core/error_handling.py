@@ -4,15 +4,23 @@ Recovery strategies for common failure modes.
 Each recovery function is called by the Orchestrator when a failure is detected.
 """
 import time
-import pyautogui
 from loguru import logger
+from pynput.keyboard import Key, Controller as KeyboardController
+
+_kb = KeyboardController()
+
+
+def _press(key):
+    _kb.press(key)
+    time.sleep(0.05)
+    _kb.release(key)
 
 
 def escape_unexpected_dialogs():
     """Press Escape to dismiss any unexpected modal dialogs."""
-    pyautogui.press("escape")
+    _press(Key.esc)
     time.sleep(0.3)
-    pyautogui.press("escape")  # twice in case first one was consumed
+    _press(Key.esc)  # twice in case first one was consumed
     logger.info("[RECOVERY] Pressed Escape to dismiss dialogs")
 
 

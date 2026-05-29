@@ -24,20 +24,84 @@ class ReflectionResult:
     recovery_hint: str
 
 
-REFLECTION_PROMPT_TEMPLATE = """An automated agent just performed this desktop action:
-Action: {description}
-Expected result: {verification}
+REFLECTION_PROMPT_TEMPLATE = """An automated desktop agent just performed this action:
 
-Look at this screenshot (taken AFTER the action).
-Did the action succeed? Output ONLY JSON:
+  Action type : {action_type}
+  Description : {description}
+  What to verify: {verification}
+
+Look carefully at the screenshot taken RIGHT AFTER the action.
+Answer: did the action succeed based on what you see?
+
+Output ONLY valid JSON — no prose:
 {{
-  "success": true|false,
-  "confidence": <float 0.0-1.0>,
-  "observation": "<what you see that confirms or denies success>",
-  "error_description": "<what went wrong, or empty string if success>",
-  "should_retry": true|false,
-  "recovery_hint": "<suggestion for recovery if failed, or empty string>"
+  "success": true or false,
+  "confidence": <float 0.0–1.0>,
+  "observation": "<one sentence: exactly what you see that supports your answer>",
+  "error_description": "<what is wrong if success=false, else empty string>",
+  "should_retry": true or false,
+  "recovery_hint": "<one concrete suggestion if failed, else empty string>"
 }}"""
+
+
+def _infer_verification(step) -> str:
+    """Generate a specific visual check when step.verification is empty."""
+    key = (step.key or "").lower()
+    val = (step.value or "")
+    desc = step.description.lower()
+
+    if step.action_type == "key_press":
+        if key == "super":
+            return "GNOME Activities search overlay appeared (search bar is visible at top)"
+        if key == "enter":
+            if any(w in desc for w in ("launch", "open", "start", "run")):
+                return "the target application window opened and is visible on screen"
+            return "the Enter key was accepted (form submitted, selection confirmed, or next screen appeared)"
+        if key in ("escape", "esc"):
+            return "the dialog, popup, or overlay was dismissed and is no longer visible"
+        if key.startswith("f") and key[1:].isdigit():
+            return f"the {key.upper()} key action took effect on screen"
+        return f"pressing '{key}' had the expected visual effect on screen"
+
+    if step.action_type == "hotkey":
+        if any(p in key for p in ("print_screen", "print", "prtsc")):
+            return ("the print screen key was sent — success means either: a screenshot tool "
+                    "dialog appeared, or a notification appeared, or the screen briefly flashed. "
+                    "If no ERROR dialog appeared, treat it as success.")
+        if "ctrl+s" in key:
+            return "the file was saved (title bar no longer shows an unsaved indicator)"
+        if "ctrl+alt+t" in key or "ctrl+t" in key:
+            return "a terminal or new tab window opened and is visible"
+        if "ctrl+z" in key:
+            return "the previous action was undone (visible change on screen)"
+        if "ctrl+c" in key or "ctrl+v" in key:
+            return "the clipboard operation completed"
+        if "alt+f4" in key:
+            return "the active window closed"
+        return f"the keyboard shortcut '{key}' produced the expected visual change"
+
+    if step.action_type == "type":
+        if val:
+            preview = val[:30]
+            return (
+                f"After typing '{preview}': the text appears in the active field, OR "
+                f"the interface responded (search results appeared, suggestions showed up, "
+                f"or the display changed to reflect the input). Any visible response counts as success."
+            )
+        return "the typed text or a response to the input is visible on screen"
+
+    if step.action_type in ("click", "double_click"):
+        target = step.target or step.description
+        return f"'{target[:50]}' responded to the click — a visual change, new window, or focus change is visible"
+
+    if step.action_type == "right_click":
+        return "a context menu appeared on screen after the right-click"
+
+    if step.action_type == "scroll":
+        direction = val or "down"
+        return f"the content scrolled {direction} — different items are visible than before"
+
+    return "the action completed and a visible change occurred on screen"
 
 
 class ReflectionAgent:
@@ -54,7 +118,7 @@ class ReflectionAgent:
     def verify(
         self,
         step: ActionStep,
-        wait_s: float = 0.5
+        wait_s: float = 1.5
     ) -> ReflectionResult:
         """
         Verify if an action step succeeded.
@@ -64,12 +128,25 @@ class ReflectionAgent:
         3. Ask VLM: "Given the action taken, does the after screenshot show success?"
         4. Parse and return result
         """
-        time.sleep(wait_s)
+        # Key/type actions: give UI time to render.
+        # Enter key to launch apps needs longer — most apps take 2-3s to open.
+        key = (step.key or "").lower()
+        is_app_launch = step.action_type == "key_press" and key == "enter" and \
+            any(w in step.description.lower() for w in ("launch", "open", "start", "run"))
+        if is_app_launch:
+            actual_wait = max(wait_s, 2.5)
+        elif step.action_type in ("key_press", "hotkey", "type"):
+            actual_wait = max(wait_s, 1.5)
+        else:
+            actual_wait = wait_s
+        time.sleep(actual_wait)
         after_b64 = self.capturer.capture_as_base64(quality=85)
 
+        verification = step.verification if step.verification else _infer_verification(step)
         prompt = REFLECTION_PROMPT_TEMPLATE.format(
+            action_type=step.action_type,
             description=step.description,
-            verification=step.verification or "action completed without error"
+            verification=verification,
         )
 
         resp = self.ovms.query_vlm(
@@ -98,15 +175,27 @@ class ReflectionAgent:
         else:
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         
-        json_match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        # Extract outermost JSON object — handles nested braces (e.g. nested dicts).
+        # The [^{}]* pattern fails on nesting; instead find the first '{' and scan
+        # forward counting braces to find the matching '}'.
         data = {}
-        if json_match:
-            try:
-                # Fix trailing commas
-                json_str = re.sub(r",\s*([\]}])", r"\1", json_match.group())
-                data = json.loads(json_str)
-            except json.JSONDecodeError:
-                pass
+        start = text.find('{')
+        if start != -1:
+            depth, end = 0, -1
+            for i, ch in enumerate(text[start:], start):
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end != -1:
+                try:
+                    json_str = re.sub(r",\s*([\]}])", r"\1", text[start:end + 1])
+                    data = json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
                 
         if not data:
             text_lower = text.lower()
