@@ -89,9 +89,12 @@ def start_ollama():
 
 # ── 3. Check / pull models ────────────────────────────────────────────────────
 REQUIRED_MODELS = {
-    "qwen3:14b":       "LLM  — planning, routing, reflection",
-    "qwen2.5vl-gui":   "VLM  — visual grounding & verification",
+    "qwen3:14b":            "LLM  — planning, routing, reflection",
+    "ui-tars-1.5-7b-gui":   "VLM  — visual grounding & verification",
 }
+
+# Name of the GGUF file that must sit next to start.py
+UITARS_GGUF_NAME = "ui-tars-1.5-7b-q4_k_m.gguf"
 
 def get_pulled_models() -> list:
     try:
@@ -103,26 +106,63 @@ def get_pulled_models() -> list:
 
 
 def ensure_vlm_model(pulled: list) -> bool:
-    """Create qwen2.5vl-gui (4096-ctx GPU build) from qwen2.5vl:7b if needed."""
-    has_gui = any("qwen2.5vl-gui" in m for m in pulled)
+    """
+    Register ui-tars-1.5-7b-gui with Ollama from a local GGUF file.
+
+    Before running for the first time, download the GGUF with:
+        huggingface-cli download Mungert/UI-TARS-1.5-7B \\
+            --include "*.gguf" \\
+            --local-dir . \\
+            --local-dir-use-symlinks False
+    Then rename the downloaded file to: ui-tars-1.5-7b-q4_k_m.gguf
+    """
+    has_gui = any("ui-tars-1.5-7b-gui" in m for m in pulled)
     if has_gui:
         return True
 
-    # Need base model first
-    has_base = any("qwen2.5vl" in m for m in pulled)
-    if not has_base:
-        print(_yellow("  [PULL] Downloading qwen2.5vl:7b (~6 GB) — first run only..."))
-        ret = subprocess.run(["ollama", "pull", "qwen2.5vl:7b"]).returncode
-        if ret != 0:
-            return False
+    here = os.path.dirname(os.path.abspath(__file__))
+    gguf_path = os.path.join(here, UITARS_GGUF_NAME)
 
-    # Create the 4096-ctx variant
-    print(_yellow("  [SETUP] Creating qwen2.5vl-gui model (4096-ctx, fits on GPU)..."))
-    modelfile = "FROM qwen2.5vl:7b\nPARAMETER num_ctx 4096\nPARAMETER num_predict 256\n"
-    mf_path = "/tmp/qwen2.5vl-gui.Modelfile"
+    if not os.path.exists(gguf_path):
+        print(_red(f"\n  [FAIL] UI-TARS GGUF not found at:"))
+        print(_red(f"         {gguf_path}"))
+        print(_yellow("\n  To fix this, run the following commands once:"))
+        print(_yellow("  ─────────────────────────────────────────────"))
+        print(_yellow("  pip install huggingface_hub"))
+        print(_yellow(f"  huggingface-cli download Mungert/UI-TARS-1.5-7B \\"))
+        print(_yellow(f"      --include \"*.gguf\" \\"))
+        print(_yellow(f"      --local-dir . \\"))
+        print(_yellow(f"      --local-dir-use-symlinks False"))
+        print(_yellow(f"  mv *Q4_K_M*.gguf {UITARS_GGUF_NAME}"))
+        print(_yellow("  ─────────────────────────────────────────────\n"))
+        return False
+
+    print(_yellow("  [SETUP] Registering ui-tars-1.5-7b-gui with Ollama (4096-ctx)..."))
+
+    # Write Modelfile — use absolute path so Ollama finds the GGUF from any cwd
+    modelfile_content = (
+        f"FROM {gguf_path}\n"
+        "PARAMETER num_ctx 4096\n"
+        "PARAMETER num_predict 256\n"
+    )
+
+    if _OS == "Windows":
+        mf_path = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "ui-tars-1.5-7b-gui.Modelfile")
+    else:
+        mf_path = "/tmp/ui-tars-1.5-7b-gui.Modelfile"
+
     with open(mf_path, "w") as f:
-        f.write(modelfile)
-    ret = subprocess.run(["ollama", "create", "qwen2.5vl-gui", "-f", mf_path]).returncode
+        f.write(modelfile_content)
+
+    ret = subprocess.run(
+        ["ollama", "create", "ui-tars-1.5-7b-gui", "-f", mf_path]
+    ).returncode
+
+    if ret == 0:
+        print(_green("  [OK] ui-tars-1.5-7b-gui registered successfully"))
+    else:
+        print(_red("  [FAIL] ollama create failed — check the GGUF path and try again"))
+
     return ret == 0
 
 
@@ -135,9 +175,10 @@ def check_models() -> bool:
         present = any(base in m for m in pulled)
 
         if present:
-            print(_green(f"  [OK] {model:<22} {desc}"))
+            print(_green(f"  [OK] {model:<26} {desc}"))
         else:
-            print(_yellow(f"  [..] {model:<22} {desc}  — not found"))
+            print(_yellow(f"  [..] {model:<26} {desc}  — not found"))
+
             if model == "qwen3:14b":
                 print(_yellow(f"       Downloading {model} (~9 GB) — first run only..."))
                 ret = subprocess.run(["ollama", "pull", model]).returncode
@@ -146,12 +187,10 @@ def check_models() -> bool:
                 else:
                     print(_red(f"  [FAIL] Could not pull {model}"))
                     all_ok = False
-            elif "qwen2.5vl-gui" in model:
+
+            elif "ui-tars-1.5-7b-gui" in model:
                 ok = ensure_vlm_model(pulled)
-                if ok:
-                    print(_green(f"  [OK] qwen2.5vl-gui ready"))
-                else:
-                    print(_red("  [FAIL] Could not set up VLM model"))
+                if not ok:
                     all_ok = False
 
     return all_ok
@@ -184,7 +223,7 @@ def main():
     # ── Models ────────────────────────────────────────────────────
     print(_bold("\nModels:"))
     if not check_models():
-        print(_red("\n  Some models are missing. Check your connection and retry."))
+        print(_red("\n  Some models are missing. Check the instructions above and retry."))
         sys.exit(1)
 
     # ── Launch ────────────────────────────────────────────────────
