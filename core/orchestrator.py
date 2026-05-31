@@ -62,6 +62,10 @@ class TaskOrchestrator:
         self.log = on_step_log or print
         self._stop_event = threading.Event()
 
+        # Create OCR engine once — avoid re-initialising the ONNX session per call
+        from core.grounding.ocr_engine import OCREngine
+        self._ocr = OCREngine()
+
     def stop(self):
         """Signal the orchestrator to stop after the current step."""
         self._stop_event.set()
@@ -92,9 +96,11 @@ class TaskOrchestrator:
             if success:
                 completed.append(subtask.id)
                 self.log(f"[SUBTASK {subtask.id}] Complete")
-                # Give the OS time to settle (window open, page load, etc.)
-                # before the next subtask captures its screen context.
-                time.sleep(4.0)
+                # Only pause between subtasks (not after the last one).
+                # Use a short adaptive wait — the next _get_screen_context() OCR
+                # will capture whatever settled on screen.
+                if subtask != subtasks[-1]:
+                    time.sleep(2.0)
             else:
                 self.log(f"[SUBTASK {subtask.id}] Failed — stopping task")
                 failed = True
@@ -160,7 +166,7 @@ class TaskOrchestrator:
                         conf_str = f"{reflection.confidence:.2f}"
                         state = "Verified" if reflection.success else "Uncertain→proceeding"
                         self.log(f"  {state} (conf={conf_str})")
-                        time.sleep(0.4)   # let OS process the action before next step
+                        time.sleep(0.1)   # brief flush before next step
                         break
                     else:
                         self.log(f"  Verification failed: {reflection.error_description}")
@@ -197,17 +203,11 @@ class TaskOrchestrator:
         return self.actor.execute(step, x=x, y=y)
 
     def _get_screen_context(self) -> str:
-        """Return a short list of UI labels currently visible on screen via OCR.
-
-        Only includes short words (≤ 25 chars) that look like UI labels — not
-        long terminal lines or code, which confuse the planner/router.
-        """
+        """Return a short list of UI labels currently visible on screen via OCR."""
         try:
-            from core.grounding.ocr_engine import OCREngine
             img = self.capturer.capture()
             img.thumbnail((960, 540))
-            ocr = OCREngine()
-            words = ocr.extract(img)
+            words = self._ocr.extract(img)
             # Keep short, high-confidence tokens that look like UI labels
             visible = [
                 w.text for w in words

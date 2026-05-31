@@ -198,6 +198,16 @@ class ReflectionAgent:
         self.capturer = capturer
         self.min_confidence = min_confidence
 
+    def _adaptive_wait(self, min_wait: float, max_wait: float, poll: float = 0.15) -> None:
+        """Sleep at least min_wait seconds, then exit as soon as screen stops changing."""
+        time.sleep(min_wait)
+        deadline = time.time() + (max_wait - min_wait)
+        self.capturer.has_changed()          # set baseline hash
+        while time.time() < deadline:
+            time.sleep(poll)
+            if not self.capturer.has_changed(threshold=0.02):
+                break                        # screen settled — no need to wait longer
+
     def verify(
         self,
         step: ActionStep,
@@ -235,15 +245,15 @@ class ReflectionAgent:
         )
 
         if is_app_launch:
-            actual_wait = max(wait_s, 3.0)    # apps need time to open
+            min_wait, max_wait = 1.5, 3.0
         elif is_snap_launch:
-            actual_wait = max(wait_s, 2.0)    # snap searches need time
+            min_wait, max_wait = 1.0, 2.0
         elif step.action_type in ("key_press", "hotkey", "type"):
-            actual_wait = max(wait_s, 1.5)
+            min_wait, max_wait = 0.5, 1.5
         else:
-            actual_wait = wait_s
+            min_wait, max_wait = wait_s, wait_s + 1.0
 
-        time.sleep(actual_wait)
+        self._adaptive_wait(min_wait, max_wait)
         after_b64 = self.capturer.capture_as_base64(quality=85)
 
         # Always use lenient inferred verification for type actions
@@ -262,7 +272,7 @@ class ReflectionAgent:
         resp = self.ovms.query_vlm(
             prompt=prompt,
             image_base64=after_b64,
-            max_tokens=256,
+            max_tokens=120,
             temperature=0.1
         )
 

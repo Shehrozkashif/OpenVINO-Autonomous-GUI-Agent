@@ -37,7 +37,7 @@ def build_orchestrator() -> TaskOrchestrator:
         reflector=ReflectionAgent(client, capturer),
         capturer=capturer,
         task_memory=TaskMemory(),
-        config=OrchestratorConfig(max_retries_per_step=3, reflection_wait_s=1.5),
+        config=OrchestratorConfig(max_retries_per_step=3, reflection_wait_s=1.0),
     )
 
 
