@@ -125,7 +125,9 @@ Turn each sub-task into the SHORTEST correct sequence of atomic actions.
 3. USE the search launcher only as a last resort when 1 and 2 don't apply.
 
 ━━━ ACTION REFERENCE ━━━
-click / right_click / double_click  →  target = exact visible text label (never null, never vague)
+click / right_click / double_click  →  target = exact visible text label (1-4 words MAX, never null)
+                                       GOOD targets: "Calculator" "Code" "File" "Save" "OK" "shehrozbaloch"
+                                       BAD targets:  "GNOME Calculator icon" "the VS Code app" "click here"
 type                                →  value  = exact string to type (never null)
 key_press                           →  key    = single key name:
                                          enter escape tab super backspace delete space
@@ -141,7 +143,10 @@ wait                                →  value  = seconds as string: "0.5" "1.0"
 ━━━ LAUNCHING APPS ━━━
 
 A — Icon/label visible in screen context (e.g. "Code", "Files", "Calculator"):
-    → click target="<exact text from screen context>". That is ALL. No search needed.
+    → click target="<exact short text from screen context>". That is ALL. No search needed.
+    CRITICAL: target must be the SHORT VISIBLE LABEL (e.g. "Calculator", "Code", "Files").
+    NEVER use a long description as target ("GNOME Calculator icon" is WRONG — "Calculator" is RIGHT).
+    If the sub-task description quotes a label like 'Code' or 'Calculator', that quoted word IS the target.
 
 B — Quick hotkey:
     Terminal  → hotkey key="ctrl+alt+t" → wait "2.0" → type command → key_press "enter"

@@ -100,9 +100,13 @@ Decompose any user instruction into the MINIMUM ordered sub-tasks a GUI agent ca
    This is MANDATORY for any sub-task that depends_on an app-launch sub-task.
 
 ━━━ SMART LAUNCH (always pick the fastest method) ━━━
-  App icon/label visible in screen context  →  "click the <AppName> icon visible on screen"  ← 1 step
-  Quick hotkey available                    →  "open the terminal using ctrl+alt+t"
-  No shortcut / no visible icon             →  "open <AppName> using the search launcher"
+  App label visible in screen context  →  "click the label '<exact-text>' visible in the taskbar"  ← fastest
+  Quick hotkey available               →  "open the terminal using ctrl+alt+t"
+  No shortcut / no visible label       →  "open <AppName> using the search launcher"
+
+  CRITICAL: When using the icon-click method, ALWAYS quote the EXACT SHORT TEXT from screen
+  context in the description (e.g. 'Code', 'Calculator', 'Files') — not a long description.
+  The planner reads this quoted text as the click target. Wrong text = missed click.
 
 ━━━ TASK → METHOD ━━━
   File / folder ops   →  terminal (touch / mkdir / rm / mv / echo / cp). NEVER use the file manager.
@@ -127,11 +131,17 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 
 ━━━ EXAMPLES ━━━
 
-"open vs code"  [screen shows "Code" in taskbar]
-→ [{"id":1,"description":"click the VS Code icon visible on screen","depends_on":[]}]
+"open vs code"  [screen context contains "Code"]
+→ [{"id":1,"description":"click the label 'Code' visible in taskbar to open VS Code","depends_on":[]}]
 
-"open calculator"  [no icon visible]
+"open vs code"  [screen context does NOT contain "Code" or "VS Code"]
+→ [{"id":1,"description":"open Visual Studio Code using the search launcher","depends_on":[]}]
+
+"open calculator"  [screen context does NOT contain "Calculator" or "Calc"]
 → [{"id":1,"description":"open GNOME Calculator using the search launcher","depends_on":[]}]
+
+"open calculator"  [screen context contains "Calculator"]
+→ [{"id":1,"description":"click the label 'Calculator' visible in taskbar","depends_on":[]}]
 
 "open terminal"
 → [{"id":1,"description":"open the terminal using ctrl+alt+t","depends_on":[]}]
