@@ -133,9 +133,13 @@ class TaskOrchestrator:
             step = steps[idx]
             self.log(f"  Step {step.id}: [{step.action_type}] {step.description}")
 
-            # Every step is verified by VLM after execution.
-            # Only 'wait' is skipped — there is nothing visual to check after a sleep.
-            skip_reflection = step.action_type == "wait"
+            # VLM reflection is expensive (~4s per call).
+            # Skip it for actions that are highly reliable and don't need visual confirmation:
+            #   wait      — nothing to see
+            #   key_press — modifier/navigation keys virtually always work
+            #   type      — typing succeeds unless the window lost focus (caught by next click verify)
+            # Always verify: click, double_click, right_click, hotkey, scroll
+            skip_reflection = step.action_type in ("wait", "key_press", "type")
 
             success = False
             for attempt in range(self.config.max_retries_per_step):
