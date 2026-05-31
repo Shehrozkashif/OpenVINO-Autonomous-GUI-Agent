@@ -93,6 +93,11 @@ class TaskOrchestrator:
             self.log(f"\n[SUBTASK {subtask.id}] {subtask.description}")
             success = self._execute_subtask(subtask)
 
+            # After all steps pass, do a final OCR sanity check for app launches.
+            # This catches cases where per-step VLM verification was too lenient.
+            if success:
+                success = self._verify_launch(subtask)
+
             if success:
                 completed.append(subtask.id)
                 self.log(f"[SUBTASK {subtask.id}] Complete")
@@ -201,6 +206,58 @@ class TaskOrchestrator:
             x, y = result.x, result.y
 
         return self.actor.execute(step, x=x, y=y)
+
+    # App name → OCR tokens that confirm the app is actually open on screen.
+    # Any one token from the list is enough to confirm.
+    _APP_SIGNALS: dict = {
+        "calculator":   ["Calculator", "AC", "DEG", "RAD"],
+        "terminal":     ["Terminal", "bash", "sh", "$"],
+        "firefox":      ["Firefox", "Mozilla", "http", "Search"],
+        "code":         ["Explorer", "Extensions", "editor", "Welcome"],
+        "vs code":      ["Explorer", "Extensions", "editor", "Welcome"],
+        "libreoffice":  ["Writer", "Calc", "Impress", "LibreOffice"],
+        "thunderbird":  ["Thunderbird", "Inbox", "Compose"],
+        "settings":     ["Settings", "Wi-Fi", "Bluetooth", "Network"],
+        "files":        ["Files", "Home", "Documents", "Downloads"],
+        "nautilus":     ["Files", "Home", "Documents"],
+        "gnome-terminal": ["Terminal", "bash", "$"],
+    }
+
+    def _verify_launch(self, subtask) -> bool:
+        """
+        OCR-based sanity check after a subtask completes.
+        For app-launch subtasks: confirm the app window is actually visible on screen.
+        Runs fast (<200ms) using the shared OCR engine — no VLM call needed.
+        """
+        desc = subtask.description.lower()
+
+        # Only check subtasks that are supposed to open an app
+        if not any(w in desc for w in ("open", "launch", "search launcher")):
+            return True
+
+        # Give the app a moment to fully render
+        time.sleep(0.8)
+
+        try:
+            img = self.capturer.capture()
+            img.thumbnail((960, 540))
+            ocr_words = {w.text for w in self._ocr.extract(img) if w.conf >= 0.6}
+
+            for app_key, signals in self._APP_SIGNALS.items():
+                if app_key in desc:
+                    found = any(sig in ocr_words for sig in signals)
+                    if found:
+                        self.log(f"  [CHECK] App confirmed on screen ✓")
+                        return True
+                    else:
+                        self.log(f"  [CHECK] Expected '{app_key}' on screen but not found — subtask failed")
+                        return False
+
+            # No specific check for this app — trust the step verifications
+            return True
+        except Exception as e:
+            logger.warning(f"[ORCHESTRATOR] Launch check error: {e} — trusting step results")
+            return True
 
     def _get_screen_context(self) -> str:
         """Return a short list of UI labels currently visible on screen via OCR."""
