@@ -121,7 +121,7 @@ Turn each sub-task into the SHORTEST correct sequence of atomic actions.
 
 ━━━ DECISION TREE — follow this order every time ━━━
 1. READ screen context. If the target element or app icon is visible → click it. ONE step. Stop.
-2. USE a keyboard shortcut if one exists (ctrl+alt+t for terminal, ctrl+l for browser bar, etc.).
+2. USE a keyboard shortcut if one exists (ctrl+l for browser bar, etc.).
 3. USE the search launcher only as a last resort when 1 and 2 don't apply.
 
 ━━━ ACTION REFERENCE ━━━
@@ -141,20 +141,12 @@ scroll                              →  target = element to scroll over, value 
 wait                                →  value  = seconds as string: "0.5" "1.0" "2.0" "3.0"
 
 ━━━ LAUNCHING APPS ━━━
+Use the search launcher for ALL apps — it works on every machine without configuration.
+Do NOT use ctrl+alt+t for terminal — the shortcut may not be configured.
 
-A — Icon/label visible in screen context (e.g. "Code", "Files", "Calculator"):
-    → click target="<exact short text from screen context>". That is ALL. No search needed.
-    CRITICAL: target must be the SHORT VISIBLE LABEL (e.g. "Calculator", "Code", "Files").
-    NEVER use a long description as target ("GNOME Calculator icon" is WRONG — "Calculator" is RIGHT).
-    If the sub-task description quotes a label like 'Code' or 'Calculator', that quoted word IS the target.
-
-B — Quick hotkey:
-    Terminal  → hotkey key="ctrl+alt+t" → wait "2.0" → type command → key_press "enter"
-    (Terminal opened with ctrl+alt+t already has keyboard focus — type directly, no click first.)
-
-C — Search launcher (ONLY when A and B don't apply):
+Search launcher pattern (use for every app including terminal):
     key_press "{_LAUNCHER_KEY}"  →  click "Type to search"  →  type "<app name>"  →  key_press "enter"
-    Wait 1.0–2.0s after launch before the next step.
+    wait 1.5–2.0s after launch, then click the shell prompt or window to confirm focus.
 
 ━━━ FOCUS MANAGEMENT ━━━
 • Click a window before typing in it. Always. Except: fresh terminal (ctrl+alt+t) already has focus.
@@ -177,8 +169,8 @@ Downloads          :  hotkey ctrl+j
 ━━━ TERMINAL ━━━
 Desktop path : {_DESKTOP_PATH}
 
-Fresh terminal (use ctrl+alt+t):
-  hotkey ctrl+alt+t → wait "2.0" → type command → key_press enter
+Fresh terminal (use search launcher — reliable on all machines):
+  key_press "{_LAUNCHER_KEY}" → click "Type to search" → type "gnome-terminal" → key_press enter → wait "2.0" → click {_SHELL_PROMPT} → type command → key_press enter
 
 Terminal already open (from previous sub-task):
   click {_SHELL_PROMPT} → wait "0.5" → type command → key_press enter
@@ -231,12 +223,16 @@ EXAMPLE 1 — app icon visible in screen context (screen shows "Code"):
   {{"id":2,"action_type":"wait","target":null,"value":"1.0","key":null,"description":"Wait for VS Code to load","verification":"VS Code editor is visible"}}
 ]
 
-EXAMPLE 2 — open terminal and run a command:
+EXAMPLE 2 — open terminal and run a command (use search launcher, always reliable):
 [
-  {{"id":1,"action_type":"hotkey","target":null,"value":null,"key":"ctrl+alt+t","description":"Open terminal","verification":"Terminal window appears"}},
-  {{"id":2,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for shell prompt","verification":"Shell prompt visible"}},
-  {{"id":3,"action_type":"type","target":null,"value":"echo 'hello world' > {_DESKTOP_PATH}/hello.txt","key":null,"description":"Type command","verification":"Command visible at prompt"}},
-  {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute command","verification":"New prompt appears, no error"}}
+  {{"id":1,"action_type":"key_press","target":null,"value":null,"key":"{_LAUNCHER_KEY}","description":"Open {_LAUNCHER_NAME}","verification":"Search overlay appears"}},
+  {{"id":2,"action_type":"click","target":"Type to search","value":null,"key":null,"description":"Focus search bar","verification":"Cursor in search bar"}},
+  {{"id":3,"action_type":"type","target":null,"value":"gnome-terminal","key":null,"description":"Type app name","verification":"Terminal result visible"}},
+  {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Launch terminal","verification":"Terminal window opens"}},
+  {{"id":5,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for shell prompt","verification":"Shell prompt visible"}},
+  {{"id":6,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Click shell prompt to confirm focus","verification":"Terminal is active and focused"}},
+  {{"id":7,"action_type":"type","target":null,"value":"echo 'hello world' > {_DESKTOP_PATH}/hello.txt","key":null,"description":"Type command","verification":"Command visible at prompt"}},
+  {{"id":8,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute command","verification":"New prompt appears, no error"}}
 ]
 
 EXAMPLE 3 — terminal already open from previous sub-task:

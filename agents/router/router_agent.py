@@ -99,14 +99,12 @@ Decompose any user instruction into the MINIMUM ordered sub-tasks a GUI agent ca
      "with VS Code already open, create a new file named <name>"
    This is MANDATORY for any sub-task that depends_on an app-launch sub-task.
 
-━━━ SMART LAUNCH (always pick the fastest method) ━━━
-  App label visible in screen context  →  "click the label '<exact-text>' visible in the taskbar"  ← fastest
-  Quick hotkey available               →  "open the terminal using ctrl+alt+t"
-  No shortcut / no visible label       →  "open <AppName> using the search launcher"
+━━━ HOW TO LAUNCH APPS ━━━
+  ALL apps (including terminal)  →  "open <AppName> using the search launcher"
 
-  CRITICAL: When using the icon-click method, ALWAYS quote the EXACT SHORT TEXT from screen
-  context in the description (e.g. 'Code', 'Calculator', 'Files') — not a long description.
-  The planner reads this quoted text as the click target. Wrong text = missed click.
+  Use the search launcher for every app without exception. Do NOT use ctrl+alt+t
+  for terminal — this shortcut is not configured on all machines. Do NOT generate
+  click-on-icon subtasks — OCR text does not reliably indicate a clickable taskbar icon.
 
 ━━━ TASK → METHOD ━━━
   File / folder ops   →  terminal (touch / mkdir / rm / mv / echo / cp). NEVER use the file manager.
@@ -131,31 +129,25 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 
 ━━━ EXAMPLES ━━━
 
-"open vs code"  [screen context contains "Code"]
-→ [{"id":1,"description":"click the label 'Code' visible in taskbar to open VS Code","depends_on":[]}]
-
-"open vs code"  [screen context does NOT contain "Code" or "VS Code"]
+"open vs code"
 → [{"id":1,"description":"open Visual Studio Code using the search launcher","depends_on":[]}]
 
-"open calculator"  [screen context does NOT contain "Calculator" or "Calc"]
+"open calculator"
 → [{"id":1,"description":"open GNOME Calculator using the search launcher","depends_on":[]}]
 
-"open calculator"  [screen context contains "Calculator"]
-→ [{"id":1,"description":"click the label 'Calculator' visible in taskbar","depends_on":[]}]
-
 "open terminal"
-→ [{"id":1,"description":"open the terminal using ctrl+alt+t","depends_on":[]}]
+→ [{"id":1,"description":"open GNOME Terminal using the search launcher","depends_on":[]}]
 
 "open terminal and run python3 --version"
-→ [{"id":1,"description":"open the terminal using ctrl+alt+t","depends_on":[]},
+→ [{"id":1,"description":"open GNOME Terminal using the search launcher","depends_on":[]},
    {"id":2,"description":"with the terminal already open, run the command: python3 --version","depends_on":[1]}]
 
 "create a file hello.txt on the desktop and write hello world in it"
-→ [{"id":1,"description":"open the terminal using ctrl+alt+t","depends_on":[]},
+→ [{"id":1,"description":"open GNOME Terminal using the search launcher","depends_on":[]},
    {"id":2,"description":"with the terminal already open, run: echo 'hello world' > DESKTOP_PATH_PLACEHOLDER/hello.txt","depends_on":[1]}]
 
 "delete file notes.txt from the desktop"
-→ [{"id":1,"description":"open the terminal using ctrl+alt+t","depends_on":[]},
+→ [{"id":1,"description":"open GNOME Terminal using the search launcher","depends_on":[]},
    {"id":2,"description":"with the terminal already open, run: rm DESKTOP_PATH_PLACEHOLDER/notes.txt","depends_on":[1]}]
 
 "open firefox and go to github.com"
@@ -177,12 +169,12 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
    {"id":2,"description":"with VS Code already open, create a new file named app.py","depends_on":[1]}]
 
 "write a python script that prints hello world and run it"
-→ [{"id":1,"description":"open the terminal using ctrl+alt+t","depends_on":[]},
+→ [{"id":1,"description":"open GNOME Terminal using the search launcher","depends_on":[]},
    {"id":2,"description":"with the terminal already open, run: echo 'print(\"hello world\")' > DESKTOP_PATH_PLACEHOLDER/hello.py","depends_on":[1]},
    {"id":3,"description":"with the terminal already open, run: python3 DESKTOP_PATH_PLACEHOLDER/hello.py","depends_on":[2]}]
 
 "install the requests python package"
-→ [{"id":1,"description":"open the terminal using ctrl+alt+t","depends_on":[]},
+→ [{"id":1,"description":"open GNOME Terminal using the search launcher","depends_on":[]},
    {"id":2,"description":"with the terminal already open, run: pip install requests","depends_on":[1]}]
 
 "open libreoffice writer and type hello world"
