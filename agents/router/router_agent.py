@@ -17,8 +17,7 @@ from core.protocols.a2a import InferenceClient, SubTask
 # ── Runtime machine identity (same logic as planning_agent) ───────────────────
 _OS = platform.system()
 _USER = os.getenv("USER") or os.getenv("USERNAME") or "user"
-_HOST = socket.gethostname().split(".")[0]
-_SHELL_PROMPT = f"{_USER}@{_HOST}"
+_SHELL_PROMPT = _USER  # username only — hostnames can be too long for OCR
 
 if _OS == "Windows":
     _ROUTER_OS_CONTEXT = "Windows 11"

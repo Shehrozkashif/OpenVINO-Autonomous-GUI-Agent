@@ -47,8 +47,9 @@ else:
 
 # ── Runtime machine identity ──────────────────────────────────────────────────
 _USER = os.getenv("USER") or os.getenv("USERNAME") or "user"
-_HOST = socket.gethostname().split(".")[0]
-_SHELL_PROMPT = f"{_USER}@{_HOST}"
+# Use only the username — hostnames can be very long (e.g. laptop model names)
+# and OCR reliably finds the short username portion of the shell prompt.
+_SHELL_PROMPT = _USER
 
 
 def _detect_firefox() -> str:
@@ -191,12 +192,13 @@ Desktop path: {_DESKTOP_PATH}
 
 Opening terminal: hotkey "ctrl+alt+t" (fastest).
 
-Pattern — terminal just launched:
-  wait 2.0s → click the shell prompt text e.g. {_SHELL_PROMPT} → type command → key_press enter
+Pattern — terminal just launched (via ctrl+alt+t):
+  wait 2.0s → type command directly → key_press enter
+  (Terminal opened by ctrl+alt+t already has keyboard focus — do NOT click anything first.)
 
 Pattern — terminal already open from previous subtask:
   click the shell prompt text e.g. {_SHELL_PROMPT} → wait 0.5s → type command → key_press enter
-  (NEVER re-launch. NEVER open Activities. Just click the shell prompt text and type.)
+  (NEVER re-launch. NEVER open Activities. Just click the username portion of the shell prompt.)
 
 Common commands:
   Create file     : touch {_DESKTOP_PATH}/name.txt
@@ -343,10 +345,9 @@ EXAMPLE B2 — navigate in Firefox that is ALREADY OPEN (description says "with 
 EXAMPLE C — open terminal fresh and run command:
 [
   {{"id":1,"action_type":"hotkey","target":null,"value":null,"key":"ctrl+alt+t","description":"Open terminal","verification":"Terminal window appears"}},
-  {{"id":2,"action_type":"wait","target":null,"value":"3.0","key":null,"description":"Wait for shell prompt","verification":"Shell prompt visible"}},
-  {{"id":3,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Focus terminal","verification":"Terminal is active window"}},
-  {{"id":4,"action_type":"type","target":null,"value":"touch ~/Desktop/notes.txt","key":null,"description":"Type command","verification":"Command at prompt"}},
-  {{"id":5,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute","verification":"New prompt, no error"}}
+  {{"id":2,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for shell prompt","verification":"Shell prompt visible"}},
+  {{"id":3,"action_type":"type","target":null,"value":"touch ~/Desktop/notes.txt","key":null,"description":"Type command","verification":"Command at prompt"}},
+  {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute","verification":"New prompt, no error"}}
 ]"""
 
 
