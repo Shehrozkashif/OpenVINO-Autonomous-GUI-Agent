@@ -19,6 +19,8 @@ import httpx
 from loguru import logger
 from pydantic import BaseModel
 
+from config import LLM_MODEL, VLM_OLLAMA, VLM_VLLM, LLM_BASE_URL, VLM_BASE_URL
+
 
 class OVMSResponse(BaseModel):
     """Unified response type for all inference calls."""
@@ -27,12 +29,12 @@ class OVMSResponse(BaseModel):
     latency_ms: float
     tokens_generated: int
 
-_DEFAULT_LLM = "qwen3:14b"
-_DEFAULT_VLM_VLLM = "ByteDance-Seed/UI-TARS-1.5-7B"   # vLLM primary
-_DEFAULT_VLM_OLLAMA = "qwen2.5vl-gui"                  # Ollama fallback (4096-ctx, GPU-friendly)
+_DEFAULT_LLM        = LLM_MODEL
+_DEFAULT_VLM_VLLM   = VLM_VLLM
+_DEFAULT_VLM_OLLAMA = VLM_OLLAMA
 
-_DEFAULT_LLM_BASE_URL = "http://localhost:11434"   # Ollama
-_DEFAULT_VLM_BASE_URL = "http://localhost:8000"    # vLLM
+_DEFAULT_LLM_BASE_URL = LLM_BASE_URL
+_DEFAULT_VLM_BASE_URL = VLM_BASE_URL
 
 
 def _pick_ollama_vlm(ollama_base_url: str) -> str:

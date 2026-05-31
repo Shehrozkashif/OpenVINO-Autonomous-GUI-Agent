@@ -92,8 +92,10 @@ def start_ollama():
 
 
 # ── 3. Check / pull models ────────────────────────────────────────────────────
+from config import LLM_MODEL
+
 REQUIRED_MODELS = {
-    "qwen3:14b":            "LLM  — planning, routing, reflection",
+    LLM_MODEL:              "LLM  — planning, routing, reflection",
     "ui-tars-1.5-7b-gui":   "VLM  — visual grounding & verification",
 }
 
@@ -183,8 +185,8 @@ def check_models() -> bool:
         else:
             print(_yellow(f"  [..] {model:<26} {desc}  — not found"))
 
-            if model == "qwen3:14b":
-                print(_yellow(f"       Downloading {model} (~9 GB) — first run only..."))
+            if model == LLM_MODEL:
+                print(_yellow(f"       Downloading {model} (~5 GB) — first run only..."))
                 ret = subprocess.run(["ollama", "pull", model]).returncode
                 if ret == 0:
                     print(_green(f"  [OK] {model} downloaded"))
