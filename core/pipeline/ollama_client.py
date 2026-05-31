@@ -1,31 +1,31 @@
 # core/pipeline/ollama_client.py
 """
-Dual-backend setup for local GPU inference.
+Ollama inference client.
 
 LLM (text reasoning):   qwen3:14b via Ollama       — planning, routing, reflection
 VLM (visual grounding): UI-TARS-1.5-7B via vLLM    — primary (port 8000, if running)
-                        qwen2.5vl:7b via Ollama     — auto-fallback when vLLM absent
-
-Auto-detection at startup: if vLLM (port 8000) is not reachable, VLM queries are
-routed to Ollama with qwen2.5vl:7b — same Qwen2.5-VL base architecture as UI-TARS.
+                        qwen2.5vl-gui via Ollama    — auto-fallback when vLLM absent
 
 Setup:
-    # LLM + VLM (Ollama-only, no Docker/vLLM needed)
     ollama pull qwen3:14b
     ollama pull qwen2.5vl:7b
+    printf 'FROM qwen2.5vl:7b\nPARAMETER num_ctx 4096\n' | ollama create qwen2.5vl-gui -f -
     ollama serve
-
-    # Optional: UI-TARS via vLLM for best GUI grounding accuracy
-    pip install vllm
-    vllm serve ByteDance-Seed/UI-TARS-1.5-7B --port 8000
 """
 import time
 from typing import List
 
 import httpx
 from loguru import logger
+from pydantic import BaseModel
 
-from core.pipeline.ovms_client import OVMSResponse
+
+class OVMSResponse(BaseModel):
+    """Unified response type for all inference calls."""
+    content: str
+    model: str
+    latency_ms: float
+    tokens_generated: int
 
 _DEFAULT_LLM = "qwen3:14b"
 _DEFAULT_VLM_VLLM = "ByteDance-Seed/UI-TARS-1.5-7B"   # vLLM primary
@@ -78,8 +78,10 @@ class OllamaClient:
         self.llm_base_url = base_url or llm_base_url
         self.client = httpx.Client(timeout=timeout)
 
-        # Auto-detect VLM backend: prefer vLLM (UI-TARS), fall back to Ollama
-        _vlm_url = base_url or vlm_base_url
+        # Auto-detect VLM backend: prefer vLLM (UI-TARS), fall back to Ollama.
+        # Always probe the dedicated vLLM port — do NOT inherit the legacy base_url
+        # here, because Ollama also exposes /v1/models and would be falsely detected.
+        _vlm_url = vlm_base_url
         _vllm_available = False
         try:
             r = self.client.get(f"{_vlm_url}/v1/models", timeout=2.0)

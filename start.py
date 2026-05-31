@@ -38,10 +38,14 @@ def setup_linux_libs():
         return   # already extracted
 
     print(_yellow("  [SETUP] libxcb-cursor not found — extracting (one-time setup)..."))
-    deb_path = "/tmp/libxcb-cursor0.deb"
     try:
+        import glob
         subprocess.run(["apt-get", "download", "libxcb-cursor0"],
                        cwd="/tmp", check=True, capture_output=True)
+        debs = glob.glob("/tmp/libxcb-cursor0*.deb")
+        if not debs:
+            raise FileNotFoundError("libxcb-cursor0 .deb not found in /tmp after download")
+        deb_path = debs[0]
         dest = os.path.expanduser("~/.local_xcb")
         os.makedirs(dest, exist_ok=True)
         subprocess.run(["dpkg-deb", "-x", deb_path, dest], check=True, capture_output=True)

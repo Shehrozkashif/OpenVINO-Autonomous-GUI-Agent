@@ -13,7 +13,7 @@ from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QFormLayout, QHBoxLayout, QLabel,
     QMainWindow, QMessageBox, QPushButton, QSystemTrayIcon,
-    QTabWidget, QTextEdit, QVBoxLayout, QWidget, QComboBox,
+    QTabWidget, QTextEdit, QVBoxLayout, QWidget,
     QMenu
 )
 
@@ -119,23 +119,9 @@ class DesktopGUIAgent(QMainWindow):
     def _settings_tab(self) -> QWidget:
         w = QWidget()
         l = QFormLayout(w)
-        self.device_combo = QComboBox()
-        self.device_combo.addItems(["AUTO", "GPU", "NPU", "CPU"])
-        self.device_combo.setCurrentText(self.settings.value("device", "AUTO"))
-        l.addRow("Inference Device:", self.device_combo)
-
-        self.vlm_combo = QComboBox()
-        self.vlm_combo.addItems([
-            "Ollama (Dev — qwen2.5vl)",   # RTX 2060 / any GPU via Ollama
-            "Direct OpenVINO",             # Intel GPU/NPU via openvino-genai
-            "OVMS",                        # OVMS Docker containers
-        ])
-        self.vlm_combo.setCurrentText(self.settings.value("pipeline", "Ollama (Dev — qwen2.5vl)"))
-        l.addRow("Pipeline Mode:", self.vlm_combo)
-
-        save_btn = QPushButton("Save")
-        save_btn.clicked.connect(self._save_settings)
-        l.addRow(save_btn)
+        l.addRow("Backend:", QLabel("Ollama  (qwen3:14b LLM  +  qwen2.5vl-gui VLM)"))
+        l.addRow("LLM port:", QLabel("localhost:11434"))
+        l.addRow("VLM port:", QLabel("localhost:8000  (vLLM/UI-TARS, if running)  →  fallback to Ollama"))
         return w
 
     def _connect_signals(self):
@@ -190,7 +176,7 @@ class DesktopGUIAgent(QMainWindow):
     def _worker(self, instruction: str):
         try:
             if self.orchestrator is None:
-                self.signals.error.emit("Orchestrator not initialized — check OVMS and tool server.")
+                self.signals.error.emit("Orchestrator not initialized — is Ollama running? (ollama serve)")
                 return
             self.orchestrator.log = lambda msg: self.signals.log_update.emit(msg)
             result = self.orchestrator.execute(instruction)
@@ -230,7 +216,3 @@ class DesktopGUIAgent(QMainWindow):
         self.stop_btn.setEnabled(False)
         QMessageBox.critical(self, "Error", msg)
 
-    def _save_settings(self):
-        self.settings.setValue("device", self.device_combo.currentText())
-        self.settings.setValue("pipeline", self.vlm_combo.currentText())
-        QMessageBox.information(self, "Saved", "Settings saved. Restart to apply.")

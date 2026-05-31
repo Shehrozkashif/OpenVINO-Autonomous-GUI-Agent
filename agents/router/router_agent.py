@@ -2,13 +2,74 @@
 """Router Agent — decomposes user instructions into sub-tasks."""
 
 import json
+import os
+import platform
 import re
+import shutil
+import socket
 import uuid
 from typing import List, Optional, Tuple
 
 from loguru import logger
 
 from core.protocols.a2a import InferenceClient, SubTask
+
+# ── Runtime machine identity (same logic as planning_agent) ───────────────────
+_OS = platform.system()
+_USER = os.getenv("USER") or os.getenv("USERNAME") or "user"
+_HOST = socket.gethostname().split(".")[0]
+_SHELL_PROMPT = f"{_USER}@{_HOST}"
+
+if _OS == "Windows":
+    _ROUTER_OS_CONTEXT = "Windows 11"
+    _DESKTOP_PATH = "%USERPROFILE%\\Desktop"
+elif _OS == "Darwin":
+    _ROUTER_OS_CONTEXT = "macOS"
+    _DESKTOP_PATH = "~/Desktop"
+else:
+    _ROUTER_OS_CONTEXT = "Linux (GNOME)"
+    _DESKTOP_PATH = "~/Desktop"
+
+
+def _detect_firefox() -> str:
+    if _OS == "Windows":
+        import winreg
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe"
+            ) as k:
+                path = winreg.QueryValue(k, None)
+                if path and os.path.exists(path):
+                    return f'"{path}"'
+        except Exception:
+            pass
+        for path in [
+            os.path.expandvars(r"%ProgramFiles%\Mozilla Firefox\firefox.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe"),
+        ]:
+            if os.path.exists(path):
+                return f'"{path}"'
+        return "firefox"
+    which = shutil.which("firefox")
+    if which:
+        return which
+    for path in [
+        os.path.expanduser("~/apps/firefox/firefox/firefox"),
+        os.path.expanduser("~/firefox/firefox"),
+        "/snap/bin/firefox",
+        "/usr/bin/firefox",
+        "/usr/local/bin/firefox",
+        "/opt/firefox/firefox",
+    ]:
+        if os.path.exists(path):
+            return path
+    return "firefox"
+
+
+_FIREFOX_CMD = _detect_firefox()
+_FIREFOX_LAUNCH = _FIREFOX_CMD if _OS == "Windows" else f"{_FIREFOX_CMD} &"
 
 _SUBTASK_SCHEMA = {
     "type": "array",
@@ -241,6 +302,15 @@ EXAMPLES
    {"id":2,"description":"with VS Code already open, create a new file named app.py using Ctrl+N then save as app.py","depends_on":[1]}]
 
 Output ONLY a valid JSON array. No markdown. No explanation. No preamble."""
+
+# Apply runtime substitutions so no machine-specific values are hardcoded
+ROUTER_SYSTEM_PROMPT = (
+    ROUTER_SYSTEM_PROMPT
+    .replace("Linux (Ubuntu 22.04 / GNOME)", _ROUTER_OS_CONTEXT)
+    .replace("/home/shehroz/apps/firefox/firefox/firefox &", _FIREFOX_LAUNCH)
+    .replace("~/Desktop/", _DESKTOP_PATH + "/")
+    .replace("~/Desktop", _DESKTOP_PATH)
+)
 
 
 class RouterAgent:

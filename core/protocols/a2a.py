@@ -1,17 +1,11 @@
 # core/protocols/a2a.py
-"""
-Shared data models and the InferenceClient Protocol.
-
-InferenceClient is the interface every backend (OVMSClient, OllamaClient,
-DirectOpenVINOClient) satisfies — agents depend on this Protocol, not on
-any concrete class.
-"""
+"""Shared data models and the InferenceClient Protocol."""
 from enum import Enum
 from typing import List, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
-from core.pipeline.ovms_client import OVMSResponse
+from core.pipeline.ollama_client import OVMSResponse
 
 
 # ── Agent communication enums / models ───────────────────────────────────────
@@ -60,11 +54,7 @@ class ActionStep(BaseModel):
 
 @runtime_checkable
 class InferenceClient(Protocol):
-    """
-    Structural interface satisfied by OVMSClient, OllamaClient, and
-    DirectOpenVINOClient.  Agents type-hint against this Protocol so they
-    remain decoupled from any specific backend.
-    """
+    """Interface that OllamaClient satisfies. Agents type-hint against this."""
 
     def query_llm(
         self,
@@ -80,6 +70,7 @@ class InferenceClient(Protocol):
         image_base64: str,
         max_tokens: int = 200,
         temperature: float = 0.0,
+        system_prompt: str = None,
     ) -> OVMSResponse: ...
 
     def check_health(self) -> dict: ...

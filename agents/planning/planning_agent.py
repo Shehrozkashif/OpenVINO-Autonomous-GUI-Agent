@@ -5,8 +5,11 @@ Uses Chain-of-Thought prompting for complex multi-step tasks.
 """
 
 import json
+import os
 import platform
 import re
+import shutil
+import socket
 from typing import List
 
 from loguru import logger
@@ -33,7 +36,7 @@ elif _OS == "Darwin":
     _DESKTOP_PATH   = "~/Desktop"
     _SCREENSHOT_KEY = "command+shift+3"
 else:
-    _OS_CONTEXT     = "Linux desktop (Ubuntu 22.04 / GNOME)"
+    _OS_CONTEXT     = "Linux desktop (GNOME)"
     _LAUNCHER_KEY   = "super"
     _LAUNCHER_NAME  = "GNOME Activities overview"
     _CLOSE_WIN      = "alt+f4"
@@ -41,6 +44,55 @@ else:
     _REOPEN_TAB     = "ctrl+shift+t"
     _DESKTOP_PATH   = "~/Desktop"
     _SCREENSHOT_KEY = "print_screen"
+
+# ── Runtime machine identity ──────────────────────────────────────────────────
+_USER = os.getenv("USER") or os.getenv("USERNAME") or "user"
+_HOST = socket.gethostname().split(".")[0]
+_SHELL_PROMPT = f"{_USER}@{_HOST}"
+
+
+def _detect_firefox() -> str:
+    """Return the best available Firefox launch command on this machine."""
+    if _OS == "Windows":
+        import winreg
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe"
+            ) as k:
+                path = winreg.QueryValue(k, None)
+                if path and os.path.exists(path):
+                    return f'"{path}"'
+        except Exception:
+            pass
+        for path in [
+            os.path.expandvars(r"%ProgramFiles%\Mozilla Firefox\firefox.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe"),
+        ]:
+            if os.path.exists(path):
+                return f'"{path}"'
+        return "firefox"
+    # Linux / macOS — prefer PATH, then common install locations
+    which = shutil.which("firefox")
+    if which:
+        return which
+    for path in [
+        os.path.expanduser("~/apps/firefox/firefox/firefox"),
+        os.path.expanduser("~/firefox/firefox"),
+        "/snap/bin/firefox",
+        "/usr/bin/firefox",
+        "/usr/local/bin/firefox",
+        "/opt/firefox/firefox",
+    ]:
+        if os.path.exists(path):
+            return path
+    return "firefox"
+
+
+_FIREFOX_CMD = _detect_firefox()
+# On Linux/macOS run Firefox in the background so the terminal stays usable
+_FIREFOX_LAUNCH = _FIREFOX_CMD if _OS == "Windows" else f"{_FIREFOX_CMD} &"
 
 _STEP_SCHEMA = {
     "type": "array",
@@ -69,7 +121,7 @@ Convert each sub-task instruction into the shortest correct JSON action sequence
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INSTALLED APPS — only reference these
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Browser      : Firefox — ALWAYS launch via terminal command: /home/shehroz/apps/firefox/firefox/firefox &
+Browser      : Firefox — ALWAYS launch via terminal command: {_FIREFOX_LAUNCH}
 Code editor  : VS Code  (launch by searching "code" or "visual studio code")
 Office suite : LibreOffice Writer ("libreoffice --writer"), Calc, Impress
 Email        : Thunderbird
@@ -105,7 +157,7 @@ PART B — UNIVERSAL RULES
 2. STATE CONTEXT IN DESCRIPTION — if the sub-task description contains phrases like
    "with the terminal already open" or "with Firefox already open", that app is
    already running. Do NOT launch it. Do NOT open Activities. Go straight to the action:
-   - "with the terminal already open" → click the shell prompt text e.g. shehroz@magnum → wait 0.5s → type command → enter
+   - "with the terminal already open" → click the shell prompt text e.g. {_SHELL_PROMPT} → wait 0.5s → type command → enter
    - "with Firefox already open"      → hotkey ctrl+l → type URL or query → enter
    - "with VS Code already open"      → use VS Code shortcuts directly
 3. KEYBOARD FOCUS IS FRAGILE — any click moves focus. Before typing into any
@@ -140,10 +192,10 @@ Desktop path: {_DESKTOP_PATH}
 Opening terminal: hotkey "ctrl+alt+t" (fastest).
 
 Pattern — terminal just launched:
-  wait 2.0s → click the shell prompt text e.g. shehroz@magnum → type command → key_press enter
+  wait 2.0s → click the shell prompt text e.g. {_SHELL_PROMPT} → type command → key_press enter
 
 Pattern — terminal already open from previous subtask:
-  click the shell prompt text e.g. shehroz@magnum → wait 0.5s → type command → key_press enter
+  click the shell prompt text e.g. {_SHELL_PROMPT} → wait 0.5s → type command → key_press enter
   (NEVER re-launch. NEVER open Activities. Just click the shell prompt text and type.)
 
 Common commands:
@@ -168,9 +220,9 @@ For nano editing:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PART E — FIREFOX BROWSER
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Launch: ALWAYS use terminal to launch Firefox — open terminal → type "/home/shehroz/apps/firefox/firefox/firefox &" → enter → wait 3.0s for Firefox to open.
+Launch: ALWAYS use terminal to launch Firefox — open terminal → type "{_FIREFOX_LAUNCH}" → enter → wait 3.0s for Firefox to open.
 IMPORTANT: If Activities search does not launch Firefox, use the terminal instead:
-  open terminal → type "/home/shehroz/apps/firefox/firefox/firefox &" → enter
+  open terminal → type "{_FIREFOX_LAUNCH}" → enter
 Focus address bar : hotkey "ctrl+l"  (NEVER click address bar visually)
 Navigate URL      : ctrl+l → type URL → enter
 Web search        : ctrl+l → type query → enter
@@ -250,7 +302,7 @@ PART I — NEVER DO THESE
 ❌ Never type without clicking/focusing the target window first
 ❌ Never click "Home" "Desktop" "Downloads" in Nautilus sidebar unless
    the task requires file manager navigation — steals keyboard focus silently
-❌ Never type a terminal command without first clicking the shell prompt text e.g. shehroz@magnum
+❌ Never type a terminal command without first clicking the shell prompt text e.g. {_SHELL_PROMPT}
 ❌ Never assume focus survived from a previous step
 ❌ Never add more steps than needed
 ❌ Never chain two type steps — combine into one
@@ -263,7 +315,7 @@ All 7 fields on every object. Unused fields = null. IDs start at 1.
 
 EXAMPLE A — run a terminal command (terminal already open):
 [
-  {{"id":1,"action_type":"click","target":"shehroz@magnum","value":null,"key":null,"description":"Re-focus terminal","verification":"Terminal is active with shell prompt"}},
+  {{"id":1,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Re-focus terminal","verification":"Terminal is active with shell prompt"}},
   {{"id":2,"action_type":"wait","target":null,"value":"0.5","key":null,"description":"Wait for focus","verification":"Cursor blinking in terminal"}},
   {{"id":3,"action_type":"type","target":null,"value":"echo 'hello' > ~/Desktop/gui_agent","key":null,"description":"Type command","verification":"Command visible at prompt"}},
   {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute command","verification":"New prompt appears, no error"}}
@@ -273,7 +325,7 @@ EXAMPLE B — open Firefox and navigate:
 [
   {{"id":1,"action_type":"key_press","target":null,"value":null,"key":"super","description":"Open Activities","verification":"Activities overlay visible"}},
   {{"id":2,"action_type":"click","target":"Type to search","value":null,"key":null,"description":"Focus search bar","verification":"Cursor in search bar"}},
-  {{"id":3,"action_type":"type","target":null,"value":"/home/shehroz/apps/firefox/firefox/firefox &","key":null,"description":"Run Firefox launch command","verification":"Firefox window starts opening"}},
+  {{"id":3,"action_type":"type","target":null,"value":"{_FIREFOX_LAUNCH}","key":null,"description":"Run Firefox launch command","verification":"Firefox window starts opening"}},
   {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Launch Firefox","verification":"Firefox window opens"}},
   {{"id":5,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for snap app to load","verification":"Firefox address bar visible"}},
   {{"id":6,"action_type":"hotkey","target":null,"value":null,"key":"ctrl+l","description":"Focus address bar","verification":"Address bar highlighted"}},
@@ -292,7 +344,7 @@ EXAMPLE C — open terminal fresh and run command:
 [
   {{"id":1,"action_type":"hotkey","target":null,"value":null,"key":"ctrl+alt+t","description":"Open terminal","verification":"Terminal window appears"}},
   {{"id":2,"action_type":"wait","target":null,"value":"3.0","key":null,"description":"Wait for shell prompt","verification":"Shell prompt visible"}},
-  {{"id":3,"action_type":"click","target":"shehroz@magnum","value":null,"key":null,"description":"Focus terminal","verification":"Terminal is active window"}},
+  {{"id":3,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Focus terminal","verification":"Terminal is active window"}},
   {{"id":4,"action_type":"type","target":null,"value":"touch ~/Desktop/notes.txt","key":null,"description":"Type command","verification":"Command at prompt"}},
   {{"id":5,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute","verification":"New prompt, no error"}}
 ]"""
@@ -393,7 +445,7 @@ class PlanningAgent:
                 raise ValueError(
                     f"Step {step.id} is '{step.action_type}' but 'key' is missing."
                 )
-            if step.action_type == "type" and not step.value:
+            if step.action_type == "type" and step.value is None:
                 raise ValueError(f"Step {step.id} is 'type' but 'value' is missing.")
             if step.action_type in ("click", "right_click", "double_click") and not step.target:
                 raise ValueError(

@@ -34,7 +34,6 @@ from loguru import logger
 from PIL import Image
 
 from core.grounding.ocr_engine import OCREngine, OCRWord
-from core.grounding.som_engine import SoMEngine
 
 
 # ── VLM prompt templates ──────────────────────────────────────────────────────
@@ -86,7 +85,6 @@ class HybridGroundingEngine:
     def __init__(self, vlm_client=None):
         self.ocr = OCREngine()
         self.vlm = vlm_client
-        self.som = SoMEngine()
         self._ocr_available = self.ocr.is_available()
         if not self._ocr_available:
             logger.warning(
@@ -294,8 +292,10 @@ class HybridGroundingEngine:
                 data = json.loads(json_str)
                 if not data.get("found", True):
                     return None
-                x_norm = float(data.get("x", 0.0))
-                y_norm = float(data.get("y", 0.0))
+                if "x" not in data or "y" not in data:
+                    return None
+                x_norm = float(data["x"])
+                y_norm = float(data["y"])
                 conf = float(data.get("confidence", 0.7))
                 if 0.0 <= x_norm <= 1.0 and 0.0 <= y_norm <= 1.0:
                     return (int(x_norm * screen_w), int(y_norm * screen_h), conf)
