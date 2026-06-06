@@ -76,7 +76,7 @@ print(f"\n  → {results['screen_capture']}")
 # 4. OCR grounding (fast — no VLM)
 # ═══════════════════════════════════════════════════════════════
 section("4. OCR Grounding (no VLM, should be <5s)")
-from core.grounding.ocr_engine import OCREngine
+from agents.grounding.grounding_agent import OCREngine
 ocr = OCREngine()
 img_small = img.copy()
 img_small.thumbnail((960, 540))
@@ -110,21 +110,23 @@ print(f"\n  → {results['router']}  (expected: 1 subtask about terminal)")
 section("6. Planner — Step Generation")
 planner = PlanningAgent(client)
 t = time.time()
-steps = planner.plan(subtasks[0])
+# plan_next_step returns ONE step at a time (dynamic planning)
+first_step = planner.plan_next_step(subtasks[0], screen_context="Desktop visible")
 elapsed = time.time() - t
-print(f"  Steps ({elapsed:.1f}s):")
+steps = [first_step] if first_step else []
+print(f"  First step ({elapsed:.1f}s):")
 for s in steps:
     print(f"    [{s.id}] {s.action_type:12s} key={s.key!r:12} value={s.value!r}")
-# Accept any valid sequence that would open a terminal:
-#   Option A: super → type "gnome-terminal" → enter  (search launcher)
-#   Option B: hotkey ctrl+alt+t                       (direct shortcut)
-#   Option C: any sequence containing at least 1 step
-uses_launcher = any(s.action_type == "key_press" and s.key == "super" for s in steps)
+    print(f"         desc: {s.description}")
+# Accept any valid first step toward opening a terminal:
+#   Option A: key_press super/winleft  (search launcher)
+#   Option B: hotkey ctrl+alt+t        (direct shortcut)
+uses_launcher = any(s.action_type == "key_press" and s.key in ("super", "winleft") for s in steps)
 uses_direct   = any(s.action_type == "hotkey" and "t" in (s.key or "") for s in steps)
 has_steps     = len(steps) >= 1
 ok = (uses_launcher or uses_direct) and has_steps
 results["planner"] = PASS if ok else FAIL
-print(f"\n  → {results['planner']}  (accepted: launcher or direct hotkey, got {len(steps)} step(s))")
+print(f"\n  → {results['planner']}  (accepted: launcher key or ctrl+alt+t, got {len(steps)} step(s))")
 
 # ═══════════════════════════════════════════════════════════════
 # 7. Action executor — keyboard steps (no grounding)

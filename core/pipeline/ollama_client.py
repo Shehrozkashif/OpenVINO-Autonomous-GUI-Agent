@@ -38,24 +38,59 @@ _DEFAULT_VLM_BASE_URL = VLM_BASE_URL
 
 
 def _pick_ollama_vlm(ollama_base_url: str) -> str:
-    """Return the best available vision model from Ollama.
-
-    Prefers qwen2.5vl-gui (4096-ctx build) so the VLM loads on GPU.
-    Falls back to full qwen2.5vl:7b or llava variants if not available.
-    """
-    # Base prefixes in priority order — matched with or without tag suffix
+    """Return the best available vision model from Ollama."""
     preferred_bases = ["qwen2.5vl-gui", "qwen2.5vl", "llava"]
     try:
         r = httpx.get(f"{ollama_base_url}/api/tags", timeout=3.0)
         if r.status_code == 200:
             pulled = [m["name"] for m in r.json().get("models", [])]
             for base in preferred_bases:
-                match = next((m for m in pulled if m == base or m.startswith(base + ":") or m.startswith(base + "-")), None)
+                match = next(
+                    (m for m in pulled
+                     if m == base or m.startswith(base + ":") or m.startswith(base + "-")),
+                    None,
+                )
                 if match:
                     return match
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"[OllamaClient] VLM detection failed: {e}")
     return _DEFAULT_VLM_OLLAMA
+
+
+def _post_with_retry(
+    client: httpx.Client,
+    url: str,
+    json: dict,
+    max_attempts: int = 3,
+) -> httpx.Response:
+    """POST with exponential back-off retry on transient failures.
+
+    Retries on:  network errors, HTTP 429 (rate-limit), HTTP 503 (unavailable).
+    Gives up on: HTTP 4xx client errors (except 429).
+    """
+    delay = 1.0
+    last_exc: Exception = RuntimeError("No attempts made")
+    for attempt in range(max_attempts):
+        try:
+            resp = client.post(url, json=json)
+            if resp.status_code in (429, 503):
+                raise httpx.HTTPStatusError(
+                    f"HTTP {resp.status_code}", request=resp.request, response=resp
+                )
+            resp.raise_for_status()
+            return resp
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            last_exc = e
+            logger.warning(f"[Client] Network error (attempt {attempt + 1}/{max_attempts}): {e}")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code not in (429, 503):
+                raise  # non-retryable
+            last_exc = e
+            logger.warning(f"[Client] HTTP {e.response.status_code} — retrying (attempt {attempt + 1}/{max_attempts})")
+        if attempt < max_attempts - 1:
+            time.sleep(delay)
+            delay *= 2.0
+    raise last_exc
 
 
 class OllamaClient:
@@ -72,7 +107,6 @@ class OllamaClient:
         llm_model: str = _DEFAULT_LLM,
         llm_base_url: str = _DEFAULT_LLM_BASE_URL,
         vlm_base_url: str = _DEFAULT_VLM_BASE_URL,
-        # legacy single-URL param kept for backward compat
         base_url: str = None,
         timeout: float = 600.0,
     ):
@@ -80,9 +114,6 @@ class OllamaClient:
         self.llm_base_url = base_url or llm_base_url
         self.client = httpx.Client(timeout=timeout)
 
-        # Auto-detect VLM backend: prefer vLLM (UI-TARS), fall back to Ollama.
-        # Always probe the dedicated vLLM port — do NOT inherit the legacy base_url
-        # here, because Ollama also exposes /v1/models and would be falsely detected.
         _vlm_url = vlm_base_url
         _vllm_available = False
         try:
@@ -97,7 +128,6 @@ class OllamaClient:
             self.vlm_model = vlm_model or _DEFAULT_VLM_VLLM
             logger.info(f"[OllamaClient] VLM backend: vLLM ({self.vlm_model}) at {self.vlm_base_url}")
         else:
-            # Fall back to Ollama for VLM — same endpoint, different model
             self.vlm_base_url = self.llm_base_url
             self.vlm_model = vlm_model or _pick_ollama_vlm(self.llm_base_url)
             logger.info(
@@ -113,39 +143,73 @@ class OllamaClient:
         temperature: float = 0.0,
         system_prompt: str = None,
     ) -> OVMSResponse:
-        """Send screenshot + prompt to UI-TARS-1.5-7B (vLLM) for visual grounding."""
+        """Send screenshot + prompt to the VLM for visual grounding.
+
+        Uses vLLM's OpenAI endpoint when vLLM is running, otherwise falls back
+        to Ollama's native /api/chat endpoint (more reliable than /v1/chat/completions
+        for vision models served via Ollama).
+        """
         start = time.time()
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+        _via_vllm = self.vlm_base_url != self.llm_base_url
+
+        if _via_vllm:
+            # vLLM uses OpenAI-compatible multimodal format
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            })
+            payload = {
+                "model": self.vlm_model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": False,
+            }
+            resp = _post_with_retry(self.client, f"{self.vlm_base_url}/v1/chat/completions", payload)
+            data = resp.json()
+            try:
+                content = data["choices"][0]["message"]["content"] or ""
+            except (KeyError, IndexError, TypeError) as e:
+                logger.warning(f"[VLM] Unexpected vLLM response shape ({e}): {str(data)[:200]}")
+                content = ""
+            tokens = data.get("usage", {}).get("completion_tokens", 0)
+        else:
+            # Ollama native /api/chat — more reliable for vision models via Ollama
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({
+                "role": "user",
+                "content": prompt,
+                "images": [image_base64],
+            })
+            payload = {
+                "model": self.vlm_model,
+                "messages": messages,
+                "stream": False,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_tokens,
                 },
-                {"type": "text", "text": prompt},
-            ],
-        })
-        payload = {
-            "model": self.vlm_model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        }
-        resp = self.client.post(f"{self.vlm_base_url}/v1/chat/completions", json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
+            }
+            resp = _post_with_retry(self.client, f"{self.vlm_base_url}/api/chat", payload)
+            data = resp.json()
+            content = (data.get("message") or {}).get("content") or ""
+            tokens = data.get("eval_count", 0)
+
         latency_ms = (time.time() - start) * 1000
         logger.debug(f"[VLM] {prompt[:60]}… → {content[:100]} ({latency_ms:.0f}ms)")
         return OVMSResponse(
             content=content,
             model=self.vlm_model,
             latency_ms=latency_ms,
-            tokens_generated=data.get("usage", {}).get("completion_tokens", 0),
+            tokens_generated=tokens,
         )
 
     def query_llm(
@@ -155,13 +219,11 @@ class OllamaClient:
         temperature: float = 0.7,
         response_schema: dict = None,
     ) -> OVMSResponse:
-        """Send text messages to the LLM via Ollama's native /api/chat.
+        """Send text messages to qwen3:14b via Ollama's native /api/chat.
 
-        Uses Ollama native API (not OpenAI-compat) so we can pass:
-          think=False  — prevents qwen3 from filling content with chain-of-thought
-          format=schema — structured output via JSON Schema (guarantees correct structure)
-
-        response_schema: optional JSON Schema dict; if provided enforces output structure.
+        Uses Ollama native API so we can pass:
+          think=False        — suppresses chain-of-thought filling
+          format=schema      — structured JSON output
         """
         start = time.time()
         payload = {
@@ -177,10 +239,9 @@ class OllamaClient:
         if response_schema is not None:
             payload["format"] = response_schema
 
-        resp = self.client.post(f"{self.llm_base_url}/api/chat", json=payload)
-        resp.raise_for_status()
+        resp = _post_with_retry(self.client, f"{self.llm_base_url}/api/chat", payload)
         data = resp.json()
-        content = data.get("message", {}).get("content") or ""
+        content = (data.get("message") or {}).get("content") or ""
         latency_ms = (time.time() - start) * 1000
         logger.debug(f"[LLM] → {content[:100]} ({latency_ms:.0f}ms)")
         return OVMSResponse(
@@ -194,20 +255,15 @@ class OllamaClient:
         results = {}
         _vlm_via_ollama = self.vlm_base_url == self.llm_base_url
 
-        # Check Ollama (always used for LLM; also VLM when vLLM is absent)
         try:
             r = self.client.get(f"{self.llm_base_url}/api/tags", timeout=5.0)
             if r.status_code == 200:
                 pulled = [m["name"] for m in r.json().get("models", [])]
-
-                # LLM check
                 llm_base = self.llm_model.split(":")[0]
                 llm_ok = any(llm_base in m for m in pulled)
                 results[f"LLM ({self.llm_model})"] = (
                     "OK" if llm_ok else f"NOT PULLED — run: ollama pull {self.llm_model}"
                 )
-
-                # VLM via Ollama check
                 if _vlm_via_ollama:
                     vlm_base = self.vlm_model.split(":")[0]
                     vlm_ok = any(vlm_base in m for m in pulled)
@@ -219,7 +275,6 @@ class OllamaClient:
         except Exception as e:
             results["Ollama"] = f"UNREACHABLE — is 'ollama serve' running? ({e})"
 
-        # Check vLLM only when it's the active VLM backend
         if not _vlm_via_ollama:
             try:
                 r = self.client.get(f"{self.vlm_base_url}/v1/models", timeout=5.0)

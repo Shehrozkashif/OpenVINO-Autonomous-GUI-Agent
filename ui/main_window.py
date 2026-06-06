@@ -11,7 +11,7 @@ import threading
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QFormLayout, QHBoxLayout, QLabel,
+    QApplication, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPushButton, QSystemTrayIcon,
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
     QMenu
@@ -51,11 +51,12 @@ class DesktopGUIAgent(QMainWindow):
     def _init_ui(self):
         self.setWindowTitle("Desktop GUI Agent — GSoC 2026")
         self.setGeometry(100, 100, 1400, 900)
-        tabs = QTabWidget()
-        tabs.addTab(self._agent_tab(), "Agent Control")
-        tabs.addTab(self._history_tab(), "History")
-        tabs.addTab(self._settings_tab(), "Settings")
-        self.setCentralWidget(tabs)
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._agent_tab(), "Agent Control")
+        self._tabs.addTab(self._history_tab(), "History")
+        self._tabs.addTab(self._settings_tab(), "Settings")
+        self._tabs.currentChanged.connect(self._on_tab_change)
+        self.setCentralWidget(self._tabs)
 
     def _agent_tab(self) -> QWidget:
         w = QWidget()
@@ -108,21 +109,130 @@ class DesktopGUIAgent(QMainWindow):
         return w
 
     def _history_tab(self) -> QWidget:
+        import datetime
         w = QWidget()
         l = QVBoxLayout(w)
-        l.addWidget(QLabel("Past task executions:"))
+
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Past task executions (from memory):"))
+        header.addStretch()
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._load_history)
+        header.addWidget(refresh_btn)
+        l.addLayout(header)
+
         self.history_view = QTextEdit()
         self.history_view.setReadOnly(True)
+        self.history_view.setStyleSheet("font-family: monospace; font-size: 12px;")
         l.addWidget(self.history_view)
+
+        # Load history on first show
+        QTimer.singleShot(500, self._load_history)
         return w
 
+    def _load_history(self):
+        """Reload task history from SQLite into the history view."""
+        import datetime
+        try:
+            from memory.task.task_memory import TaskMemory
+            memory = TaskMemory()
+            tasks = memory.get_recent_tasks(limit=50)
+        except Exception as e:
+            self.history_view.setPlainText(f"Could not load history: {e}")
+            return
+
+        if not tasks:
+            self.history_view.setPlainText("No task history yet. Run a task to see it here.")
+            return
+
+        lines = []
+        for t in tasks:
+            ts = datetime.datetime.fromtimestamp(t["last_used"]).strftime("%Y-%m-%d %H:%M")
+            dur = f"{t['avg_duration_s']:.1f}s" if t["avg_duration_s"] else "?"
+            count = t["success_count"]
+            lines.append(
+                f"[{ts}]  runs={count}  avg={dur}\n"
+                f"  {t['instruction']}\n"
+            )
+        self.history_view.setPlainText("\n".join(lines))
+
+    def _on_tab_change(self, index: int):
+        if self._tabs.tabText(index) == "History":
+            self._load_history()
+
     def _settings_tab(self) -> QWidget:
+        from config import LLM_MODEL, VLM_OLLAMA, VLM_VLLM, LLM_BASE_URL, VLM_BASE_URL
         w = QWidget()
-        l = QFormLayout(w)
-        l.addRow("Backend:", QLabel("Ollama  (qwen3:14b LLM  +  qwen2.5vl-gui VLM)"))
-        l.addRow("LLM port:", QLabel("localhost:11434"))
-        l.addRow("VLM port:", QLabel("localhost:8000  (vLLM/UI-TARS, if running)  →  fallback to Ollama"))
+        root = QVBoxLayout(w)
+
+        # ── Model info ────────────────────────────────────────────
+        model_form = QFormLayout()
+        model_form.addRow("LLM model:", QLabel(f"{LLM_MODEL}  (routing, planning, reflection)"))
+        model_form.addRow("VLM primary:", QLabel(f"{VLM_VLLM}  via vLLM at {VLM_BASE_URL}"))
+        model_form.addRow("VLM fallback:", QLabel(f"{VLM_OLLAMA}  via Ollama at {LLM_BASE_URL}"))
+        model_form.addRow("", QLabel("Edit config.py to change models or ports."))
+        root.addLayout(model_form)
+
+        root.addWidget(QLabel(""))   # spacer
+
+        # ── Credential manager ────────────────────────────────────
+        root.addWidget(QLabel("Saved Credentials  (used with {{cred:site:field}} in tasks):"))
+
+        cred_row = QHBoxLayout()
+        self._cred_site  = QLineEdit(); self._cred_site.setPlaceholderText("site  (e.g. github.com)")
+        self._cred_user  = QLineEdit(); self._cred_user.setPlaceholderText("username")
+        self._cred_pass  = QLineEdit(); self._cred_pass.setPlaceholderText("password")
+        self._cred_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        save_btn  = QPushButton("Save")
+        save_btn.clicked.connect(self._save_credential)
+        del_btn   = QPushButton("Delete")
+        del_btn.clicked.connect(self._delete_credential)
+        for widget in (self._cred_site, self._cred_user, self._cred_pass, save_btn, del_btn):
+            cred_row.addWidget(widget)
+        root.addLayout(cred_row)
+
+        self._cred_list = QTextEdit()
+        self._cred_list.setReadOnly(True)
+        self._cred_list.setMaximumHeight(120)
+        self._cred_list.setStyleSheet("font-family: monospace; font-size: 11px;")
+        root.addWidget(self._cred_list)
+        self._refresh_cred_list()
+
+        root.addStretch()
         return w
+
+    def _save_credential(self):
+        site = self._cred_site.text().strip()
+        user = self._cred_user.text().strip()
+        pwd  = self._cred_pass.text()
+        if not site or not user:
+            QMessageBox.warning(self, "Missing", "Site and username are required.")
+            return
+        from utils.credentials import set_credential
+        set_credential(site, user, pwd)
+        self._cred_site.clear(); self._cred_user.clear(); self._cred_pass.clear()
+        self._refresh_cred_list()
+
+    def _delete_credential(self):
+        site = self._cred_site.text().strip()
+        if not site:
+            QMessageBox.warning(self, "Missing", "Enter the site name to delete.")
+            return
+        from utils.credentials import delete
+        delete(site)
+        self._cred_site.clear()
+        self._refresh_cred_list()
+
+    def _refresh_cred_list(self):
+        try:
+            from utils.credentials import list_sites
+            sites = list_sites()
+            if sites:
+                self._cred_list.setPlainText("\n".join(f"  {s}" for s in sites))
+            else:
+                self._cred_list.setPlainText("  (no credentials stored)")
+        except Exception as e:
+            self._cred_list.setPlainText(f"  Error: {e}")
 
     def _connect_signals(self):
         self.signals.log_update.connect(self._append_log)
@@ -203,10 +313,13 @@ class DesktopGUIAgent(QMainWindow):
         self.stop_btn.setEnabled(False)
         status = "Task complete" if result["success"] else "Task failed"
         self.tray.showMessage("Agent", result.get("summary", status), QSystemTrayIcon.MessageIcon.Information, 3000)
-        self.history_view.append(
-            f"[{result['task_id']}] {'OK' if result['success'] else 'FAIL'} "
-            f"({result['elapsed_s']:.1f}s) {result.get('summary', '')}"
-        )
+        # Show any extracted data prominently in the log
+        extracted = result.get("extracted_data", {})
+        if extracted:
+            self._append_log("\n── Extracted Data ──")
+            for key, val in extracted.items():
+                self._append_log(f"  {key}: {val}")
+        self._load_history()
 
     def _on_error(self, msg: str):
         self.showNormal()

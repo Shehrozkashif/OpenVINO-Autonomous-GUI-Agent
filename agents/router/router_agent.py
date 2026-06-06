@@ -5,14 +5,13 @@ import json
 import os
 import platform
 import re
-import shutil
-import socket
 import uuid
 from typing import List, Optional, Tuple
 
 from loguru import logger
 
 from core.protocols.a2a import InferenceClient, SubTask
+from utils.platform_utils import detect_firefox
 
 _SUBTASK_SCHEMA = {
     "type": "array",
@@ -43,44 +42,7 @@ else:
     _DESKTOP_PATH = "~/Desktop"
 
 
-def _detect_firefox() -> str:
-    if _OS == "Windows":
-        import winreg
-        try:
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe"
-            ) as k:
-                path = winreg.QueryValue(k, None)
-                if path and os.path.exists(path):
-                    return f'"{path}"'
-        except Exception:
-            pass
-        for path in [
-            os.path.expandvars(r"%ProgramFiles%\Mozilla Firefox\firefox.exe"),
-            os.path.expandvars(r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe"),
-            os.path.expandvars(r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe"),
-        ]:
-            if os.path.exists(path):
-                return f'"{path}"'
-        return "firefox"
-    which = shutil.which("firefox")
-    if which:
-        return which
-    for path in [
-        os.path.expanduser("~/apps/firefox/firefox/firefox"),
-        os.path.expanduser("~/firefox/firefox"),
-        "/snap/bin/firefox",
-        "/usr/bin/firefox",
-        "/usr/local/bin/firefox",
-        "/opt/firefox/firefox",
-    ]:
-        if os.path.exists(path):
-            return path
-    return "firefox"
-
-
-_FIREFOX_CMD = _detect_firefox()
+_FIREFOX_CMD = detect_firefox()
 _FIREFOX_LAUNCH = _FIREFOX_CMD if _OS == "Windows" else f"{_FIREFOX_CMD} &"
 
 # ── Router system prompt ───────────────────────────────────────────────────────
@@ -216,11 +178,14 @@ class RouterAgent:
         self,
         instruction: str,
         screen_context: Optional[str] = None,
+        memory_hint: Optional[str] = None,
     ) -> Tuple[str, List[SubTask]]:
         task_id = str(uuid.uuid4())[:8]
         logger.info(f"[ROUTER] Task {task_id}: '{instruction}'")
 
         user_content = f"Instruction: {instruction}"
+        if memory_hint:
+            user_content += f"\n\n{memory_hint}"
         if screen_context:
             user_content += f"\n\nCurrently visible on screen: {screen_context}"
             user_content += (

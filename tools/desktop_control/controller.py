@@ -16,10 +16,10 @@ import time
 
 from loguru import logger
 from pynput.mouse import Button, Controller as MouseController
-from pynput.keyboard import Key as _PKey, Controller as _PKB  # always needed for _PYNPUT_KEY_MAP
+from pynput.keyboard import Key as _PKey, Controller as _PKB
 
 _mouse = MouseController()
-_OS = platform.system()   # "Linux", "Windows", "Darwin"
+_OS = platform.system()
 
 # ── Backend selection ─────────────────────────────────────────────────────────
 
@@ -30,6 +30,8 @@ if _OS == "Linux":
         from Xlib import display as _Xdisplay, X as _X
         from Xlib.ext import xtest as _xtest
         _xdisplay = _Xdisplay.Display(os.environ.get("DISPLAY", ":0"))
+        # Verify it actually works before committing
+        _xdisplay.screen()
         _XTEST_OK = True
         logger.info("[Controller] Linux/X11 — keyboard backend: XTest")
     except Exception as _e:
@@ -43,7 +45,6 @@ if not _XTEST_OK:
 
 # ── Key name tables ───────────────────────────────────────────────────────────
 
-# X11 keysyms for XTest (Linux)
 _KEYSYM_MAP: dict = {
     "enter": 0xff0d, "return": 0xff0d,
     "escape": 0xff1b, "esc": 0xff1b,
@@ -68,7 +69,6 @@ _KEYSYM_MAP: dict = {
     "f9": 0xffc6, "f10": 0xffc7, "f11": 0xffc8, "f12": 0xffc9,
 }
 
-# pynput Key objects for Windows/macOS fallback (also imported at line 38 for the _KB fallback)
 _PYNPUT_KEY_MAP: dict = {
     "enter": _PKey.enter, "return": _PKey.enter,
     "escape": _PKey.esc, "esc": _PKey.esc,
@@ -111,7 +111,9 @@ def _xtest_tap(keysym: int, delay: float = 0.03):
 
 
 def _xtest_send_key_name(name: str):
-    lower = name.lower()
+    lower = name.lower().strip()
+    if not lower:
+        return
     ks = _KEYSYM_MAP.get(lower)
     if ks:
         _xtest_tap(ks)
@@ -122,35 +124,54 @@ def _xtest_send_key_name(name: str):
 
 
 def _xtest_send_hotkey(*key_names: str):
-    syms = [_KEYSYM_MAP.get(n.lower()) or (ord(n) if len(n) == 1 else None) for n in key_names]
-    modifiers, main = syms[:-1], syms[-1]
-    for m in modifiers:
-        if m: _xtest_key(m, True)
-    time.sleep(0.05)
-    if main: _xtest_tap(main)
-    for m in reversed(modifiers):
-        if m: _xtest_key(m, False)
-    _xdisplay.flush()
+    # Filter out empty/None tokens that come from split("ctrl++s") etc.
+    names = [n.strip() for n in key_names if n and n.strip()]
+    syms = [_KEYSYM_MAP.get(n.lower()) or (ord(n) if len(n) == 1 else None) for n in names]
+    modifiers, main = syms[:-1], syms[-1] if syms else None
+
+    # Use try/finally so modifiers are ALWAYS released even if main key fails
+    pressed = []
+    try:
+        for m in modifiers:
+            if m:
+                _xtest_key(m, True)
+                pressed.append(m)
+        time.sleep(0.05)
+        if main:
+            _xtest_tap(main)
+        else:
+            logger.warning(f"[Controller] hotkey main key not resolved: {names}")
+    finally:
+        for m in reversed(pressed):
+            try:
+                _xtest_key(m, False)
+            except Exception:
+                pass
+        _xdisplay.flush()
 
 
 def _xtest_send_text(text: str, interval: float = 0.04):
     for ch in text:
         ks = ord(ch)
         needs_shift = ch.isupper() or ch in '!@#$%^&*()_+{}|:"<>?~'
-        if needs_shift:
-            _xtest_key(_KEYSYM_MAP["shift"], True)
-            time.sleep(0.01)
-        _xtest_tap(ks, delay=0.02)
-        if needs_shift:
-            _xtest_key(_KEYSYM_MAP["shift"], False)
-            _xdisplay.flush()
+        try:
+            if needs_shift:
+                _xtest_key(_KEYSYM_MAP["shift"], True)
+                time.sleep(0.01)
+            _xtest_tap(ks, delay=0.02)
+        finally:
+            if needs_shift:
+                _xtest_key(_KEYSYM_MAP["shift"], False)
+                _xdisplay.flush()
         time.sleep(interval)
 
 
 # ── Windows/macOS pynput implementation ──────────────────────────────────────
 
 def _pynput_send_key_name(name: str):
-    lower = name.lower()
+    lower = name.lower().strip()
+    if not lower:
+        return
     k = _PYNPUT_KEY_MAP.get(lower) or (name if len(name) == 1 else None)
     if k:
         _pynput_kb.press(k)
@@ -161,16 +182,25 @@ def _pynput_send_key_name(name: str):
 
 
 def _pynput_send_hotkey(*key_names: str):
-    keys = [_PYNPUT_KEY_MAP.get(n.lower()) or (n if len(n) == 1 else None) for n in key_names]
-    for k in keys[:-1]:
-        if k: _pynput_kb.press(k)
-    time.sleep(0.05)
-    if keys[-1]:
-        _pynput_kb.press(keys[-1])
+    names = [n.strip() for n in key_names if n and n.strip()]
+    keys = [_PYNPUT_KEY_MAP.get(n.lower()) or (n if len(n) == 1 else None) for n in names]
+    pressed = []
+    try:
+        for k in keys[:-1]:
+            if k:
+                _pynput_kb.press(k)
+                pressed.append(k)
         time.sleep(0.05)
-        _pynput_kb.release(keys[-1])
-    for k in reversed(keys[:-1]):
-        if k: _pynput_kb.release(k)
+        if keys and keys[-1]:
+            _pynput_kb.press(keys[-1])
+            time.sleep(0.05)
+            _pynput_kb.release(keys[-1])
+    finally:
+        for k in reversed(pressed):
+            try:
+                _pynput_kb.release(k)
+            except Exception:
+                pass
 
 
 def _pynput_send_text(text: str, interval: float = 0.04):
@@ -212,10 +242,13 @@ class DesktopController:
     """
 
     def click(self, x: int, y: int, button: str = "left") -> bool:
+        x, y = int(x), int(y)
         btn = {"left": Button.left, "right": Button.right, "middle": Button.middle}.get(button, Button.left)
         _mouse.position = (x, y)
         time.sleep(0.12)
-        _mouse.press(btn); time.sleep(0.08); _mouse.release(btn)
+        _mouse.press(btn)
+        time.sleep(0.08)
+        _mouse.release(btn)
         time.sleep(0.12)
         logger.info(f"[ACTION] click({button}) @ ({x},{y})")
         return True
@@ -224,40 +257,84 @@ class DesktopController:
         return self.click(x, y, button="right")
 
     def double_click(self, x: int, y: int) -> bool:
+        x, y = int(x), int(y)
         _mouse.position = (x, y)
         time.sleep(0.12)
-        _mouse.press(Button.left); time.sleep(0.08); _mouse.release(Button.left)
+        _mouse.press(Button.left)
+        time.sleep(0.08)
+        _mouse.release(Button.left)
         time.sleep(0.10)
-        _mouse.press(Button.left); time.sleep(0.08); _mouse.release(Button.left)
+        _mouse.press(Button.left)
+        time.sleep(0.08)
+        _mouse.release(Button.left)
         time.sleep(0.12)
         logger.info(f"[ACTION] double_click @ ({x},{y})")
         return True
 
-    def type_text(self, text: str, interval: float = 0.04) -> bool:
+    def type_text(self, text: str, interval: float = 0.04,
+                  use_clipboard: bool = False) -> bool:
+        """
+        Type text via keystrokes (default) or clipboard paste.
+
+        use_clipboard=True: sets clipboard → ctrl+v — instant, handles all Unicode.
+        use_clipboard=False: keystroke-by-keystroke — correct for terminal prompts
+                             where ctrl+v inserts a literal control character.
+        """
+        if use_clipboard:
+            from utils.clipboard import paste_type
+            if paste_type(text, _send_hotkey):
+                logger.info(f"[ACTION] type (clipboard) '{text[:40]}'")
+                return True
+            # fall through to keystroke if clipboard unavailable
         _send_text(text, interval)
-        logger.info(f"[ACTION] type '{text[:40]}'")
+        logger.info(f"[ACTION] type (keystroke) '{text[:40]}'")
         return True
 
     def press_key(self, key: str) -> bool:
-        _send_key_name(key)
+        _send_key_name(key.strip())
         logger.info(f"[ACTION] key_press '{key}'")
         return True
 
     def hotkey(self, *keys: str) -> bool:
-        _send_hotkey(*keys)
-        logger.info(f"[ACTION] hotkey {'+'.join(keys)}")
+        # Filter empty tokens before dispatch so "ctrl++s".split("+") → ["ctrl","","s"] is safe
+        clean = [k.strip() for k in keys if k and k.strip()]
+        if not clean:
+            logger.warning("[ACTION] hotkey called with no valid keys")
+            return False
+        _send_hotkey(*clean)
+        logger.info(f"[ACTION] hotkey {'+'.join(clean)}")
         return True
 
-    def scroll(self, x: int, y: int, clicks: int = 3, direction: str = "down") -> bool:
+    def scroll(self, x: int, y: int, clicks: int = 5, direction: str = "down") -> bool:
+        x, y = int(x), int(y)
         _mouse.position = (x, y)
         time.sleep(0.05)
         dy = clicks if direction == "up" else -clicks
         _mouse.scroll(0, dy)
-        logger.info(f"[ACTION] scroll {direction} @ ({x},{y})")
+        logger.info(f"[ACTION] scroll {direction} {clicks}× @ ({x},{y})")
+        return True
+
+    def drag(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.4) -> bool:
+        """Click-and-drag from (x1,y1) to (x2,y2). Used for text selection and drag-drop."""
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        _mouse.position = (x1, y1)
+        time.sleep(0.1)
+        _mouse.press(Button.left)
+        time.sleep(0.05)
+        steps = max(10, int(duration / 0.02))
+        for i in range(1, steps + 1):
+            px = x1 + (x2 - x1) * i / steps
+            py = y1 + (y2 - y1) * i / steps
+            _mouse.position = (int(px), int(py))
+            time.sleep(duration / steps)
+        _mouse.release(Button.left)
+        time.sleep(0.1)
+        logger.info(f"[ACTION] drag ({x1},{y1}) → ({x2},{y2})")
         return True
 
     def screenshot_base64(self) -> str:
-        import base64, io
+        import base64
+        import io
         from core.capture.screenshot import ScreenCapture
         img = ScreenCapture().capture()
         buf = io.BytesIO()

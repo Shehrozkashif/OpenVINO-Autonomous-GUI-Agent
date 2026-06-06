@@ -18,6 +18,42 @@ from tools.desktop_control.controller import DesktopController
 from ui.main_window import DesktopGUIAgent
 
 
+def _warmup_models(client: OllamaClient) -> None:
+    """
+    Fire cheap dummy requests to the LLM and VLM backends in a background thread.
+    The first real user request would otherwise pay a cold-start penalty of several
+    seconds (model loading into VRAM). Failures are silently ignored — warmup is
+    best-effort and must not block or crash the UI.
+    """
+    import threading
+
+    def _do_warmup():
+        try:
+            client.query_llm(
+                [{"role": "user", "content": "ping"}],
+                max_tokens=1, temperature=0.0,
+            )
+            logger.info("[STARTUP] LLM warmup done")
+        except Exception as e:
+            logger.debug(f"[STARTUP] LLM warmup skipped: {e}")
+        try:
+            import base64, io
+            from PIL import Image
+            tiny = Image.new("RGB", (64, 64), color=(128, 128, 128))
+            buf = io.BytesIO()
+            tiny.save(buf, format="JPEG")
+            b64 = base64.b64encode(buf.getvalue()).decode()
+            client.query_vlm(
+                prompt="What is this?", image_base64=b64,
+                max_tokens=1, temperature=0.0,
+            )
+            logger.info("[STARTUP] VLM warmup done")
+        except Exception as e:
+            logger.debug(f"[STARTUP] VLM warmup skipped: {e}")
+
+    threading.Thread(target=_do_warmup, daemon=True).start()
+
+
 def build_orchestrator() -> TaskOrchestrator:
     client = OllamaClient()
 
@@ -25,6 +61,8 @@ def build_orchestrator() -> TaskOrchestrator:
     for name, status in health.items():
         if status != "OK":
             logger.warning(f"[STARTUP] {name}: {status}")
+
+    _warmup_models(client)
 
     capturer = ScreenCapture()
     controller = DesktopController()

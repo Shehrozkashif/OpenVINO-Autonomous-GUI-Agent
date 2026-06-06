@@ -8,11 +8,10 @@ import json
 import os
 import platform
 import re
-import shutil
-import socket
-from typing import List
+from typing import List, Optional
 
 from loguru import logger
+from utils.platform_utils import detect_firefox
 
 from core.protocols.a2a import ActionStep, InferenceClient, SubTask
 
@@ -52,48 +51,78 @@ _USER = os.getenv("USER") or os.getenv("USERNAME") or "user"
 _SHELL_PROMPT = _USER
 
 
-def _detect_firefox() -> str:
-    """Return the best available Firefox launch command on this machine."""
-    if _OS == "Windows":
-        import winreg
-        try:
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe"
-            ) as k:
-                path = winreg.QueryValue(k, None)
-                if path and os.path.exists(path):
-                    return f'"{path}"'
-        except Exception:
-            pass
-        for path in [
-            os.path.expandvars(r"%ProgramFiles%\Mozilla Firefox\firefox.exe"),
-            os.path.expandvars(r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe"),
-            os.path.expandvars(r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe"),
-        ]:
-            if os.path.exists(path):
-                return f'"{path}"'
-        return "firefox"
-    # Linux / macOS — prefer PATH, then common install locations
-    which = shutil.which("firefox")
-    if which:
-        return which
-    for path in [
-        os.path.expanduser("~/apps/firefox/firefox/firefox"),
-        os.path.expanduser("~/firefox/firefox"),
-        "/snap/bin/firefox",
-        "/usr/bin/firefox",
-        "/usr/local/bin/firefox",
-        "/opt/firefox/firefox",
-    ]:
-        if os.path.exists(path):
-            return path
-    return "firefox"
-
-
-_FIREFOX_CMD = _detect_firefox()
+_FIREFOX_CMD = detect_firefox()
 # On Linux/macOS run Firefox in the background so the terminal stays usable
 _FIREFOX_LAUNCH = _FIREFOX_CMD if _OS == "Windows" else f"{_FIREFOX_CMD} &"
+
+# Pre-compute OS-specific values used inside f-string examples
+# (f-strings can't contain backslashes in expression parts before Python 3.12)
+_TERM_APP   = "cmd" if _OS == "Windows" else "gnome-terminal"
+_ECHO_CMD   = (f"echo hello > {_DESKTOP_PATH}\\hello.txt"
+               if _OS == "Windows"
+               else f"echo 'hello world' > {_DESKTOP_PATH}/hello.txt")
+_MKDIR_CMD  = (f"mkdir {_DESKTOP_PATH}\\projects"
+               if _OS == "Windows"
+               else f"mkdir {_DESKTOP_PATH}/projects")
+
+# Launcher instructions differ between Windows (no click-to-focus needed) and Linux/macOS
+_LAUNCHER_NOTE = (
+    "Do NOT open apps by navigating the Start menu manually — use search instead."
+    if _OS == "Windows"
+    else "Do NOT use ctrl+alt+t for terminal — the shortcut may not be configured."
+)
+_LAUNCHER_PATTERN_LABEL = (
+    "Search launcher pattern for Windows (Win key focuses search immediately — no click needed):"
+    if _OS == "Windows"
+    else "Search launcher pattern (use for every app including terminal):"
+)
+_LAUNCHER_PATTERN_STEPS = (
+    '    key_press "winleft"  →  wait "0.5"  →  type "<app name>"  →  key_press "enter"'
+    if _OS == "Windows"
+    else f'    key_press "{_LAUNCHER_KEY}"  →  click "Type to search"  →  type "<app name>"  →  key_press "enter"'
+)
+
+# Terminal section — pre-computed per OS so no backslashes appear inside f-string {}
+_SEP = "\\" if _OS == "Windows" else "/"
+_TERMINAL_FRESH_LAUNCH = (
+    f'  key_press "winleft" → wait "0.5" → type "cmd" → key_press enter'
+    f' → wait "2.0" → click {_SHELL_PROMPT} → type command → key_press enter'
+    if _OS == "Windows"
+    else (f'  key_press "{_LAUNCHER_KEY}" → click "Type to search" → type "gnome-terminal"'
+          f' → key_press enter → wait "2.0" → click {_SHELL_PROMPT}'
+          f' → type command → key_press enter')
+)
+
+if _OS == "Windows":
+    _D = _DESKTOP_PATH   # already uses backslash from the assignment above
+    _TERMINAL_COMMANDS = (
+        f"  Create file  :  type nul > {_D}\\name.txt\n"
+        f"  Write file   :  echo text > {_D}\\name.txt\n"
+        f"  Append file  :  echo text >> {_D}\\name.txt\n"
+        f"  Make folder  :  mkdir {_D}\\foldername\n"
+        f"  Delete file  :  del {_D}\\name.txt\n"
+        f"  Move/rename  :  move {_D}\\old {_D}\\new\n"
+        f"  Copy file    :  copy source destination\n"
+        f"  Run Python   :  python {_D}\\script.py\n"
+        f"  Install pkg  :  pip install packagename\n"
+        f"  List files   :  dir {_D}\n"
+        f"  Git clone    :  git clone https://github.com/user/repo"
+    )
+else:
+    _D = _DESKTOP_PATH
+    _TERMINAL_COMMANDS = (
+        f"  Create file  :  touch {_D}/name.txt\n"
+        f"  Write file   :  echo 'text' > {_D}/name.txt\n"
+        f"  Append file  :  echo 'text' >> {_D}/name.txt\n"
+        f"  Make folder  :  mkdir {_D}/foldername\n"
+        f"  Delete file  :  rm {_D}/name.txt\n"
+        f"  Move/rename  :  mv {_D}/old {_D}/new\n"
+        f"  Copy file    :  cp source destination\n"
+        f"  Run Python   :  python3 {_D}/script.py\n"
+        f"  Install pkg  :  pip install packagename\n"
+        f"  List files   :  ls {_D}\n"
+        f"  Git clone    :  git clone https://github.com/user/repo"
+    )
 
 _STEP_SCHEMA = {
     "type": "array",
@@ -103,7 +132,7 @@ _STEP_SCHEMA = {
             "id":           {"type": "integer"},
             "action_type":  {"type": "string", "enum": [
                 "click", "right_click", "double_click",
-                "type", "key_press", "hotkey", "scroll", "wait",
+                "type", "key_press", "hotkey", "scroll", "wait", "drag", "extract",
             ]},
             "target":       {"type": ["string", "null"]},
             "value":        {"type": ["string", "null"]},
@@ -137,15 +166,23 @@ hotkey                              →  key    = key combination:
                                          ctrl+t  ctrl+w  ctrl+f  ctrl+p  ctrl+n  ctrl+o
                                          ctrl+shift+s  ctrl+shift+p  ctrl+alt+t
                                          alt+f4  alt+tab  alt+left  super+d  super+l
-scroll                              →  target = element to scroll over, value = "up" or "down"
+scroll                              →  target = element to scroll over (null = scroll page center)
+                                       value  = "up" or "down" (default "down")
+drag                                →  target = source element text label (what to drag FROM)
+                                       value  = destination element text label (where to drag TO)
+                                       Use for: drag-and-drop files, reorder list items, resize panes
+extract                             →  target = description of what to read from screen
+                                       e.g. "the error message", "the page title", "the file path"
+                                       Use when the task says: "tell me", "what is", "read", "get the value"
+                                       The extracted text is returned to the user at task end.
 wait                                →  value  = seconds as string: "0.5" "1.0" "2.0" "3.0"
 
 ━━━ LAUNCHING APPS ━━━
 Use the search launcher for ALL apps — it works on every machine without configuration.
-Do NOT use ctrl+alt+t for terminal — the shortcut may not be configured.
+{_LAUNCHER_NOTE}
 
-Search launcher pattern (use for every app including terminal):
-    key_press "{_LAUNCHER_KEY}"  →  click "Type to search"  →  type "<app name>"  →  key_press "enter"
+{_LAUNCHER_PATTERN_LABEL}
+{_LAUNCHER_PATTERN_STEPS}
     wait 1.5–2.0s after launch, then click the shell prompt or window to confirm focus.
 
 ━━━ FOCUS MANAGEMENT ━━━
@@ -170,23 +207,13 @@ Downloads          :  hotkey ctrl+j
 Desktop path : {_DESKTOP_PATH}
 
 Fresh terminal (use search launcher — reliable on all machines):
-  key_press "{_LAUNCHER_KEY}" → click "Type to search" → type "gnome-terminal" → key_press enter → wait "2.0" → click {_SHELL_PROMPT} → type command → key_press enter
+{_TERMINAL_FRESH_LAUNCH}
 
 Terminal already open (from previous sub-task):
   click {_SHELL_PROMPT} → wait "0.5" → type command → key_press enter
 
-Common commands:
-  Create file  :  touch {_DESKTOP_PATH}/name.txt
-  Write file   :  echo 'text' > {_DESKTOP_PATH}/name.txt
-  Append file  :  echo 'text' >> {_DESKTOP_PATH}/name.txt
-  Make folder  :  mkdir {_DESKTOP_PATH}/foldername
-  Delete file  :  rm {_DESKTOP_PATH}/name.txt
-  Move/rename  :  mv {_DESKTOP_PATH}/old {_DESKTOP_PATH}/new
-  Copy file    :  cp source destination
-  Run Python   :  python3 {_DESKTOP_PATH}/script.py
-  Install pkg  :  pip install packagename
-  List files   :  ls {_DESKTOP_PATH}
-  Git clone    :  git clone https://github.com/user/repo
+Common commands ({_OS_CONTEXT}):
+{_TERMINAL_COMMANDS}
 
 ━━━ VS CODE ━━━
 Launch   :  search launcher value="code" → wait "2.0"
@@ -201,11 +228,67 @@ Launch Writer  :  search launcher value="libreoffice writer" → wait "2.0"
 Launch Calc    :  search launcher value="libreoffice calc" → wait "2.0"
 Click in doc before typing. Save: ctrl+s. Save As: ctrl+shift+s → type name → enter.
 
+━━━ LOGIN / CREDENTIALS ━━━
+When a task requires entering a username or password, use credential tokens:
+  username field  →  type  value="{{cred:site:username}}"
+  password field  →  type  value="{{cred:site:password}}"
+  Replace "site" with the actual site or app (github.com, gmail.com, localhost, etc.)
+  The credentials are substituted from the user's stored credential file at runtime.
+
+Typical login flow:
+  1. click  target="username field visible text"  (or use Tab to focus it)
+  2. type   value="{{cred:site:username}}"
+  3. key_press  key="tab"                          (move to password field)
+  4. type   value="{{cred:site:password}}"
+  5. key_press  key="enter"                        (submit form)
+
+━━━ DEEP NAVIGATION / LONG PAGES ━━━
+To find content that may be below the fold (not visible on screen):
+  1. scroll  target=null  value="down"   (the system auto-scrolls and retries grounding)
+  2. Continue generating steps — grounding will retry after each scroll automatically.
+  Do NOT generate a long chain of scroll steps manually — one step is enough.
+
+━━━ POPUP / DIALOG HANDLING ━━━
+If the screen shows an unexpected dialog, dismiss it BEFORE continuing:
+  Error / alert dialog      →  key_press "escape" or click "OK" / "Close"
+  "Save before closing?"    →  click "Don't Save" (or "Discard") to proceed, or "Save" to preserve
+  "Replace file?"           →  click "Replace" to overwrite
+  "Allow / Deny" permission →  click "Allow"
+  Any unrelated notification popup → key_press "escape"
+Always handle visible dialogs first — they block all other actions.
+
+━━━ TEXT SELECTION ━━━
+Select all text in a field  →  hotkey ctrl+a
+Select word under cursor     →  double_click on the word
+Select line in terminal      →  hotkey ctrl+a (bash) or triple-click
+Clear a text field           →  hotkey ctrl+a  → key_press "delete"
+Copy selected text           →  hotkey ctrl+c
+Paste                        →  hotkey ctrl+v
+Cut                          →  hotkey ctrl+x
+
+━━━ FILE DIALOGS (GTK "Open" / "Save As") ━━━
+GTK file dialogs have a hidden path bar. Fastest pattern — type the full path directly:
+  1. hotkey ctrl+l          (reveals the path-entry bar, works in Nautilus and GTK dialogs)
+  2. hotkey ctrl+a          (select any existing text in the bar)
+  3. type   value="<full path or filename>"
+  4. key_press "enter"
+
+Examples:
+  Open a specific file  :  ctrl+l → ctrl+a → type "/home/user/Documents/file.txt" → enter
+  Navigate to folder    :  ctrl+l → ctrl+a → type "/home/user/Downloads" → enter
+  Save with new name    :  ctrl+l (if available) → ctrl+a → type "report_v2.pdf" → enter
+                           OR click the filename field directly → ctrl+a → type name → enter
+
+Tab-based form navigation (when multiple fields exist):
+  key_press "tab" moves forward between fields; "shift+tab" moves backward.
+  Use tab to move from one field to the next instead of clicking each field.
+
 ━━━ STRICT RULES ━━━
 ✓ Exact visible text as click target — never "button", "icon", "link"
 ✓ Click a window before typing in it (except fresh terminal)
 ✓ Combine all related text into ONE type step — never chain two type steps
 ✓ ctrl+l to focus browser address bar — never click the bar visually
+✓ Handle any dialog/popup you see before doing the next planned step
 ✗ Never use gedit, mousepad, kate, VLC, GIMP — use nano or LibreOffice
 ✗ Never open Activities/search when a visible icon or hotkey works
 ✗ Never add steps just to be safe — minimum steps only
@@ -223,40 +306,40 @@ EXAMPLE 1 — app icon visible in screen context (screen shows "Code"):
   {{"id":2,"action_type":"wait","target":null,"value":"1.0","key":null,"description":"Wait for VS Code to load","verification":"VS Code editor is visible"}}
 ]
 
-EXAMPLE 2 — open terminal and run a command (use search launcher, always reliable):
+EXAMPLE 2 — open terminal and run a command (search launcher, always reliable):
 [
-  {{"id":1,"action_type":"key_press","target":null,"value":null,"key":"{_LAUNCHER_KEY}","description":"Open {_LAUNCHER_NAME}","verification":"Search overlay appears"}},
-  {{"id":2,"action_type":"click","target":"Type to search","value":null,"key":null,"description":"Focus search bar","verification":"Cursor in search bar"}},
-  {{"id":3,"action_type":"type","target":null,"value":"gnome-terminal","key":null,"description":"Type app name","verification":"Terminal result visible"}},
+  {{"id":1,"action_type":"key_press","target":null,"value":null,"key":"{_LAUNCHER_KEY}","description":"Open {_LAUNCHER_NAME}","verification":"Search box appears"}},
+  {{"id":2,"action_type":"wait","target":null,"value":"0.5","key":null,"description":"Wait for search to open","verification":"Search ready"}},
+  {{"id":3,"action_type":"type","target":null,"value":"{_TERM_APP}","key":null,"description":"Type terminal app name","verification":"Terminal result visible"}},
   {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Launch terminal","verification":"Terminal window opens"}},
-  {{"id":5,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for shell prompt","verification":"Shell prompt visible"}},
-  {{"id":6,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Click shell prompt to confirm focus","verification":"Terminal is active and focused"}},
-  {{"id":7,"action_type":"type","target":null,"value":"echo 'hello world' > {_DESKTOP_PATH}/hello.txt","key":null,"description":"Type command","verification":"Command visible at prompt"}},
+  {{"id":5,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for prompt","verification":"Shell prompt visible"}},
+  {{"id":6,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Click prompt to confirm focus","verification":"Terminal is active"}},
+  {{"id":7,"action_type":"type","target":null,"value":"{_ECHO_CMD}","key":null,"description":"Type command","verification":"Command visible at prompt"}},
   {{"id":8,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute command","verification":"New prompt appears, no error"}}
 ]
 
 EXAMPLE 3 — terminal already open from previous sub-task:
 [
-  {{"id":1,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Click username to focus terminal","verification":"Terminal is active"}},
+  {{"id":1,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Click prompt to focus terminal","verification":"Terminal is active"}},
   {{"id":2,"action_type":"wait","target":null,"value":"0.5","key":null,"description":"Wait for focus","verification":"Cursor blinking"}},
-  {{"id":3,"action_type":"type","target":null,"value":"mkdir {_DESKTOP_PATH}/projects","key":null,"description":"Type command","verification":"Command at prompt"}},
+  {{"id":3,"action_type":"type","target":null,"value":"{_MKDIR_CMD}","key":null,"description":"Type command","verification":"Command at prompt"}},
   {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute","verification":"New prompt, no error"}}
 ]
 
-EXAMPLE 4 — Firefox already open, navigate to URL:
+EXAMPLE 4 — browser already open, navigate to URL:
 [
   {{"id":1,"action_type":"hotkey","target":null,"value":null,"key":"ctrl+l","description":"Focus address bar","verification":"Address bar highlighted"}},
   {{"id":2,"action_type":"type","target":null,"value":"https://github.com","key":null,"description":"Type URL","verification":"URL visible in address bar"}},
   {{"id":3,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Navigate","verification":"GitHub page loads"}}
 ]
 
-EXAMPLE 5 — launch app with search (no icon visible, no hotkey):
+EXAMPLE 5 — launch app with search (no icon visible, no shortcut):
 [
-  {{"id":1,"action_type":"key_press","target":null,"value":null,"key":"{_LAUNCHER_KEY}","description":"Open {_LAUNCHER_NAME}","verification":"Search overlay visible"}},
-  {{"id":2,"action_type":"click","target":"Type to search","value":null,"key":null,"description":"Focus search bar","verification":"Cursor in search bar"}},
-  {{"id":3,"action_type":"type","target":null,"value":"libreoffice writer","key":null,"description":"Type app name","verification":"LibreOffice result visible"}},
-  {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Launch","verification":"LibreOffice Writer opens"}},
-  {{"id":5,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for app to load","verification":"Document area visible"}}
+  {{"id":1,"action_type":"key_press","target":null,"value":null,"key":"{_LAUNCHER_KEY}","description":"Open {_LAUNCHER_NAME}","verification":"Search box visible"}},
+  {{"id":2,"action_type":"wait","target":null,"value":"0.5","key":null,"description":"Wait for search to open","verification":"Search ready"}},
+  {{"id":3,"action_type":"type","target":null,"value":"notepad","key":null,"description":"Type app name","verification":"App result visible"}},
+  {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Launch","verification":"App opens"}},
+  {{"id":5,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for app to load","verification":"App window visible"}}
 ]
 
 EXAMPLE 6 — type in a LibreOffice Writer document:
@@ -271,60 +354,92 @@ class PlanningAgent:
     def __init__(self, ovms_client: InferenceClient):
         self.ovms = ovms_client
 
-    def plan(self, subtask: SubTask, context: dict = None,
-             screen_context: str = None) -> List[ActionStep]:
-        logger.info(f"[PLANNING] Planning: '{subtask.description}'")
-        user_content = f"Generate steps for: {subtask.description}"
+    def plan_next_step(
+        self,
+        subtask: SubTask,
+        screen_context: str = None,
+        completed: List[str] = None,
+        task_context: List[str] = None,
+        failure_hints: List[str] = None,
+    ) -> Optional[ActionStep]:
+        """
+        Dynamic planning: return the ONE next action step toward the subtask goal.
+        Returns None when the goal is already achieved (planner returns empty array).
+
+        task_context:   descriptions of subtasks already completed in this overall task.
+        failure_hints:  known-bad target/action patterns from episodic failure memory.
+        """
+        # Inter-subtask context — what was done before this subtask
+        ctx_block = ""
+        if task_context:
+            ctx_lines = "\n".join(f"  - {d}" for d in task_context)
+            ctx_block = f"\nSubtasks already completed in this task:\n{ctx_lines}\n"
+
+        # Within-subtask step history
+        history = ""
+        if completed:
+            lines = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(completed))
+            history = f"\nSteps completed so far toward this goal:\n{lines}\n"
+
+        # Episodic failure hints — avoid patterns that failed before
+        failure_block = ""
+        if failure_hints:
+            hint_lines = "\n".join(f"  - {h}" for h in failure_hints)
+            failure_block = f"\nKnown failure patterns to avoid:\n{hint_lines}\n"
+
+        user_content = f"Goal: {subtask.description}{ctx_block}{history}{failure_block}"
+
         if screen_context:
-            user_content += (
-                f"\n\nText currently visible on screen (use these exact labels as "
-                f"click targets when relevant): {screen_context}"
-            )
-        if context:
-            user_content += f"\nAdditional context: {json.dumps(context)}"
+            user_content += f"\nText currently visible on screen: {screen_context}"
+
+        user_content += (
+            "\n\nReturn the NEXT SINGLE action step needed to achieve the goal. "
+            "Return [] (empty array) if the goal is already fully achieved on screen."
+        )
+
         messages = [
             {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
-        resp = self.ovms.query_llm(messages, max_tokens=2048, temperature=0.3,
-                                   response_schema=_STEP_SCHEMA)
+        resp = self.ovms.query_llm(
+            messages, max_tokens=768, temperature=0.2,
+            response_schema=_STEP_SCHEMA,
+        )
         try:
             steps = self._parse_steps(resp.content, subtask.id)
-        except (ValueError, json.JSONDecodeError) as first_err:
-            logger.warning(f"[PLANNING] Parse failed ({first_err}) — retrying")
-            retry_messages = [
-                {"role": "system", "content": (
-                    "Output ONLY a JSON array of desktop action steps.\n"
-                    "RULES:\n"
-                    "- click/right_click/double_click: 'target' must be the visible text or element name (not null)\n"
-                    "- type: 'value' must be the text to type (not null)\n"
-                    "- key_press/hotkey: 'key' must be the key name or combo (not null)\n"
-                    "- scroll: 'target' is element, 'value' is 'up' or 'down'\n"
-                    "- All other fields: null"
-                )},
-                {"role": "user", "content": f"Steps to accomplish: {subtask.description}"},
-            ]
-            resp = self.ovms.query_llm(retry_messages, max_tokens=2048, temperature=0.0,
-                                       response_schema=_STEP_SCHEMA)
-            steps = self._parse_steps(resp.content, subtask.id)
-        logger.info(f"[PLANNING] {len(steps)} steps generated")
-        for s in steps:
-            logger.info(f"  [{s.id}] {s.action_type}: {s.description}")
-        return steps
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"[PLANNING] plan_next_step parse error: {e} — skipping")
+            return None
+
+        if not steps:
+            logger.info(f"[PLANNING] Goal achieved — no more steps needed")
+            return None
+
+        step = steps[0]
+        step.id = len(completed or []) + 1
+        logger.info(f"[PLANNING] Next: [{step.action_type}] {step.description}")
+        return step
 
     def replan(
-        self, failed_step: ActionStep, error: str, remaining: List[ActionStep]
+        self,
+        failed_step: ActionStep,
+        error: str,
+        remaining: List[ActionStep],
+        screen_context: str = None,
     ) -> List[ActionStep]:
         logger.warning(f"[PLANNING] Replanning after step {failed_step.id} failure")
+        user_content = (
+            f"Step {failed_step.id} ('{failed_step.description}') failed.\n"
+            f"Error: {error}\n"
+            f"Remaining planned steps: {[s.description for s in remaining]}\n"
+        )
+        if screen_context:
+            user_content += f"\nCurrently visible on screen: {screen_context}"
+        user_content += "\n\nGenerate a corrected sequence to recover and continue."
+
         messages = [
             {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"Step {failed_step.id} ('{failed_step.description}') failed.\n"
-                f"Error: {error}\n"
-                f"Remaining planned steps: {[s.description for s in remaining]}\n\n"
-                f"Generate a corrected sequence to recover and continue.",
-            },
+            {"role": "user", "content": user_content},
         ]
         resp = self.ovms.query_llm(messages, max_tokens=2048, temperature=0.3,
                                    response_schema=_STEP_SCHEMA)
