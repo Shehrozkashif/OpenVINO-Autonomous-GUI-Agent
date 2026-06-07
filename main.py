@@ -6,7 +6,7 @@ from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from agents.action.action_agent import ActionExecutionAgent
-from agents.grounding.grounding_agent import UIGroundingAgent
+from agents.grounding.grounding_agent import OCREngine, UIGroundingAgent
 from agents.planning.planning_agent import PlanningAgent
 from agents.reflection.reflection_agent import ReflectionAgent
 from agents.router.router_agent import RouterAgent
@@ -18,12 +18,14 @@ from tools.desktop_control.controller import DesktopController
 from ui.main_window import DesktopGUIAgent
 
 
-def _warmup_models(client: OllamaClient) -> None:
+def _warmup_models(client: OllamaClient, task_memory: TaskMemory = None) -> None:
     """
-    Fire cheap dummy requests to the LLM and VLM backends in a background thread.
-    The first real user request would otherwise pay a cold-start penalty of several
-    seconds (model loading into VRAM). Failures are silently ignored — warmup is
-    best-effort and must not block or crash the UI.
+    Fire cheap dummy requests to the LLM and VLM backends, and pre-load the
+    sentence-transformer embedder, in a background thread. The first real user
+    request would otherwise pay a cold-start penalty of several seconds (model
+    loading into VRAM) or, for the embedder, a one-time ~80s download/load mid-task.
+    Failures are silently ignored — warmup is best-effort and must not block or
+    crash the UI.
     """
     import threading
 
@@ -50,6 +52,12 @@ def _warmup_models(client: OllamaClient) -> None:
             logger.info("[STARTUP] VLM warmup done")
         except Exception as e:
             logger.debug(f"[STARTUP] VLM warmup skipped: {e}")
+        if task_memory is not None:
+            try:
+                _ = task_memory.embedder  # triggers SentenceTransformer download/load
+                logger.info("[STARTUP] Embedder warmup done")
+            except Exception as e:
+                logger.debug(f"[STARTUP] Embedder warmup skipped: {e}")
 
     threading.Thread(target=_do_warmup, daemon=True).start()
 
@@ -62,20 +70,23 @@ def build_orchestrator() -> TaskOrchestrator:
         if status != "OK":
             logger.warning(f"[STARTUP] {name}: {status}")
 
-    _warmup_models(client)
-
     capturer = ScreenCapture()
     controller = DesktopController()
+    ocr = OCREngine()
+    task_memory = TaskMemory()
+
+    _warmup_models(client, task_memory)
 
     return TaskOrchestrator(
         router=RouterAgent(client),
         planner=PlanningAgent(client),
-        grounder=UIGroundingAgent(client, capturer),
+        grounder=UIGroundingAgent(client, capturer, ocr=ocr),
         actor=ActionExecutionAgent(controller),
-        reflector=ReflectionAgent(client, capturer),
+        reflector=ReflectionAgent(client, capturer, ocr=ocr),
         capturer=capturer,
-        task_memory=TaskMemory(),
+        task_memory=task_memory,
         config=OrchestratorConfig(max_retries_per_step=3, reflection_wait_s=1.0),
+        ocr=ocr,
     )
 
 

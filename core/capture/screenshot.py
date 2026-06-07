@@ -71,6 +71,19 @@ def _xlib_screen_size() -> tuple:
 def _screen_size() -> tuple:
     if _XLIB_OK:
         return _xlib_screen_size()
+    # On Windows use GetDeviceCaps to get physical pixel dimensions without
+    # doing a full screen capture (which ImageGrab.grab() would require).
+    if _OS == "Windows":
+        try:
+            import ctypes
+            hdc = ctypes.windll.user32.GetDC(0)
+            w = ctypes.windll.gdi32.GetDeviceCaps(hdc, 118)  # DESKTOPHORZRES
+            h = ctypes.windll.gdi32.GetDeviceCaps(hdc, 117)  # DESKTOPVERTRES
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+            if w > 0 and h > 0:
+                return w, h
+        except Exception:
+            pass
     img = _pil_grab()
     return img.width, img.height
 
@@ -81,10 +94,19 @@ class ScreenCapture:
     def __init__(self, monitor: int = 1):
         self.monitor = monitor
         self._last_hash: Optional[imagehash.ImageHash] = None
+        # Regions (x1, y1, x2, y2) to black out in every captured frame.
+        # Used to mask the agent's own GUI window so its text doesn't pollute OCR.
+        self.exclude_regions: list = []
 
     def capture(self) -> Image.Image:
         """Full-screen capture. Does not alter input focus on any platform."""
-        return _grab()
+        img = _grab()
+        if self.exclude_regions:
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(img)
+            for (x1, y1, x2, y2) in self.exclude_regions:
+                draw.rectangle([x1, y1, x2, y2], fill=(0, 0, 0))
+        return img
 
     def capture_as_base64(self, quality: int = 85) -> str:
         img = self.capture()

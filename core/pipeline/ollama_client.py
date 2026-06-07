@@ -2,14 +2,13 @@
 """
 Ollama inference client.
 
-LLM (text reasoning):   qwen3:14b via Ollama       — planning, routing, reflection
+LLM (text reasoning):   qwen3:8b via Ollama        — planning, routing, reflection
 VLM (visual grounding): UI-TARS-1.5-7B via vLLM    — primary (port 8000, if running)
-                        qwen2.5vl-gui via Ollama    — auto-fallback when vLLM absent
+                        UI-TARS-1.5-7B via Ollama  — auto-fallback when vLLM absent
 
 Setup:
-    ollama pull qwen3:14b
-    ollama pull qwen2.5vl:7b
-    printf 'FROM qwen2.5vl:7b\nPARAMETER num_ctx 4096\n' | ollama create qwen2.5vl-gui -f -
+    ollama pull qwen3:8b
+    ollama pull hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S
     ollama serve
 """
 import time
@@ -38,8 +37,11 @@ _DEFAULT_VLM_BASE_URL = VLM_BASE_URL
 
 
 def _pick_ollama_vlm(ollama_base_url: str) -> str:
-    """Return the best available vision model from Ollama."""
-    preferred_bases = ["qwen2.5vl-gui", "qwen2.5vl", "llava"]
+    """Return the best available vision model from Ollama.
+
+    Preference order: UI-TARS (purpose-built GUI grounding) → qwen2.5vl → llava.
+    """
+    preferred_bases = ["ui-tars", "UI-TARS", "qwen2.5vl-gui", "qwen2.5vl", "llava"]
     try:
         r = httpx.get(f"{ollama_base_url}/api/tags", timeout=3.0)
         if r.status_code == 200:
@@ -47,7 +49,10 @@ def _pick_ollama_vlm(ollama_base_url: str) -> str:
             for base in preferred_bases:
                 match = next(
                     (m for m in pulled
-                     if m == base or m.startswith(base + ":") or m.startswith(base + "-")),
+                     if m == base
+                     or m.startswith(base + ":")
+                     or m.startswith(base + "-")
+                     or base.lower() in m.lower()),
                     None,
                 )
                 if match:
@@ -129,7 +134,11 @@ class OllamaClient:
             logger.info(f"[OllamaClient] VLM backend: vLLM ({self.vlm_model}) at {self.vlm_base_url}")
         else:
             self.vlm_base_url = self.llm_base_url
-            self.vlm_model = vlm_model or _pick_ollama_vlm(self.llm_base_url)
+            # Honour explicit config value; fall back to auto-detection only when unset.
+            if _DEFAULT_VLM_OLLAMA:
+                self.vlm_model = vlm_model or _DEFAULT_VLM_OLLAMA
+            else:
+                self.vlm_model = vlm_model or _pick_ollama_vlm(self.llm_base_url)
             logger.info(
                 f"[OllamaClient] vLLM not detected — VLM via Ollama: {self.vlm_model} "
                 f"at {self.vlm_base_url}"

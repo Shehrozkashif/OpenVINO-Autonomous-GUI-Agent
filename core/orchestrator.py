@@ -18,6 +18,7 @@ Execution flow:
 """
 import platform
 import re
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -32,7 +33,9 @@ from agents.grounding.grounding_agent import GroundingResult, UIGroundingAgent
 from agents.planning.planning_agent import PlanningAgent
 from agents.reflection.reflection_agent import ReflectionAgent
 from agents.router.router_agent import RouterAgent
+from core.capture.screen_snapshot import ScreenSnapshot, capture_snapshot
 from core.capture.screenshot import ScreenCapture, _screen_size
+from core.executor.burst_executor import BurstExecutor, detect_burst, detect_burst_from_instruction
 from core.protocols.a2a import ActionStep, SubTask
 from memory.task.task_memory import TaskMemory
 
@@ -44,6 +47,16 @@ class OrchestratorConfig:
     max_steps_per_subtask: int = 20
     max_scroll_find_attempts: int = 6   # scrolls before giving up on an off-screen element
     consecutive_failures_limit: int = 3
+
+
+# Per-action-type limit on consecutive identical successful steps.
+# Stricter for high-signal actions (type, right_click); lenient for nav keys.
+DEDUP_LIMIT_BY_ACTION_TYPE: Dict[str, int] = {
+    "type":        1,   # same text typed twice → almost certainly a loop
+    "click":       2,   # allow up to 2 repeats (e.g. re-focusing a window)
+    "key_press":   3,   # allow up to 3 repeats (e.g. multiple Escape/arrow presses)
+    "right_click": 1,   # context menu should open once
+}
 
 
 class TaskOrchestrator:
@@ -58,6 +71,7 @@ class TaskOrchestrator:
         task_memory: TaskMemory,
         config: OrchestratorConfig = None,
         on_step_log: Optional[Callable[[str], None]] = None,
+        ocr: Optional["OCREngine"] = None,
     ):
         self.router    = router
         self.planner   = planner
@@ -69,14 +83,83 @@ class TaskOrchestrator:
         self.config    = config or OrchestratorConfig()
         self.log       = on_step_log or print
         self._stop_event = threading.Event()
+        self.burst_executor = BurstExecutor(
+            grounder=self.grounder,
+            actor=self.actor,
+            reflector=self.reflector,
+        )
 
-        from agents.grounding.grounding_agent import OCREngine
-        self._ocr = OCREngine()
+        if ocr is not None:
+            self._ocr = ocr
+        else:
+            from agents.grounding.grounding_agent import OCREngine
+            self._ocr = OCREngine()
         self._screen_w, self._screen_h = _screen_size()
         self._extracted_data: Dict[str, str] = {}
 
     def stop(self):
         self._stop_event.set()
+
+    def _refresh_own_window_mask(self) -> None:
+        """Dynamically mask the GUI agent window from screen captures when it is the topmost window.
+
+        The GUI window shows the task description text (e.g. 'open Notepad'), and OCR picks that
+        up, confusing the planner into thinking apps are already running or grounding to wrong
+        coordinates. When another app (e.g. Notepad) is in the foreground, the GUI window is
+        behind it so its text isn't visible — no masking needed, and masking would obscure the
+        target app.  Using GetForegroundWindow() makes this safe in both cases.
+        """
+        try:
+            import ctypes
+            import ctypes.wintypes
+            user32 = ctypes.windll.user32
+
+            # Cache hwnd — find once using EnumWindows (partial title match, immune to
+            # exact dash character encoding differences in FindWindowW).
+            if not hasattr(self, "_own_hwnd"):
+                _found = [0]
+
+                @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+                def _cb(hwnd, _lparam):
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buf = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, buf, length + 1)
+                        if "Desktop GUI Agent" in buf.value:
+                            _found[0] = hwnd
+                            return False  # stop enumeration
+                    return True
+
+                user32.EnumWindows(_cb, 0)
+                self._own_hwnd = _found[0] or None
+                if self._own_hwnd:
+                    logger.info(f"[ORCHESTRATOR] GUI window handle cached: hwnd={self._own_hwnd}")
+                else:
+                    logger.debug("[ORCHESTRATOR] GUI window not found via EnumWindows — no masking")
+
+            hwnd = getattr(self, "_own_hwnd", None)
+            if not hwnd:
+                self.capturer.exclude_regions = []
+                return
+
+            # Only mask when our GUI window is the topmost (foreground) window.
+            # When another app is in focus, the GUI window's text is hidden behind it.
+            foreground = user32.GetForegroundWindow()
+            if foreground != hwnd:
+                if self.capturer.exclude_regions:
+                    self.capturer.exclude_regions = []
+                    logger.debug("[ORCHESTRATOR] GUI window not foreground — mask cleared")
+                return
+
+            # Our window is foreground — compute bounds once and cache them
+            if not self.capturer.exclude_regions:
+                rect = ctypes.wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                bounds = (rect.left, rect.top, rect.right, rect.bottom)
+                self.capturer.exclude_regions = [bounds]
+                logger.info(f"[ORCHESTRATOR] GUI window masked at {bounds}")
+        except Exception as e:
+            logger.debug(f"[ORCHESTRATOR] GUI window mask lookup failed: {e}")
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -101,9 +184,22 @@ class TaskOrchestrator:
             pass
 
         screen_context = self._get_screen_context()
-        task_id, subtasks = self.router.decompose(
-            instruction, screen_context=screen_context, memory_hint=memory_hint
-        )
+
+        # Attempt instruction-level burst detection before invoking the LLM router.
+        # Compound sequences (right-click → New → Folder → type → Enter) produce a
+        # single synthetic subtask, skipping router latency entirely.
+        _instr_burst = detect_burst_from_instruction(instruction)
+        if _instr_burst is not None:
+            self.log(
+                f"[BURST] Instruction-level burst detected "
+                f"({len(_instr_burst.steps)} steps) — skipping router"
+            )
+            synthetic = SubTask(id=1, description=instruction, depends_on=[], burst=_instr_burst)
+            task_id, subtasks = "burst_direct", [synthetic]
+        else:
+            task_id, subtasks = self.router.decompose(
+                instruction, screen_context=screen_context, memory_hint=memory_hint
+            )
         self.log(f"[ROUTER] {len(subtasks)} sub-task(s)")
 
         completed_subtask_ids = []
@@ -121,6 +217,20 @@ class TaskOrchestrator:
 
             if success:
                 success = self._verify_launch(subtask)
+                if not success:
+                    # Planner returned "goal achieved" but the app is not actually running.
+                    # Retry with an explicit hint: the icon-click approach failed, use the
+                    # search launcher instead. This prevents repeating the same wrong strategy.
+                    self.log(f"  [RETRY] Launch not confirmed — re-running subtask {subtask.id}")
+                    retry_ctx = completed_subtask_descs + [
+                        f"[RETRY NOTE] Clicking the icon or taskbar entry for "
+                        f"'{subtask.description}' did NOT launch the app. "
+                        f"Use the search launcher instead: "
+                        f"key_press winleft → type app name → key_press enter."
+                    ]
+                    success = self._execute_subtask(subtask, task_context=retry_ctx)
+                    if success:
+                        success = self._verify_launch(subtask)
 
             if success:
                 completed_subtask_ids.append(subtask.id)
@@ -167,6 +277,41 @@ class TaskOrchestrator:
         completed: List[str] = []
         consecutive_failures = 0
         _cached_ocr: str = ""   # reuse reflection's OCR for next planning step
+        _last_step_sig: tuple = ()    # (action_type, target, value, key)
+        _same_step_streak: int = 0   # consecutive successes of the identical step
+
+        # Prefer a pre-attached burst (set by instruction-level detection in execute())
+        # over per-subtask pattern matching; fall back to detect_burst() otherwise.
+        _burst = (
+            subtask.burst
+            if getattr(subtask, "burst", None) is not None
+            else detect_burst(subtask)
+        )
+        if _burst is not None:
+            self.log(f"  [BURST] {len(_burst.steps)}-step burst pattern detected")
+            _burst_result = self.burst_executor.run(_burst)
+            if _burst_result.success:
+                self.log(f"  [BURST] Succeeded ({len(_burst.steps)} steps, no LLM required)")
+                return True
+            self.log(
+                f"  [BURST] Failed at step {_burst_result.failed_at_step}: "
+                f"{_burst_result.reason} — falling back to planning loop"
+            )
+
+        # Process-based early-exit only fires for genuine app-launch subtasks, not for
+        # subtasks that USE the app ("with Notepad already open, save the file").
+        # "notepad running" does not mean "file saved" — avoid false goal achievement.
+        _desc_lower_sub = subtask.description.lower()
+        _is_launch_goal = (
+            not ("already open" in _desc_lower_sub or "already running" in _desc_lower_sub)
+            and (
+                any(w in _desc_lower_sub for w in ("launch",))
+                or (
+                    "open" in _desc_lower_sub
+                    and any(k in _desc_lower_sub for k in self._PROCESS_MAP_WINDOWS)
+                )
+            )
+        )
 
         for step_idx in range(self.config.max_steps_per_subtask):
             if self._stop_event.is_set():
@@ -200,6 +345,19 @@ class TaskOrchestrator:
                 if attempt > 0:
                     self.log(f"  Retry {attempt}/{self.config.max_retries_per_step}…")
 
+                # Capture pre-action hash for click steps BEFORE the action fires.
+                # The reflection agent's internal "before" capture runs AFTER execute(),
+                # so instant UI changes (menus opening) make before==after → false delta=0.
+                _pre_click_hash = None
+                if step.action_type in ("click", "right_click", "double_click"):
+                    try:
+                        import imagehash as _ih
+                        _pci = self.capturer.capture()
+                        _pci.thumbnail((320, 180))
+                        _pre_click_hash = _ih.phash(_pci)
+                    except Exception:
+                        pass
+
                 exec_ok = self._execute_step(step)
                 if not exec_ok:
                     last_error = "execution failed (element not found or action error)"
@@ -210,8 +368,32 @@ class TaskOrchestrator:
                     break
 
                 try:
-                    reflection = self.reflector.verify(step, self.config.reflection_wait_s)
+                    # Give apps extra time to open after a launcher Enter press.
+                    # 0.5 s is too short for Calculator/Notepad to show their UI.
+                    _is_launch_enter = (
+                        step.action_type == "key_press"
+                        and (step.key or "").lower() == "enter"
+                        and any(kw in step.description.lower()
+                                for kw in ("launch", "open", "start", "run"))
+                    )
+                    _reflect_wait = 1.5 if _is_launch_enter else self.config.reflection_wait_s
+                    reflection = self.reflector.verify(step, _reflect_wait,
+                                                       pre_hash=_pre_click_hash)
                     _cached_ocr = reflection.ocr_text   # reuse for next planning call
+
+                    if reflection.success:
+                        step_success = True
+                        self.log(f"  Verified (conf={reflection.confidence:.2f})")
+                        time.sleep(0.1)
+                        break
+
+                    # Step reported as failed by the reflector.
+                    # fail_threshold determines how to interpret uncertain failures:
+                    # below the threshold = outcome is inconclusive → retry;
+                    # at or above = reflector is confident it failed → retry or stop.
+                    # NOTE: reflection.confidence < fail_threshold no longer implies
+                    # success. It means "uncertain — try again." Only reflection.success
+                    # can set step_success = True.
                     _key = (step.key or "").lower()
                     _is_launcher_key = step.action_type == "key_press" and _key in ("super", "enter")
                     fail_threshold = (
@@ -219,17 +401,46 @@ class TaskOrchestrator:
                         if step.action_type in ("type", "hotkey") or _is_launcher_key
                         else self.reflector.min_confidence
                     )
-                    if reflection.success or reflection.confidence < fail_threshold:
-                        step_success = True
-                        label = "Verified" if reflection.success else "Uncertain→proceeding"
-                        self.log(f"  {label} (conf={reflection.confidence:.2f})")
-                        time.sleep(0.1)
-                        break
+
+                    if reflection.confidence < fail_threshold:
+                        # Reflector is uncertain about the failure — retry the action.
+                        last_error = (
+                            f"uncertain outcome (conf={reflection.confidence:.2f}, "
+                            f"threshold={fail_threshold:.2f})"
+                        )
+                        self.log(f"  Uncertain result — retrying ({last_error})")
+                        # Fast-path: if the goal process is already running after an
+                        # uncertain click or launch-Enter, skip remaining retries.
+                        if _OS == "Windows" and _is_launch_goal and (
+                            step.action_type in ("click", "double_click")
+                            or _is_launch_enter
+                        ):
+                            _proc_early = next(
+                                (self._PROCESS_MAP_WINDOWS[k]
+                                 for k in self._PROCESS_MAP_WINDOWS
+                                 if k in subtask.description.lower()),
+                                None,
+                            )
+                            if _proc_early and self._is_process_running(_proc_early):
+                                self.log(
+                                    f"  [GOAL-CHECK-EARLY] "
+                                    f"'{_proc_early.split('.')[0]}' already running "
+                                    f"— accepting step"
+                                )
+                                step_success = True
+                                break
                     else:
-                        last_error = reflection.error_description
-                        self.log(f"  Verification failed: {last_error}")
+                        # Reflector is confident the step failed.
+                        last_error = (
+                            reflection.error_description
+                            or "action did not produce expected result"
+                        )
+                        self.log(
+                            f"  Verification failed: {last_error} "
+                            f"(conf={reflection.confidence:.2f})"
+                        )
                         if not reflection.should_retry:
-                            step_success = True
+                            # Definitive failure, no point retrying this attempt.
                             break
                 except (ValueError, KeyError, AttributeError) as e:
                     # Model parse error — proceed optimistically
@@ -251,12 +462,79 @@ class TaskOrchestrator:
                 else:
                     completed.append(step.description)
                 consecutive_failures = 0
+
+                # Early-exit: after each successful step in a known app-launch subtask,
+                # check the process list on Windows. If the app is already running, the
+                # goal is achieved — return True immediately so the planner never gets a
+                # chance to generate spurious continuation steps (e.g. pressing Enter
+                # again inside a Calculator that is already open).
+                if _OS == "Windows" and _is_launch_goal:
+                    _desc_lower_chk = subtask.description.lower()
+                    _matched_proc = next(
+                        (self._PROCESS_MAP_WINDOWS[k]
+                         for k in self._PROCESS_MAP_WINDOWS
+                         if k in _desc_lower_chk),
+                        None,
+                    )
+                    if _matched_proc and self._is_process_running(_matched_proc):
+                        _label = _matched_proc.split(".")[0]
+                        self.log(f"  [GOAL-CHECK] '{_label}' confirmed running — goal achieved")
+                        return True
+
+                sig = (step.action_type, step.target, step.value, step.key)
+                if sig == _last_step_sig:
+                    _same_step_streak += 1
+                    _dedup_limit = DEDUP_LIMIT_BY_ACTION_TYPE.get(step.action_type, 2)
+                    if _same_step_streak > _dedup_limit:
+                        self.log(
+                            f"  [LOOP-GUARD] '{step.action_type}' repeated "
+                            f"{_same_step_streak + 1}× (limit={_dedup_limit}) — "
+                            f"loop detected, declaring goal achieved"
+                        )
+                        if step.action_type in ("click", "right_click"):
+                            try:
+                                _esc = ActionStep(
+                                    id=0, subtask_id=step.subtask_id,
+                                    action_type="key_press",
+                                    target=None, value=None, key="escape",
+                                    description="Escape to dismiss stray menu",
+                                    verification="",
+                                )
+                                self._execute_step(_esc)
+                                self.log("  [LOOP-GUARD] Recovery Escape sent")
+                            except Exception:
+                                pass
+                        return True
+                else:
+                    _same_step_streak = 0
+                    _last_step_sig = sig
             else:
                 note = (
                     f"[FAILED: {last_error}] {step.description}"
                     if last_error else f"[FAILED] {step.description}"
                 )
                 completed.append(note)
+
+                # Even on step failure, check if the goal process is now running.
+                # This handles the common case where key_press enter launches an app
+                # but the reflector times out before the app's UI is fully visible
+                # (reflection confidence 0.50 → step marked failed, yet app IS open).
+                if _OS == "Windows" and _is_launch_goal:
+                    _desc_lower_chk = subtask.description.lower()
+                    _matched_proc_fail = next(
+                        (self._PROCESS_MAP_WINDOWS[k]
+                         for k in self._PROCESS_MAP_WINDOWS
+                         if k in _desc_lower_chk),
+                        None,
+                    )
+                    if _matched_proc_fail and self._is_process_running(_matched_proc_fail):
+                        _label = _matched_proc_fail.split(".")[0]
+                        self.log(
+                            f"  [GOAL-CHECK] '{_label}' confirmed running "
+                            f"despite step failure — goal achieved"
+                        )
+                        return True
+
                 consecutive_failures += 1
                 self.log(f"  Step failed — re-evaluating next action")
 
@@ -297,6 +575,11 @@ class TaskOrchestrator:
             if not result.found or result.confidence < self.grounder.min_confidence:
                 self.log(f"  Could not find '{step.target}' (conf={result.confidence:.2f})")
                 return False
+            # Note: element_type check removed — Windows 11 Start menu and search
+            # overlays do not register as the foreground window in GetForegroundWindow,
+            # so capture_snapshot() cannot tag their OCR words as foreground_interactive.
+            # Clicks on these elements (score=1.0, method=ocr_direct) are correct.
+            # The GUI window masking (exclude_regions) prevents log-text false positives.
             x, y = result.x, result.y
 
         # ── Drag ──────────────────────────────────────────────────────────────
@@ -447,13 +730,39 @@ class TaskOrchestrator:
     # OS-specific OCR signals that confirm an app opened successfully.
     # Keys are lowercase fragments of the subtask description.
 
+    # Maps description keyword → Windows process executable name.
+    # Used by _verify_launch on Windows for reliable process-based checking
+    # (immune to the OCR false-positive caused by the GUI agent's own window text).
+    _PROCESS_MAP_WINDOWS: dict = {
+        "windows terminal": "WindowsTerminal.exe",
+        "terminal":         "WindowsTerminal.exe",
+        "command prompt":   "cmd.exe",
+        "powershell":       "powershell.exe",
+        "notepad":          "notepad.exe",
+        "calculator":       "CalculatorApp.exe",
+        "paint":            "mspaint.exe",
+        "file explorer":    "explorer.exe",
+        "explorer":         "explorer.exe",
+        "edge":             "msedge.exe",
+        "firefox":          "firefox.exe",
+        "chrome":           "chrome.exe",
+        "brave":            "brave.exe",
+        "vs code":          "Code.exe",
+        "visual studio":    "devenv.exe",
+        "task manager":     "Taskmgr.exe",
+        "snipping tool":    "SnippingTool.exe",
+        "wordpad":          "wordpad.exe",
+        "settings":         "SystemSettings.exe",
+    }
+
     _APP_SIGNALS_WINDOWS: dict = {
         "calculator":      ["Calculator", "Standard", "Scientific"],
         "notepad":         ["Notepad", "Untitled", "File"],
         "paint":           ["Paint", "Home", "Image"],
         "command prompt":  ["cmd", "C:\\", "Microsoft"],
         "powershell":      ["PowerShell", "PS", "Windows"],
-        "terminal":        ["Terminal", "PowerShell", "cmd", "Windows"],
+        "windows terminal": ["Windows Terminal", "Terminal", "PowerShell"],
+        "terminal":        ["Terminal", "PowerShell", "cmd"],
         "file explorer":   ["File Explorer", "This PC", "Documents", "Quick access"],
         "explorer":        ["File Explorer", "This PC", "Documents", "Quick access"],
         "edge":            ["Microsoft Edge", "New Tab", "Search"],
@@ -483,41 +792,114 @@ class TaskOrchestrator:
         "nautilus":       ["Files", "Home", "Documents"],
     }
 
+    # Generic words that don't make useful OCR signals on their own
+    _GENERIC_NAME_WORDS = frozenset((
+        "the", "a", "an", "app", "application", "browser", "program", "tool",
+    ))
+
     @property
     def _APP_SIGNALS(self) -> dict:
         return self._APP_SIGNALS_WINDOWS if _OS == "Windows" else self._APP_SIGNALS_LINUX
+
+    def _derive_launch_signals(self, description: str) -> List[str]:
+        """
+        Fallback for apps absent from the curated _APP_SIGNALS table: derive OCR
+        signal words directly from the app name in "open <AppName>" — e.g.
+        "open Brave Browser" → ["Brave Browser", "Brave"]. This keeps launch
+        verification working for ANY installed app, not just well-known ones.
+        Preserves original casing (unlike `desc`) since OCR text is case-sensitive.
+        """
+        m = re.search(
+            r"\b(?:open|launch|start)\s+(?:the |a |an )?"
+            r"([A-Za-z0-9][\w+-]*(?:[ \t]+[A-Za-z0-9][\w+-]*)*?)"
+            r"(?:[ \t]+(?:using|via|by|with|and)\b|[.,!?]|$)",
+            description,
+        )
+        if not m:
+            return []
+        name = m.group(1).strip().rstrip(".")
+        words = [w for w in name.split()
+                 if len(w) >= 3 and w.lower() not in self._GENERIC_NAME_WORDS]
+        if not words:
+            return []
+        return [name] + words[:2]
+
+    def _is_process_running(self, exe_name: str) -> bool:
+        """Check if a process with the given executable name is running (Windows only)."""
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
+                capture_output=True, text=True, timeout=3,
+            ).stdout
+            return exe_name.lower() in out.lower()
+        except Exception:
+            return False
 
     def _verify_launch(self, subtask) -> bool:
         desc = subtask.description.lower()
         if "already open" in desc or "already running" in desc:
             return True
-        if not any(w in desc for w in ("open", "launch", "search launcher")):
+        # Only run verification for genuine app-launch subtasks.
+        # The old bare "open" substring match triggered on phrases like
+        # "right click on the desktop to open the context menu" — a false positive
+        # that caused the agent to retry with a Start-menu search.
+        # New rule: require "launch"/"search launcher" explicitly, OR "open" paired
+        # with a known-app keyword from the curated signal tables.
+        _app_vocab = set(self._PROCESS_MAP_WINDOWS) | set(self._APP_SIGNALS)
+        _is_app_launch = (
+            any(w in desc for w in ("launch", "search launcher"))
+            or ("open" in desc and any(k in desc for k in _app_vocab))
+        )
+        if not _is_app_launch:
             return True
 
+        # On Windows: use process-based check (immune to GUI-text false positives)
+        if _OS == "Windows":
+            matched_proc = next(
+                (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS if k in desc),
+                None,
+            )
+            if matched_proc:
+                label = matched_proc.split(".")[0]
+                for attempt, wait_s in enumerate([1.5, 2.5]):
+                    time.sleep(wait_s)
+                    if self._is_process_running(matched_proc):
+                        self.log(f"  [CHECK] '{label}' process confirmed running")
+                        return True
+                    if attempt == 0:
+                        self.log(f"  [CHECK] '{label}' not yet running — retrying in 2.5s")
+                self.log(f"  [CHECK] Process '{matched_proc}' not found after launch")
+                return False
+
+        # Fallback: OCR-based signal check (Linux/macOS, or apps not in process map)
         matched_key = next(
             (k for k in self._APP_SIGNALS if k in desc), None
         )
-        if matched_key is None:
+        signals = (
+            self._APP_SIGNALS[matched_key] if matched_key
+            else self._derive_launch_signals(subtask.description)
+        )
+        if not signals:
             return True
+        label = matched_key or signals[0]
 
-        signals = self._APP_SIGNALS[matched_key]
         for attempt, wait_s in enumerate([1.5, 2.5]):
             time.sleep(wait_s)
             try:
-                img = self.capturer.capture()
-                img.thumbnail((960, 540))
-                ocr_words = {w.text for w in self._ocr.extract(img) if w.conf >= 0.5}
+                # Filter to foreground regions to exclude GUI agent window text.
+                snapshot = capture_snapshot(self.capturer, self._ocr)
+                ocr_words = {r.text for r in snapshot.ocr_regions if r.is_in_foreground}
                 all_ocr_text = " ".join(ocr_words)
                 if any(sig in all_ocr_text for sig in signals):
-                    self.log(f"  [CHECK] '{matched_key}' confirmed on screen")
+                    self.log(f"  [CHECK] '{label}' confirmed on screen")
                     return True
                 if attempt == 0:
-                    self.log(f"  [CHECK] '{matched_key}' not yet visible — retrying in 2.5s")
+                    self.log(f"  [CHECK] '{label}' not yet visible — retrying in 2.5s")
             except Exception as e:
                 logger.warning(f"[ORCHESTRATOR] Launch check error: {e}")
                 return True
 
-        self.log(f"  [CHECK] Expected '{matched_key}' on screen but not found")
+        self.log(f"  [CHECK] Expected '{label}' on screen but not found")
         return False
 
     # ── Adaptive inter-subtask wait ───────────────────────────────────────────
@@ -551,24 +933,38 @@ class TaskOrchestrator:
     # ── Screen context ─────────────────────────────────────────────────────────
 
     def _get_screen_context(self) -> str:
+        """
+        Return a structured screen context string for the planner.
+
+        Uses capture_snapshot() to separate foreground UI text from background
+        window text so the planner can focus on interactable elements only.
+        Falls back to a flat token list if snapshot capture fails.
+        """
         try:
-            img = self.capturer.capture()
-            img.thumbnail((960, 540))
-            words = self._ocr.extract(img)
-            visible = [
-                w.text for w in words
-                if 2 <= len(w.text) <= 30
-                and w.conf >= 0.80
-                and not any(c in w.text for c in ('/', '\\', '=', '{', '}', '$', '#'))
-            ]
-            seen, unique = set(), []
-            for t in visible:
-                if t.lower() not in seen:
-                    seen.add(t.lower())
-                    unique.append(t)
-            return ", ".join(f'"{t}"' for t in unique[:40])
+            if _OS == "Windows":
+                self._refresh_own_window_mask()
+            snapshot = capture_snapshot(self.capturer, self._ocr)
+            return snapshot.format_for_planner()
         except Exception:
-            return ""
+            # Fallback: flat token list when snapshot capture fails
+            try:
+                img = self.capturer.capture()
+                img.thumbnail((960, 540))
+                words = self._ocr.extract(img)
+                visible = [
+                    w.text for w in words
+                    if 2 <= len(w.text) <= 30
+                    and w.conf >= 0.80
+                    and not any(c in w.text for c in ('/', '\\', '=', '{', '}', '$', '#'))
+                ]
+                seen, unique = set(), []
+                for t in visible:
+                    if t.lower() not in seen:
+                        seen.add(t.lower())
+                        unique.append(t)
+                return ", ".join(f'"{t}"' for t in unique[:40])
+            except Exception:
+                return ""
 
     # ── Topological sort ──────────────────────────────────────────────────────
 

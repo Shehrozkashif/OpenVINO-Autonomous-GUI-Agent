@@ -117,7 +117,26 @@ def find_element(
 
     if result[0]:
         x, y, conf = result[0]
-        logger.info(f"[UIA] '{target}' → screen({x},{y}) conf={conf:.2f}")
+        # Guard: "desktop" queries must not return taskbar-zone coordinates.
+        # Windows UIA sometimes resolves "desktop" to a taskbar element (y > 92%
+        # of screen height). Right-clicking there never opens the desktop context
+        # menu. Reject it here so grounding falls through to OCR/VLM.
+        if "desktop" in target.lower():
+            try:
+                import ctypes
+                sh = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN
+                if sh > 0 and y > int(sh * 0.92):
+                    logger.debug(
+                        f"[UIA] Rejecting taskbar-zone coordinate ({x},{y}) for "
+                        f"'desktop' query (threshold y>{int(sh*0.92)})"
+                    )
+                    result[0] = None
+            except Exception:
+                pass
+
+    if result[0]:
+        x, y, conf = result[0]
+        logger.info(f"[UIA] '{target}' -> screen({x},{y}) conf={conf:.2f}")
     else:
         logger.debug(f"[UIA] '{target}' not found (timeout={timeout_s}s)")
 

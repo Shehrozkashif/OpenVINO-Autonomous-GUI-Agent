@@ -35,19 +35,30 @@ _IS_WINDOWS = platform.system() == "Windows"
 # ── VLM prompt constants ──────────────────────────────────────────────────────
 
 _UITARS_SYSTEM_PROMPT = (
-    "You are a GUI agent. Your job is to locate UI elements in screenshots "
-    "and return their exact screen coordinates. Be precise."
+    "You are a GUI grounding agent. Locate the requested UI element in the "
+    "screenshot and output a click action with its bounding box on a 0-1000 scale."
 )
 
-# UI-TARS may reply with JSON, <point>x y</point>, or (x1,y1),(x2,y2) bbox.
+# UI-TARS native output format uses 0-1000 scale action strings.
+# Asking for JSON with 0-1 floats causes the model to sometimes output
+# 0-1000 integers in JSON, making coordinate interpretation ambiguous.
+# Using the native action format is the most reliable approach.
+#
+# Fallback parsers still handle:
+#   JSON:   {"x": 0.5, "y": 0.3}       (0-1 normalised)
+#   JSON:   {"x": 378, "y": 654}       (0-1000 scale — now treated correctly)
+#   Point:  <point>x y</point>         (0-1000 scale)
+#   BBox:   (x1,y1),(x2,y2)
 _VLM_COORD_PROMPT = (
-    'In this screenshot, locate the UI element: "{target}"\n\n'
-    "Output ONLY valid JSON:\n"
-    '{{"x": <float 0.0-1.0>, "y": <float 0.0-1.0>, "confidence": <float 0.0-1.0>, "found": true}}\n\n'
-    "x=0.0 is LEFT edge, x=1.0 is RIGHT edge\n"
-    "y=0.0 is TOP edge, y=1.0 is BOTTOM edge\n"
-    "x,y = CENTER of the element\n"
-    'If element not visible: {{"found": false}}'
+    'In this screenshot, locate the UI element described as: "{target}"\n\n'
+    "Respond with the bounding box in this EXACT format:\n"
+    "click(start_box='[[x1, y1, x2, y2]]')\n\n"
+    "Rules:\n"
+    "  - x1,y1 = top-left corner of the element\n"
+    "  - x2,y2 = bottom-right corner of the element\n"
+    "  - All values are on a 0-1000 scale where (0,0)=top-left and (1000,1000)=bottom-right\n"
+    "  - Output the action line only, nothing else\n"
+    "If the element is not visible in the screenshot: not_found()"
 )
 
 # Common words that describe element role, not its visible text label
@@ -71,6 +82,8 @@ class OCRWord:
     w: int      # width
     h: int      # height
     conf: float # 0.0 – 1.0
+    is_in_foreground: bool = True    # set by capture_snapshot(); default True for plain OCR results
+    element_type: str = "document_text"  # "foreground_interactive" when tagged by capture_snapshot()
 
     @property
     def cx(self) -> int:
@@ -168,10 +181,17 @@ class OCREngine:
         """Clear all cached OCR results (call after an action changes the screen)."""
         self._cache.clear()
 
-    def find_text(self, words: List[OCRWord], query: str, threshold: float = 0.60) -> Optional[OCRWord]:
+    def find_text(
+        self,
+        words: List[OCRWord],
+        query: str,
+        threshold: float = 0.60,
+        foreground_only: bool = False,
+    ) -> Optional[OCRWord]:
         """
         Fuzzy-match query against all OCR words.
         Checks windows of 1-3 consecutive words to handle multi-word labels.
+        When foreground_only=True, words with is_in_foreground=False are skipped.
         """
         if not words or not query.strip():
             return None
@@ -181,12 +201,19 @@ class OCREngine:
         for window in range(1, 4):
             for i in range(len(words) - window + 1):
                 group = words[i : i + window]
+                if foreground_only and any(not w.is_in_foreground for w in group):
+                    continue
+                if foreground_only and any(w.element_type != "foreground_interactive" for w in group):
+                    continue
                 combined = " ".join(w.text for w in group).lower()
 
                 if q == combined:
                     score = 1.0
                 elif q in combined and len(q) >= 3:
-                    score = 0.95
+                    # Penalise matches where query is a tiny fragment of a long text.
+                    # e.g. "folder" inside a 100-char Monitor event line → ~0.25, rejected.
+                    length_penalty = min(1.0, (len(q) / max(len(combined), 1)) * 4)
+                    score = 0.95 * length_penalty
                 elif combined in q and len(combined) >= 4:
                     score = 0.90
                 else:
@@ -202,6 +229,12 @@ class OCREngine:
                         text=" ".join(w.text for w in group),
                         x=gx, y=gy, w=gx2 - gx, h=gy2 - gy,
                         conf=min(w.conf for w in group),
+                        is_in_foreground=all(w.is_in_foreground for w in group),
+                        element_type=(
+                            "foreground_interactive"
+                            if all(w.element_type == "foreground_interactive" for w in group)
+                            else "document_text"
+                        ),
                     )
                     if best is None or score > best[0]:
                         best = (score, merged)
@@ -223,6 +256,7 @@ class GroundingResult:
     latency_ms: float
     target: str
     method: str = "unknown"
+    element_type: str = "foreground_interactive"  # "document_text" for non-interactive OCR hits
 
 
 class ElementCache:
@@ -232,17 +266,20 @@ class ElementCache:
         self._cache: Dict[str, tuple] = {}
         self._ttl = ttl_seconds
 
-    def get(self, target: str, screen_hash: str) -> Optional[Tuple[int, int, float, str]]:
+    def get(self, target: str, screen_hash: str) -> Optional[Tuple[int, int, float, str, str]]:
         if target not in self._cache:
             return None
-        x, y, conf, method, ts, cached_hash = self._cache[target]
+        x, y, conf, method, element_type, ts, cached_hash = self._cache[target]
         if screen_hash != cached_hash or (time.time() - ts) > self._ttl:
             del self._cache[target]
             return None
-        return x, y, conf, method
+        return x, y, conf, method, element_type
 
-    def put(self, target: str, x: int, y: int, conf: float, method: str, screen_hash: str):
-        self._cache[target] = (x, y, conf, method, time.time(), screen_hash)
+    def put(
+        self, target: str, x: int, y: int, conf: float, method: str,
+        screen_hash: str, element_type: str = "foreground_interactive",
+    ):
+        self._cache[target] = (x, y, conf, method, element_type, time.time(), screen_hash)
 
     def invalidate(self):
         self._cache.clear()
@@ -258,19 +295,20 @@ class UIGroundingAgent:
     Accepts any client that implements InferenceClient (OllamaClient, OVMSClient, etc.).
     """
 
-    _DISPLAY_W = 1280  # resize screenshot to this for VLM input
-    _DISPLAY_H = 720
+    _DISPLAY_W = 960   # must match capture_snapshot() thumbnail size so OCR cache entries are shared
+    _DISPLAY_H = 540   # and element_type tags set by capture_snapshot() flow into grounding
 
     def __init__(
         self,
         ovms_client: InferenceClient,
         capturer: ScreenCapture,
         min_confidence: float = 0.5,
+        ocr: Optional["OCREngine"] = None,
     ):
         self.client = ovms_client
         self.capturer = capturer
         self.cache = ElementCache()
-        self.ocr = OCREngine()
+        self.ocr = ocr if ocr is not None else OCREngine()
         self.min_confidence = min_confidence
         self.screen_w, self.screen_h = _screen_size()
         logger.info(
@@ -302,11 +340,12 @@ class UIGroundingAgent:
         screen_hash = str(imagehash.phash(display))
         cached = self.cache.get(target, screen_hash)
         if cached:
-            x, y, conf, method = cached
+            x, y, conf, method, element_type = cached
             logger.info(f"[GROUNDING] Cache hit: '{target}' → ({x},{y}) via {method}")
             return GroundingResult(x=x, y=y, confidence=conf, found=True,
                                    latency_ms=(time.time() - start) * 1000,
-                                   target=target, method=f"cache/{method}")
+                                   target=target, method=f"cache/{method}",
+                                   element_type=element_type)
 
         img_b64 = self._encode(display)
         words = self.ocr.extract(display) if self.ocr.is_available() else []
@@ -314,10 +353,10 @@ class UIGroundingAgent:
         for attempt in range(max_retries + 1):
             result = self._locate(target, display, img_b64, words, scale_x, scale_y)
             if result:
-                x, y, conf, method = result
+                x, y, conf, method, element_type = result
                 x = max(0, min(x, self.screen_w - 1))
                 y = max(0, min(y, self.screen_h - 1))
-                self.cache.put(target, x, y, conf, method, screen_hash)
+                self.cache.put(target, x, y, conf, method, screen_hash, element_type)
                 logger.info(
                     f"[GROUNDING] '{target}' → ({x},{y}) conf={conf:.2f} "
                     f"method={method} attempt={attempt+1} "
@@ -326,7 +365,8 @@ class UIGroundingAgent:
                 return GroundingResult(x=x, y=y, confidence=conf,
                                        found=conf >= self.min_confidence,
                                        latency_ms=(time.time() - start) * 1000,
-                                       target=target, method=method)
+                                       target=target, method=method,
+                                       element_type=element_type)
 
         # All direct attempts failed — ask the LLM for alternative label phrasings
         alternatives = self._rephrase_targets(target)
@@ -334,17 +374,62 @@ class UIGroundingAgent:
             logger.info(f"[GROUNDING] Rephrasing: trying '{alt}' for '{target}'")
             result = self._locate(alt, display, img_b64, words, scale_x, scale_y)
             if result:
-                x, y, conf, method = result
+                x, y, conf, method, element_type = result
                 x = max(0, min(x, self.screen_w - 1))
                 y = max(0, min(y, self.screen_h - 1))
-                self.cache.put(target, x, y, conf, f"rephrase/{method}", screen_hash)
+                self.cache.put(target, x, y, conf, f"rephrase/{method}", screen_hash, element_type)
                 logger.info(f"[GROUNDING] Rephrasing succeeded: '{alt}' → ({x},{y})")
                 return GroundingResult(x=x, y=y, confidence=conf,
                                        found=conf >= self.min_confidence,
                                        latency_ms=(time.time() - start) * 1000,
-                                       target=target, method=f"rephrase/{method}")
+                                       target=target, method=f"rephrase/{method}",
+                                       element_type=element_type)
 
         logger.warning(f"[GROUNDING] All stages failed for '{target}'")
+        return GroundingResult(x=0, y=0, confidence=0.0, found=False,
+                               latency_ms=(time.time() - start) * 1000,
+                               target=target, method="failed")
+
+    def ground_fast(self, target: str) -> GroundingResult:
+        """
+        Stage 0 + Stage 1 only (UIA + OCR) — no VLM call.
+
+        Used during burst pre-grounding where transient elements (context-menu
+        items) may not be visible yet.  If they're absent, Stage 2 would block
+        for 30-50 s just to confirm not-found; this method returns immediately.
+        """
+        start = time.time()
+        screenshot = self.capturer.capture()
+        display = screenshot.copy()
+        display.thumbnail((self._DISPLAY_W, self._DISPLAY_H), Image.LANCZOS)
+        dw, dh = display.width, display.height
+        scale_x = self.screen_w / dw if dw > 0 else 1.0
+        scale_y = self.screen_h / dh if dh > 0 else 1.0
+
+        words = self.ocr.extract(display) if self.ocr.is_available() else []
+
+        if _IS_WINDOWS and _uia_ok():
+            r = _uia_find(target)
+            if r:
+                x, y, conf = r
+                x = max(0, min(x, self.screen_w - 1))
+                y = max(0, min(y, self.screen_h - 1))
+                return GroundingResult(x=x, y=y, confidence=conf, found=True,
+                                       latency_ms=(time.time() - start) * 1000,
+                                       target=target, method="uia",
+                                       element_type="foreground_interactive")
+
+        if words:
+            query = _strip_role_words(target)
+            match = self.ocr.find_text(words, query, threshold=0.65)
+            if match:
+                x = int(match.cx * scale_x)
+                y = int(match.cy * scale_y)
+                return GroundingResult(x=x, y=y, confidence=0.95, found=True,
+                                       latency_ms=(time.time() - start) * 1000,
+                                       target=target, method="ocr_direct",
+                                       element_type=match.element_type)
+
         return GroundingResult(x=0, y=0, confidence=0.0, found=False,
                                latency_ms=(time.time() - start) * 1000,
                                target=target, method="failed")
@@ -362,8 +447,9 @@ class UIGroundingAgent:
         words: List[OCRWord],
         scale_x: float,
         scale_y: float,
-    ) -> Optional[Tuple[int, int, float, str]]:
+    ) -> Optional[Tuple[int, int, float, str, str]]:
         # Stage 0: Windows UIAutomation — fast, pixel-perfect, no model needed
+        # UIA elements are always interactive → element_type="foreground_interactive"
         if _IS_WINDOWS and _uia_ok():
             r = _uia_find(target)
             if r:
@@ -371,31 +457,37 @@ class UIGroundingAgent:
                 x = max(0, min(x, self.screen_w - 1))
                 y = max(0, min(y, self.screen_h - 1))
                 logger.info(f"[GROUNDING/S0-UIA] '{target}' → screen({x},{y}) conf={conf:.2f}")
-                return (x, y, conf, "uia")
+                return (x, y, conf, "uia", "foreground_interactive")
             logger.debug(f"[GROUNDING/S0-UIA] '{target}' not found in UIA tree")
 
-        # Stage 1: OCR direct fuzzy-match
+        # Stage 1: OCR direct fuzzy-match — carry element_type from the matched word
         if words:
             query = _strip_role_words(target)
             match = self.ocr.find_text(words, query, threshold=0.65)
             if match:
                 x, y = int(match.cx * scale_x), int(match.cy * scale_y)
                 logger.info(f"[GROUNDING/S1-OCR] '{target}' → '{match.text}' → screen({x},{y})")
-                return (x, y, 0.95, "ocr_direct")
+                return (x, y, 0.95, "ocr_direct", match.element_type)
             logger.debug(f"[GROUNDING/S1] No OCR match for '{query}'")
 
         # Stage 2: VLM direct coordinate prediction
+        # VLM is expected to hit interactive elements → element_type="foreground_interactive"
         if self.client:
-            result = self._vlm_coords(target, img_b64)
+            result = self._vlm_coords(target, img_b64, int(display.width), int(display.height))
             if result:
                 return result
 
         return None
 
     def _vlm_coords(
-        self, target: str, img_b64: str
-    ) -> Optional[Tuple[int, int, float, str]]:
-        """Ask UI-TARS for normalized (x,y) coordinates and scale to screen pixels."""
+        self, target: str, img_b64: str,
+        display_w: int = 0, display_h: int = 0,
+    ) -> Optional[Tuple[int, int, float, str, str]]:
+        """Ask UI-TARS for normalized (x,y) coordinates and scale to screen pixels.
+
+        display_w/display_h: pixel dimensions of the image sent to the VLM.
+        Needed to correctly scale pixel-valued JSON coordinates back to screen space.
+        """
         try:
             resp = self.client.query_vlm(
                 prompt=_VLM_COORD_PROMPT.format(target=target),
@@ -410,49 +502,121 @@ class UIGroundingAgent:
                 text = text.split("</think>")[-1].strip()
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-            result = self._parse_coords(text, self.screen_w, self.screen_h)
+            result = self._parse_coords(text, self.screen_w, self.screen_h, display_w, display_h)
             if result:
                 x, y, conf = result
-                logger.info(f"[GROUNDING/S2-VLM] '{target}' → screen({x},{y}) conf={conf:.2f}")
-                return (x, y, conf, "vlm_coords")
+                logger.info(f"[GROUNDING/S2-VLM] '{target}' -> screen({x},{y}) conf={conf:.2f}")
+                return (x, y, conf, "vlm_coords", "foreground_interactive")
         except Exception as e:
             logger.warning(f"[GROUNDING/S2-VLM] Error: {e}")
         return None
 
     def _parse_coords(
-        self, text: str, screen_w: int, screen_h: int
+        self, text: str, screen_w: int, screen_h: int,
+        display_w: int = 0, display_h: int = 0,
     ) -> Optional[Tuple[int, int, float]]:
         """
         Parse VLM output into screen pixel coordinates (x, y, confidence).
-        Handles three formats UI-TARS may emit:
-          JSON:  {"x": 0.5, "y": 0.3, "confidence": 0.9, "found": true}  (normalised 0-1)
-          Point: <point>500 300</point>   (0-1000 scale or rarely absolute pixels)
-          BBox:  (x1,y1),(x2,y2)         (centre taken; same scale rules)
+
+        display_w/display_h: size of the image that was sent to the VLM.
+        When the model returns pixel-valued coordinates they are in the display
+        image's coordinate space and must be scaled to screen space:
+            screen_x = (pixel_x / display_w) * screen_w
+        If display dims are not provided, pixel coords are used as-is (clipped).
+
+        Handles the formats UI-TARS may emit:
+          action: click(start_box='[[x1,y1,x2,y2]]')   0-1000 scale
+          JSON:   {"x": 0.5, "y": 0.3, ...}            normalised 0-1
+          JSON:   {"x": 423, "y": 706, ...}             display pixels
+          Point:  <point>500 300</point>                 0-1000 or display pixels
+          BBox:   (x1,y1),(x2,y2)                       same scale rules
         """
-        # JSON — x/y are normalised 0-1
+        # Effective display dimensions for pixel-to-screen scaling.
+        # Fall back to screen dims (identity scale) when not provided.
+        dw = display_w if display_w > 1 else screen_w
+        dh = display_h if display_h > 1 else screen_h
+
+        def _px_to_screen(px: float, py: float) -> Tuple[int, int]:
+            """Scale display-space pixels to screen pixels, clamped to screen bounds."""
+            return (
+                min(int(px / dw * screen_w), screen_w - 1),
+                min(int(py / dh * screen_h), screen_h - 1),
+            )
+
+        # UI-TARS native action format (0-1000 scale, independent of display size):
+        #   click(start_box='[[x1, y1, x2, y2]]')
+        m = re.search(
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[?\[?"
+            r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
+            r"\]?\]?'?\s*\)",
+            text,
+        )
+        if m:
+            x1, y1, x2, y2 = (float(m.group(i)) for i in range(1, 5))
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.90)
+
+        # 2-value form: model emits [[cx, cy]] instead of [[x1,y1,x2,y2]].
+        # Treat as center point on the 0-1000 scale.
+        m = re.search(
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[?\[?"
+            r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
+            r"\s*[\]\)']+",
+            text,
+        )
+        if m:
+            cx, cy = float(m.group(1)), float(m.group(2))
+            return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.80)
+
+        # JSON block — x/y may be:
+        #   0-1 normalised floats  (model followed instructions)
+        #   1-1000 integers        (UI-TARS native 0-1000 scale leaked into JSON)
+        #   > 1000                 (raw display pixels — scale by dw/dh)
+        # Also handle malformed JSON like {"x": 658, 294} (missing "y": key).
         m = re.search(r'\{[^{}]*\}', text, re.DOTALL)
         if m:
+            raw_json = re.sub(r",\s*([\]}])", r"\1", m.group())
             try:
-                data = json.loads(re.sub(r",\s*([\]}])", r"\1", m.group()))
+                data = json.loads(raw_json)
                 if not data.get("found", True):
                     return None
                 xv, yv = float(data["x"]), float(data["y"])
                 conf = float(data.get("confidence", 0.7))
                 if 0.0 <= xv <= 1.0 and 0.0 <= yv <= 1.0:
+                    # Normalised 0-1 — most accurate
                     return (int(xv * screen_w), int(yv * screen_h), conf)
+                if 1.0 < xv <= 1000 and 1.0 < yv <= 1000:
+                    # UI-TARS native 0-1000 scale — treat as normalised/1000
+                    return (int(xv / 1000 * screen_w), int(yv / 1000 * screen_h), conf)
+                # Values > 1000 — raw display pixels, scale to screen space
+                sx, sy = _px_to_screen(xv, yv)
+                return (sx, sy, conf)
             except (json.JSONDecodeError, ValueError, KeyError):
-                pass
+                # Fallback: try to extract two numbers from the JSON string
+                nums = re.findall(r'[\d]+(?:\.\d+)?', raw_json)
+                if len(nums) >= 2:
+                    try:
+                        xv, yv = float(nums[0]), float(nums[1])
+                        if 0.0 <= xv <= 1.0 and 0.0 <= yv <= 1.0:
+                            return (int(xv * screen_w), int(yv * screen_h), 0.65)
+                        if 1.0 < xv <= 1000 and 1.0 < yv <= 1000:
+                            return (int(xv / 1000 * screen_w), int(yv / 1000 * screen_h), 0.65)
+                        sx, sy = _px_to_screen(xv, yv)
+                        return (sx, sy, 0.65)
+                    except ValueError:
+                        pass
 
-        # <point>cx cy</point>
+        # <point>cx cy</point>  (0-1000 scale or display-space pixels)
         m = re.search(r'<point>\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s*</point>', text)
         if m:
             px, py = float(m.group(1)), float(m.group(2))
             if px <= 1.0 and py <= 1.0:
                 return (int(px * screen_w), int(py * screen_h), 0.85)
             if px <= 1000 and py <= 1000:
+                # Could be 0-1000 normalised or small-display pixels; treat as 0-1000.
                 return (int(px / 1000 * screen_w), int(py / 1000 * screen_h), 0.85)
-            # Absolute pixels from the model — clamp to screen bounds
-            return (min(int(px), screen_w - 1), min(int(py), screen_h - 1), 0.75)
+            sx, sy = _px_to_screen(px, py)
+            return (sx, sy, 0.75)
 
         # (x1,y1),(x2,y2) bounding box — take centre
         m = re.search(
@@ -466,7 +630,8 @@ class UIGroundingAgent:
                 return (int(cx * screen_w), int(cy * screen_h), 0.85)
             if cx <= 1000 and cy <= 1000:
                 return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.85)
-            return (min(int(cx), screen_w - 1), min(int(cy), screen_h - 1), 0.75)
+            sx, sy = _px_to_screen(cx, cy)
+            return (sx, sy, 0.75)
 
         logger.debug(f"[GROUNDING/S2] Unrecognised VLM format: '{text[:100]}'")
         return None

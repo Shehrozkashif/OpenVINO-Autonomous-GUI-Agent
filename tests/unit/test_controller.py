@@ -1,112 +1,80 @@
 # tests/unit/test_controller.py
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 from tools.desktop_control.controller import DesktopController
 
 
-@pytest.fixture
-def mock_httpx_client():
-    with patch("tools.desktop_control.controller.httpx.Client") as mock_client_cls:
-        mock_client = MagicMock()
-        mock_client_cls.return_value = mock_client
-        yield mock_client
+@pytest.fixture(autouse=True)
+def mock_pynput(monkeypatch):
+    """Patch the module-level mouse/keyboard singletons so no real input is sent."""
+    mock_mouse = MagicMock()
+    mock_kb = MagicMock()
+    monkeypatch.setattr("tools.desktop_control.controller._mouse", mock_mouse)
+    monkeypatch.setattr("tools.desktop_control.controller._pynput_kb", mock_kb)
+    monkeypatch.setattr("tools.desktop_control.controller._XTEST_OK", False)
+    return mock_mouse, mock_kb
 
 
-def test_click(mock_httpx_client):
-    mock_httpx_client.post.return_value.json.return_value = {
-        "success": True,
-        "result": {"action": "left_click", "x": 100, "y": 200}
-    }
+def test_click(mock_pynput):
+    mouse, _ = mock_pynput
     controller = DesktopController()
-    assert controller.click(100, 200) is True
-    mock_httpx_client.post.assert_called_once_with(
-        "http://127.0.0.1:8015/tools/call",
-        json={"name": "mouse_click", "arguments": {"x": 100, "y": 200, "button": "left"}}
-    )
+    result = controller.click(100, 200)
+    assert result is True
+    assert mouse.press.called
+    assert mouse.release.called
 
 
-def test_double_click(mock_httpx_client):
-    mock_httpx_client.post.return_value.json.return_value = {
-        "success": True,
-        "result": {"action": "left_click", "clicks": 2}
-    }
+def test_double_click(mock_pynput):
+    mouse, _ = mock_pynput
     controller = DesktopController()
-    assert controller.double_click(300, 400) is True
-    mock_httpx_client.post.assert_called_once_with(
-        "http://127.0.0.1:8015/tools/call",
-        json={"name": "mouse_click", "arguments": {"x": 300, "y": 400, "clicks": 2}}
-    )
+    result = controller.double_click(300, 400)
+    assert result is True
+    assert mouse.press.call_count == 2
+    assert mouse.release.call_count == 2
 
 
-def test_type_text(mock_httpx_client):
-    mock_httpx_client.post.return_value.json.return_value = {
-        "success": True,
-        "result": {"typed": "hello"}
-    }
+def test_type_text(mock_pynput):
+    _, kb = mock_pynput
     controller = DesktopController()
-    assert controller.type_text("hello") is True
-    mock_httpx_client.post.assert_called_once_with(
-        "http://127.0.0.1:8015/tools/call",
-        json={"name": "type_text", "arguments": {"text": "hello"}}
-    )
+    result = controller.type_text("hi")
+    assert result is True
+    assert kb.type.call_count == 2  # one call per character
 
 
-def test_press_key(mock_httpx_client):
-    mock_httpx_client.post.return_value.json.return_value = {
-        "success": True,
-        "result": {"key": "enter"}
-    }
+def test_press_key(mock_pynput):
+    _, kb = mock_pynput
     controller = DesktopController()
-    assert controller.press_key("enter") is True
-    mock_httpx_client.post.assert_called_once_with(
-        "http://127.0.0.1:8015/tools/call",
-        json={"name": "press_key", "arguments": {"key": "enter"}}
-    )
+    result = controller.press_key("enter")
+    assert result is True
+    kb.press.assert_called_once()
+    kb.release.assert_called_once()
 
 
-def test_hotkey(mock_httpx_client):
-    mock_httpx_client.post.return_value.json.return_value = {
-        "success": True,
-        "result": {"hotkey": "ctrl+s"}
-    }
+def test_hotkey(mock_pynput):
+    _, kb = mock_pynput
     controller = DesktopController()
-    assert controller.hotkey("ctrl", "s") is True
-    mock_httpx_client.post.assert_called_once_with(
-        "http://127.0.0.1:8015/tools/call",
-        json={"name": "hotkey", "arguments": {"keys": ["ctrl", "s"]}}
-    )
+    result = controller.hotkey("ctrl", "s")
+    assert result is True
+    assert kb.press.called
 
 
-def test_scroll(mock_httpx_client):
-    mock_httpx_client.post.return_value.json.return_value = {
-        "success": True,
-        "result": {"direction": "down", "clicks": 3}
-    }
+def test_scroll(mock_pynput):
+    mouse, _ = mock_pynput
     controller = DesktopController()
-    assert controller.scroll(150, 250, clicks=3, direction="down") is True
-    mock_httpx_client.post.assert_called_once_with(
-        "http://127.0.0.1:8015/tools/call",
-        json={"name": "scroll", "arguments": {"x": 150, "y": 250, "clicks": 3, "direction": "down"}}
-    )
+    result = controller.scroll(150, 250, clicks=3, direction="down")
+    assert result is True
+    mouse.scroll.assert_called_once_with(0, -3)
 
 
-def test_screenshot_base64(mock_httpx_client):
-    mock_httpx_client.post.return_value.json.return_value = {
-        "success": True,
-        "result": {"image_base64": "aaaa", "width": 800, "height": 600}
-    }
+def test_screenshot_base64(mock_pynput):
+    import base64
     controller = DesktopController()
-    assert controller.screenshot_base64() == "aaaa"
-    mock_httpx_client.post.assert_called_once_with(
-        "http://127.0.0.1:8015/tools/call",
-        json={"name": "screenshot", "arguments": {}}
-    )
+    result = controller.screenshot_base64()
+    assert isinstance(result, str)
+    # Must be valid base64
+    base64.b64decode(result)
 
 
-def test_is_server_running(mock_httpx_client):
-    mock_httpx_client.get.return_value.status_code = 200
+def test_is_server_running(mock_pynput):
     controller = DesktopController()
     assert controller.is_server_running() is True
-
-    mock_httpx_client.get.side_effect = Exception("conn error")
-    assert controller.is_server_running() is False

@@ -164,7 +164,7 @@ class TaskMemory:
         desc_lower = description.lower()
         hints = []
         for target, action_type, error, recovery_hint, fail_count in rows:
-            if target.lower() in desc_lower or desc_lower in target.lower():
+            if target.lower() in desc_lower:
                 hint = f"WARNING: '{target}' ({action_type}) failed {fail_count}× before"
                 if error:
                     hint += f" — error: {error[:80]}"

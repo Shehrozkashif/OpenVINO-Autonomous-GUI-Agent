@@ -15,7 +15,9 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from typing import Optional
 
+import imagehash
 import numpy as np
 from loguru import logger
 from PIL import Image
@@ -49,15 +51,26 @@ STEP     : {action_type} — {description}
 EXPECTED : {verification}
 SCREEN TEXT (OCR after action): {ocr_text}
 
-Rules — be lenient, only fail when clearly nothing happened:
-  click/double_click : succeed if any new label appeared or existing one changed
-  type               : succeed if any version of the typed text is in screen text
-  key_press "super"  : succeed if "Activities", "Type to search", or "Search" visible
-  key_press "enter"  : succeed if expected result is visible anywhere on screen
-  hotkey ctrl+l      : succeed if address bar or URL text visible
-  hotkey ctrl+s      : succeed if no error dialog; title change optional
-  scroll             : succeed unless content is provably unchanged
-  Any ambiguous case → success=true, lower confidence
+Rules — base your verdict on evidence in the screen text:
+  click/right_click  : SUCCEED only if a new menu, dialog, window title, or
+                       focused element appeared that is new after the action.
+                       FAIL if screen text shows no new UI elements.
+  double_click       : SUCCEED if a file opened, app launched, or item selected
+                       (window title changed or new content appeared).
+  type               : SUCCEED if the typed text (or close variant) is visible
+                       in a context consistent with an active input field.
+                       FAIL if the text appears only in unrelated logs or chat.
+  key_press "enter"  : SUCCEED if the intended effect occurred (command ran,
+                       dialog confirmed, folder renamed, search executed).
+  key_press "super"  : SUCCEED if a search bar or launcher panel is visible.
+  key_press "escape" : SUCCEED if a dialog or menu closed.
+  hotkey ctrl+s      : SUCCEED if no error dialog appeared. Silence = success —
+                       a named file saves with no visible dialog. A Save-As dialog
+                       appearing is also success. FAIL only if an error is visible.
+  hotkey ctrl+l      : SUCCEED if an address bar or URL field is highlighted.
+  scroll             : SUCCEED if any text content changed (page shifted).
+  Ambiguous case     : success=false, confidence=0.5, should_retry=true.
+                       Do NOT default to success when uncertain.
 
 Reply JSON only:
 {{"success": true/false, "confidence": 0.0-1.0, "observation": "one sentence", \
@@ -76,15 +89,16 @@ ACTION PERFORMED:
 Study the screenshot carefully. Did this action succeed?
 
 SUCCESS CRITERIA:
-  click/right_click/double_click: succeed if element shows focus, a menu/window opened,
-    or any visual change occurred. FAIL only if screen is completely unchanged.
-  type: succeed if ANY text appears in any field, even with autocorrect changes.
-  key_press: succeed if ANY screen change occurred (window, menu, cursor, app launch).
-  hotkey: succeed if expected effect occurred OR no error dialog appeared.
+  click/right_click/double_click: succeed if a new menu, window, or focused element
+    appeared. FAIL if the screen is completely unchanged after the click.
+  type: succeed if typed text appears in an input field or form area.
+  key_press: succeed if the expected screen change occurred.
+  hotkey: succeed if the expected effect occurred or no error appeared.
   scroll: succeed if content shifted at all.
 
-When confidence is between 0.5 and 0.8, return success=true.
-Only return FAILED when you are CERTAIN the action had zero effect.
+Return success=false with confidence=0.5 when the outcome is uncertain.
+Only return success=false with high confidence when you are CERTAIN the
+action had zero visible effect.
 
 Reply JSON only:
 {{"success": true/false, "confidence": 0.0-1.0, "observation": "one sentence", \
@@ -97,20 +111,24 @@ class ReflectionAgent:
         ovms_client: InferenceClient,
         capturer: ScreenCapture,
         min_confidence: float = 0.75,
+        ocr: Optional[OCREngine] = None,
     ):
         self.ovms = ovms_client
         self.capturer = capturer
         self.min_confidence = min_confidence
-        self._ocr = OCREngine()
+        self._ocr = ocr if ocr is not None else OCREngine()
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    def verify(self, step: ActionStep, wait_s: float = 1.5) -> ReflectionResult:
+    def verify(self, step: ActionStep, wait_s: float = 1.5,
+               pre_hash=None) -> ReflectionResult:
         """
         Verify if an action step succeeded.
-        1. Adaptive wait for UI to settle.
-        2. Capture screenshot.
-        3. OCR → LLM (primary) or VLM (fallback if screen is icon-heavy).
+        1. For click actions: use pre_hash (captured by orchestrator BEFORE the action)
+           as the baseline. Falls back to capturing after-action if pre_hash is None.
+        2. Adaptive wait for UI to settle.
+        3. Capture after-screenshot; if hash unchanged for click → immediate failure.
+        4. OCR → LLM (primary) or VLM (fallback if screen is icon-heavy).
         """
         if step.action_type == "wait":
             try:
@@ -124,10 +142,40 @@ class ReflectionAgent:
                 should_retry=False, recovery_hint=""
             )
 
+        _CLICK_ACTIONS = ("click", "right_click", "double_click")
+        # Use the pre-action hash captured by the orchestrator before execute() fires.
+        # Fallback to capturing now only when no pre-hash was supplied.
+        _before_hash = pre_hash
+        if _before_hash is None and step.action_type in _CLICK_ACTIONS:
+            _pre = self.capturer.capture()
+            _pre.thumbnail((320, 180))
+            _before_hash = imagehash.phash(_pre)
+
         self._adaptive_wait(*self._wait_bounds(step))
 
         # Capture once — reuse for both paths
         screenshot = self.capturer.capture()
+
+        if _before_hash is not None:
+            _post = screenshot.copy()
+            _post.thumbnail((320, 180))
+            if (_before_hash - imagehash.phash(_post)) == 0:
+                result = ReflectionResult(
+                    success=False,
+                    confidence=0.98,
+                    observation="Screen unchanged after click — element may not be interactive",
+                    error_description="Screen unchanged after click",
+                    should_retry=True,
+                    recovery_hint="Re-ground the target element; it may have moved or become inactive",
+                )
+                logger.info(
+                    f"[REFLECTION] Step {step.id} '{step.description[:40]}' → "
+                    f"FAILED (delta=0, conf={result.confidence:.2f})"
+                )
+                logger.warning(
+                    f"[REFLECTION] {result.error_description} | hint: {result.recovery_hint}"
+                )
+                return result
         thumb = screenshot.copy()
         thumb.thumbnail((960, 540))
         words = self._ocr.extract(thumb)
@@ -269,11 +317,9 @@ class ReflectionAgent:
 
         success = bool(data.get("success", False))
         conf = float(data.get("confidence", 0.85 if success else 0.3))
-        # Keep success/confidence consistent: clamp each direction
-        if success and conf < 0.75:
-            conf = 0.75
-        elif not success and conf > 0.6:
-            conf = 0.6
+        # Preserve the LLM's raw confidence — do not clamp in either direction.
+        # Clamping destroyed calibration: failures were forced to ≤0.60 which,
+        # combined with the old fail_threshold logic, made every step pass.
 
         return ReflectionResult(
             success=success,
@@ -312,7 +358,11 @@ def _infer_verification(step: ActionStep) -> str:
             return "focus moved to next field"
         return f"pressing '{key}' caused a visible change"
     if step.action_type == "hotkey":
-        if "ctrl+s" in key:       return "file saved — title bar updated"
+        if "ctrl+s" in key:
+            return (
+                "File saved — silence is success (named file saves with no dialog). "
+                "A Save-As dialog appearing is also success. Fail only if an error message appears."
+            )
         if "ctrl+shift+s" in key: return "Save As dialog appeared"
         if "ctrl+l" in key:       return "address bar focused and highlighted"
         if "ctrl+t" in key:       return "new tab opened"

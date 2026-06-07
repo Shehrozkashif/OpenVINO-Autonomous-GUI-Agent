@@ -4,7 +4,7 @@
 # ── Models ────────────────────────────────────────────────────────────────────
 
 LLM_MODEL  = "qwen3:8b"                         # Ollama LLM — routing, planning, reflection
-VLM_OLLAMA = "qwen2.5vl:3b"                     # Ollama VLM fallback — 3.2GB fits alongside qwen3:8b in 6GB VRAM
+VLM_OLLAMA = "hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S"  # UI-TARS-1.5-7B Q4_K_S (4.6 GB + 1 GB mmproj, fits 6 GB VRAM)
 VLM_VLLM   = "ByteDance-Seed/UI-TARS-1.5-7B"   # vLLM primary VLM (port 8000, if running)
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

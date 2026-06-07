@@ -15,6 +15,19 @@ from utils.platform_utils import detect_firefox
 
 from core.protocols.a2a import ActionStep, InferenceClient, SubTask
 
+# Imported inside functions to avoid a hard circular-import at module load time.
+# TYPE_CHECKING guard is sufficient for type hints only; we need the class at
+# runtime for isinstance checks, so the deferred import pattern is used instead.
+_ScreenSnapshot = None  # resolved on first use
+
+
+def _get_snapshot_class():
+    global _ScreenSnapshot
+    if _ScreenSnapshot is None:
+        from core.capture.screen_snapshot import ScreenSnapshot  # noqa: PLC0415
+        _ScreenSnapshot = ScreenSnapshot
+    return _ScreenSnapshot
+
 _OS = platform.system()
 if _OS == "Windows":
     _OS_CONTEXT     = "Microsoft Windows 11 desktop"
@@ -25,6 +38,11 @@ if _OS == "Windows":
     _REOPEN_TAB     = "ctrl+shift+t"
     _DESKTOP_PATH   = "%USERPROFILE%\\Desktop"
     _SCREENSHOT_KEY = "print_screen"
+    _ICON_NOTE = (
+        "Windows exposes every icon's accessible name through UI Automation, so "
+        "clicking a labelled desktop, taskbar, or Start-menu icon by its visible "
+        "text is exact and instant (faster and more reliable than the launcher)."
+    )
 elif _OS == "Darwin":
     _OS_CONTEXT     = "macOS desktop (Ventura/Sonoma)"
     _LAUNCHER_KEY   = "command+space"
@@ -34,6 +52,10 @@ elif _OS == "Darwin":
     _REOPEN_TAB     = "command+shift+t"
     _DESKTOP_PATH   = "~/Desktop"
     _SCREENSHOT_KEY = "command+shift+3"
+    _ICON_NOTE = (
+        "Dock and Launchpad icons are clearly labelled — click them directly by "
+        "their visible name when present; it's faster than opening Spotlight."
+    )
 else:
     _OS_CONTEXT     = "Linux desktop (GNOME)"
     _LAUNCHER_KEY   = "super"
@@ -43,6 +65,10 @@ else:
     _REOPEN_TAB     = "ctrl+shift+t"
     _DESKTOP_PATH   = "~/Desktop"
     _SCREENSHOT_KEY = "print_screen"
+    _ICON_NOTE = (
+        "Desktop and taskbar icons are matched by their visible label text — "
+        "click them directly by name when present; it's faster than Activities."
+    )
 
 # ── Runtime machine identity ──────────────────────────────────────────────────
 _USER = os.getenv("USER") or os.getenv("USERNAME") or "user"
@@ -85,12 +111,16 @@ _LAUNCHER_PATTERN_STEPS = (
 # Terminal section — pre-computed per OS so no backslashes appear inside f-string {}
 _SEP = "\\" if _OS == "Windows" else "/"
 _TERMINAL_FRESH_LAUNCH = (
-    f'  key_press "winleft" → wait "0.5" → type "cmd" → key_press enter'
-    f' → wait "2.0" → click {_SHELL_PROMPT} → type command → key_press enter'
+    f'  key_press "winleft" → wait "0.5" → type "Windows Terminal" → key_press enter → wait "2.0"'
+    f'\n  STOP here if goal is just "open terminal". Terminal is open when PS prompt is visible.'
+    f'\n  If goal also includes running a command:'
+    f'\n    click {_SHELL_PROMPT} → type command → key_press enter'
     if _OS == "Windows"
     else (f'  key_press "{_LAUNCHER_KEY}" → click "Type to search" → type "gnome-terminal"'
-          f' → key_press enter → wait "2.0" → click {_SHELL_PROMPT}'
-          f' → type command → key_press enter')
+          f' → key_press enter → wait "2.0"'
+          f'\n  STOP here if goal is just "open terminal". Terminal is open when prompt ($) is visible.'
+          f'\n  If goal also includes running a command:'
+          f'\n    click {_SHELL_PROMPT} → type command → key_press enter')
 )
 
 if _OS == "Windows":
@@ -149,9 +179,15 @@ PLANNING_SYSTEM_PROMPT = f"""You are a desktop automation agent on {_OS_CONTEXT}
 Turn each sub-task into the SHORTEST correct sequence of atomic actions.
 
 ━━━ DECISION TREE — follow this order every time ━━━
-1. READ screen context. If the target element or app icon is visible → click it. ONE step. Stop.
+1. READ screen context. If the EXACT app name or element label appears in the
+   visible screen text as an interactive element (desktop icon, taskbar button,
+   pinned tile) → click it by that label. ONE step. Stop.
+   CRITICAL: NEVER click an app icon using your training-data knowledge of where
+   it "should" be. Only click it if its name appears in the screen context text.
+   If the app name is NOT in the visible text → skip to step 3.
 2. USE a keyboard shortcut if one exists (ctrl+l for browser bar, etc.).
-3. USE the search launcher only as a last resort when 1 and 2 don't apply.
+3. OPEN the search launcher when the app is not visible in the screen text.
+   This is the correct default for launching any app not shown in screen context.
 
 ━━━ ACTION REFERENCE ━━━
 click / right_click / double_click  →  target = exact visible text label (1-4 words MAX, never null)
@@ -178,12 +214,23 @@ extract                             →  target = description of what to read fr
 wait                                →  value  = seconds as string: "0.5" "1.0" "2.0" "3.0"
 
 ━━━ LAUNCHING APPS ━━━
-Use the search launcher for ALL apps — it works on every machine without configuration.
-{_LAUNCHER_NOTE}
+PRIMARY — click a visible icon (ONLY when the exact app name appears in screen text):
+  The app name must appear in the visible screen context text as an interactive
+  element. If it is NOT there → skip this and use the search launcher below.
+  {_ICON_NOTE}
+  FORBIDDEN: Do NOT guess that "Calculator", "Notepad", or any app is in the
+  taskbar from training knowledge. If you cannot see the name in the screen text,
+  treat it as absent and use the search launcher.
+  CRITICAL: Company names ("Microsoft", "Google", "Apple") in copyright text,
+  window headers, or log output are NOT app icons. Only the EXACT short app name
+  (e.g. "Notepad", "Firefox") visible as a taskbar/desktop element counts.
 
-{_LAUNCHER_PATTERN_LABEL}
-{_LAUNCHER_PATTERN_STEPS}
-    wait 1.5–2.0s after launch, then click the shell prompt or window to confirm focus.
+FALLBACK → PREFERRED — search launcher (use whenever the app is not in screen text):
+  {_LAUNCHER_NOTE}
+
+  {_LAUNCHER_PATTERN_LABEL}
+  {_LAUNCHER_PATTERN_STEPS}
+      wait 1.5–2.0s after launch, then click the shell prompt or window to confirm focus.
 
 ━━━ FOCUS MANAGEMENT ━━━
 • Click a window before typing in it. Always. Except: fresh terminal (ctrl+alt+t) already has focus.
@@ -283,17 +330,35 @@ Tab-based form navigation (when multiple fields exist):
   key_press "tab" moves forward between fields; "shift+tab" moves backward.
   Use tab to move from one field to the next instead of clicking each field.
 
+━━━ WINDOWS SAVE / SAVE-AS DIALOG ━━━
+How to detect: screen text contains "File name" AND "Save" AND "Cancel".
+When this pattern is visible, a Save-As dialog is open. Your ONLY valid actions are:
+  a) If a specific filename is required:
+       hotkey ctrl+a              (select all text in the filename field)
+       type  value="hello.txt"    (type the new filename — this REPLACES the old name)
+       key_press "enter"          (confirm — this is the step IMMEDIATELY after type)
+  b) If no specific name is required: key_press "enter"  (save with current name)
+  c) "Replace existing file?" prompt → key_press "enter"  (confirm overwrite)
+CRITICAL: After typing the filename (step a), your very next step MUST be key_press "enter".
+          Do NOT type the filename again — it is already in the field.
+  ✗ NEVER press Ctrl+S when "File name" and "Cancel" are visible — it has no effect.
+     Ctrl+S opens the dialog from the editor. Once the dialog is open, use Enter only.
+
 ━━━ STRICT RULES ━━━
 ✓ Exact visible text as click target — never "button", "icon", "link"
 ✓ Click a window before typing in it (except fresh terminal)
 ✓ Combine all related text into ONE type step — never chain two type steps
 ✓ ctrl+l to focus browser address bar — never click the bar visually
 ✓ Handle any dialog/popup you see before doing the next planned step
+✓ When the goal says "right click" or "right-click", ALWAYS output action_type: "right_click" — NEVER output "click" for a right-click action
 ✗ Never use gedit, mousepad, kate, VLC, GIMP — use nano or LibreOffice
 ✗ Never open Activities/search when a visible icon or hotkey works
 ✗ Never add steps just to be safe — minimum steps only
 ✗ Never type in terminal without first clicking the shell prompt (if terminal was already open)
 ✗ Never re-launch an app that the sub-task description says is already open
+✗ Never use ctrl+alt+del — Windows intercepts it; it cannot be sent by automation
+✗ Never click an app icon whose name is not in the visible screen text
+✗ Never press Ctrl+S when a Save or Save-As dialog is already visible — use Enter instead
 
 ━━━ OUTPUT ━━━
 Valid JSON array only. All 7 fields required. Unused fields = null. IDs start at 1.
@@ -306,7 +371,7 @@ EXAMPLE 1 — app icon visible in screen context (screen shows "Code"):
   {{"id":2,"action_type":"wait","target":null,"value":"1.0","key":null,"description":"Wait for VS Code to load","verification":"VS Code editor is visible"}}
 ]
 
-EXAMPLE 2 — open terminal and run a command (search launcher, always reliable):
+EXAMPLE 2 — open terminal and run a command (no terminal icon visible — use search launcher):
 [
   {{"id":1,"action_type":"key_press","target":null,"value":null,"key":"{_LAUNCHER_KEY}","description":"Open {_LAUNCHER_NAME}","verification":"Search box appears"}},
   {{"id":2,"action_type":"wait","target":null,"value":"0.5","key":null,"description":"Wait for search to open","verification":"Search ready"}},
@@ -361,6 +426,7 @@ class PlanningAgent:
         completed: List[str] = None,
         task_context: List[str] = None,
         failure_hints: List[str] = None,
+        snapshot=None,   # Optional[ScreenSnapshot] — when provided overrides screen_context
     ) -> Optional[ActionStep]:
         """
         Dynamic planning: return the ONE next action step toward the subtask goal.
@@ -368,7 +434,13 @@ class PlanningAgent:
 
         task_context:   descriptions of subtasks already completed in this overall task.
         failure_hints:  known-bad target/action patterns from episodic failure memory.
+        snapshot:       ScreenSnapshot from capture_snapshot(); when provided its
+                        format_for_planner() output replaces the raw screen_context string.
         """
+        # Use structured snapshot context when available (Fix 1.2)
+        SnapshotClass = _get_snapshot_class()
+        if snapshot is not None and isinstance(snapshot, SnapshotClass):
+            screen_context = snapshot.format_for_planner()
         # Inter-subtask context — what was done before this subtask
         ctx_block = ""
         if task_context:
@@ -389,12 +461,43 @@ class PlanningAgent:
 
         user_content = f"Goal: {subtask.description}{ctx_block}{history}{failure_block}"
 
+        # Reinforce the right_click rule in the user prompt when relevant
+        _sd_lower = subtask.description.lower()
+        if "right click" in _sd_lower or "right-click" in _sd_lower:
+            user_content += (
+                '\nRULE: The goal contains "right click" — you MUST output '
+                'action_type: "right_click", NEVER "click".\n'
+            )
+
         if screen_context:
             user_content += f"\nText currently visible on screen: {screen_context}"
 
         user_content += (
-            "\n\nReturn the NEXT SINGLE action step needed to achieve the goal. "
-            "Return [] (empty array) if the goal is already fully achieved on screen."
+            "\n\nReturn the NEXT SINGLE action step needed to achieve the goal.\n"
+            "Return [] ONLY when the goal is DEFINITIVELY complete:\n"
+            "  • ‘open terminal / Windows Terminal’: a shell prompt is visible "
+            "(text like ‘PS’, ‘C:\\>’, ‘$’, or a username prompt) = goal achieved.\n"
+            "  • ‘run: <command>’ in terminal: The command has been TYPED (in history) AND "
+            "Enter has been pressed (in history). If a shell prompt is now visible = goal achieved. "
+            "Do NOT press Enter again.\n"
+            "  • ‘open browser’: the URL/address bar or browser tab is visible = achieved.\n"
+            "  • ‘open <any app>’: the app’s actual running content is on screen "
+            "(document area, file list, settings panel, etc.) = achieved.\n"
+            "  • ‘click <menu item>’: if a submenu panel or dialog opened AFTER the click = "
+            "goal achieved. Do NOT re-click the same item just because it is still visible "
+            "in the parent menu — parent menu items remain visible after their submenu opens.\n"
+            "  • ‘type X and press enter’ (rename/create dialog): step 1 = type X; "
+            "step 2 = key_press enter; step 3 = [] (done). "
+            "Do NOT type X again after it already appears in history — go straight to enter.\n"
+            "CAUTION: An app name appearing in text does NOT mean the app is open — "
+            "it may be from the task description shown in the GUI agent’s own log window, "
+            "or a search result. Only return [] when the app’s active running content "
+            "is clearly visible.\n"
+            "LOOP PREVENTION: If the step you are about to plan has the same action_type, "
+            "target, value, and key as the immediately preceding completed step, do NOT "
+            "repeat it — plan the next logical action in sequence or return [].\n"
+            "When in doubt whether the goal is complete, return [] rather than adding "
+            "speculative steps."
         )
 
         messages = [
@@ -416,34 +519,22 @@ class PlanningAgent:
             return None
 
         step = steps[0]
+
+        # Deterministic right_click override — the LLM occasionally outputs "click"
+        # even when the subtask description clearly says "right click".
+        _sub_lower = subtask.description.lower()
+        if step.action_type == "click" and (
+            _sub_lower.startswith("right click")
+            or "right click on" in _sub_lower
+            or _sub_lower.startswith("right-click")
+            or "right-click on" in _sub_lower
+        ):
+            step.action_type = "right_click"
+            logger.info("[PLANNING] Overrode action_type to right_click (subtask says 'right click')")
+
         step.id = len(completed or []) + 1
         logger.info(f"[PLANNING] Next: [{step.action_type}] {step.description}")
         return step
-
-    def replan(
-        self,
-        failed_step: ActionStep,
-        error: str,
-        remaining: List[ActionStep],
-        screen_context: str = None,
-    ) -> List[ActionStep]:
-        logger.warning(f"[PLANNING] Replanning after step {failed_step.id} failure")
-        user_content = (
-            f"Step {failed_step.id} ('{failed_step.description}') failed.\n"
-            f"Error: {error}\n"
-            f"Remaining planned steps: {[s.description for s in remaining]}\n"
-        )
-        if screen_context:
-            user_content += f"\nCurrently visible on screen: {screen_context}"
-        user_content += "\n\nGenerate a corrected sequence to recover and continue."
-
-        messages = [
-            {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
-        resp = self.ovms.query_llm(messages, max_tokens=2048, temperature=0.3,
-                                   response_schema=_STEP_SCHEMA)
-        return self._parse_steps(resp.content, failed_step.subtask_id)
 
     def _parse_steps(self, text: str, subtask_id: int) -> List[ActionStep]:
         if "</think>" in text:
