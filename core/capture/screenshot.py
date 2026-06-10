@@ -88,6 +88,26 @@ def _screen_size() -> tuple:
     return img.width, img.height
 
 
+# ── Frame comparison ──────────────────────────────────────────────────────────
+
+# Resolution and hash size used for before/after change detection. The previous
+# 320×180 / 8-bit-DCT phash was far too coarse: a context menu or small dialog on
+# a 1080p+ display changed zero hash bits, so legitimately-opened menus were
+# scored as "no change → click failed" (a systematic false failure, H2). A larger
+# thumbnail with a 16×16 hash (256-bit) makes small but real UI changes detectable
+# while staying cheap. Both the orchestrator (pre-action) and the reflection agent
+# (post-action) MUST use this helper so the two hashes are directly comparable.
+_FRAME_HASH_SIZE = 16
+_FRAME_THUMB = (960, 540)
+
+
+def frame_phash(img: Image.Image) -> "imagehash.ImageHash":
+    """Perceptual hash tuned for before/after UI change detection (see H2)."""
+    thumb = img.copy()
+    thumb.thumbnail(_FRAME_THUMB, Image.LANCZOS)
+    return imagehash.phash(thumb, hash_size=_FRAME_HASH_SIZE)
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 class ScreenCapture:

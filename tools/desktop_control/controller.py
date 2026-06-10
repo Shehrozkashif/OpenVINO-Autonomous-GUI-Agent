@@ -23,6 +23,10 @@ _OS = platform.system()
 
 # ── Backend selection ─────────────────────────────────────────────────────────
 
+# Always define the pynput keyboard singleton symbol so it exists regardless of
+# which backend is active (it is only instantiated when XTest is unavailable, but
+# tests and tooling reference it unconditionally).
+_pynput_kb = None
 _XTEST_OK = False
 
 if _OS == "Linux":
@@ -272,22 +276,26 @@ class DesktopController:
         return True
 
     def type_text(self, text: str, interval: float = 0.04,
-                  use_clipboard: bool = False) -> bool:
+                  use_clipboard: bool = False, sensitive: bool = False) -> bool:
         """
         Type text via keystrokes (default) or clipboard paste.
 
         use_clipboard=True: sets clipboard → ctrl+v — instant, handles all Unicode.
         use_clipboard=False: keystroke-by-keystroke — correct for terminal prompts
                              where ctrl+v inserts a literal control character.
+        sensitive=True:     the text is a secret (password/token). It is redacted
+                            from logs and the clipboard is cleared after paste.
         """
+        # NEVER log secret values. Redact to a fixed mask of constant length.
+        _shown = "***" if sensitive else f"'{text[:40]}'"
         if use_clipboard:
             from utils.clipboard import paste_type
-            if paste_type(text, _send_hotkey):
-                logger.info(f"[ACTION] type (clipboard) '{text[:40]}'")
+            if paste_type(text, _send_hotkey, sensitive=sensitive):
+                logger.info(f"[ACTION] type (clipboard) {_shown}")
                 return True
             # fall through to keystroke if clipboard unavailable
         _send_text(text, interval)
-        logger.info(f"[ACTION] type (keystroke) '{text[:40]}'")
+        logger.info(f"[ACTION] type (keystroke) {_shown}")
         return True
 
     def press_key(self, key: str) -> bool:
@@ -341,5 +349,103 @@ class DesktopController:
         img.save(buf, format="JPEG", quality=85)
         return base64.b64encode(buf.getvalue()).decode()
 
+    def release_all_modifiers(self) -> None:
+        """Best-effort release of every modifier key.
+
+        Called by the kill switch so a stop never leaves Ctrl/Alt/Shift/Super
+        stuck down (which would otherwise hijack the user's keyboard).
+        """
+        for name in ("ctrl", "alt", "shift", "super"):
+            try:
+                if _XTEST_OK:
+                    ks = _KEYSYM_MAP.get(name)
+                    if ks:
+                        _xtest_key(ks, False)
+                else:
+                    k = _PYNPUT_KEY_MAP.get(name)
+                    if k:
+                        _pynput_kb.release(k)
+            except Exception:
+                pass
+        if _XTEST_OK:
+            try:
+                _xdisplay.flush()
+            except Exception:
+                pass
+
     def is_server_running(self) -> bool:
         return True
+
+
+# ── Global emergency kill switch ──────────────────────────────────────────────
+
+class KillSwitch:
+    """Global hotkey listener that triggers an emergency stop (Fix C8).
+
+    The agent minimises its own window while it runs, so the on-screen Stop
+    button can be obscured by the app being driven. A process-global listener
+    guarantees the user can always halt automation:
+
+      • Press Esc three times quickly, OR
+      • Slam the mouse into the top-left corner of the screen (failsafe).
+
+    On trigger it calls the supplied `on_trigger` callback (which sets the
+    orchestrator stop event) and releases any held modifier keys.
+    """
+
+    def __init__(self, on_trigger, controller: "DesktopController" = None):
+        self._on_trigger = on_trigger
+        self._controller = controller
+        self._listener = None
+        self._mouse_listener = None
+        self._esc_times: list = []
+
+    def start(self) -> None:
+        try:
+            from pynput import keyboard as _kb, mouse as _ms
+        except Exception as e:
+            logger.warning(f"[KILL-SWITCH] pynput unavailable — kill switch disabled ({e})")
+            return
+
+        def _on_press(key):
+            try:
+                if key == _kb.Key.esc:
+                    now = time.time()
+                    self._esc_times = [t for t in self._esc_times if now - t < 1.0]
+                    self._esc_times.append(now)
+                    if len(self._esc_times) >= 3:
+                        self._fire("triple-Esc")
+            except Exception:
+                pass
+
+        def _on_move(x, y):
+            if x <= 2 and y <= 2:
+                self._fire("top-left corner failsafe")
+
+        try:
+            self._listener = _kb.Listener(on_press=_on_press)
+            self._listener.daemon = True
+            self._listener.start()
+            self._mouse_listener = _ms.Listener(on_move=_on_move)
+            self._mouse_listener.daemon = True
+            self._mouse_listener.start()
+            logger.info("[KILL-SWITCH] Armed — triple-Esc or top-left corner to stop")
+        except Exception as e:
+            logger.warning(f"[KILL-SWITCH] Could not arm listeners: {e}")
+
+    def _fire(self, reason: str) -> None:
+        logger.warning(f"[KILL-SWITCH] EMERGENCY STOP ({reason})")
+        try:
+            self._on_trigger()
+        finally:
+            if self._controller is not None:
+                self._controller.release_all_modifiers()
+
+    def stop(self) -> None:
+        for lst in (self._listener, self._mouse_listener):
+            try:
+                if lst is not None:
+                    lst.stop()
+            except Exception:
+                pass
+        self._listener = self._mouse_listener = None

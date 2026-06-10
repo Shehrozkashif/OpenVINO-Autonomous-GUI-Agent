@@ -47,6 +47,10 @@ class OrchestratorConfig:
     max_steps_per_subtask: int = 20
     max_scroll_find_attempts: int = 6   # scrolls before giving up on an off-screen element
     consecutive_failures_limit: int = 3
+    # Wall-clock safety budgets (H8). A stuck task (e.g. repeated 30-50 s VLM
+    # swaps) must not run unbounded. 0 disables a budget.
+    task_deadline_s: float = 600.0      # hard cap on a whole instruction
+    subtask_deadline_s: float = 240.0   # hard cap on a single subtask
 
 
 # Per-action-type limit on consecutive identical successful steps.
@@ -72,6 +76,7 @@ class TaskOrchestrator:
         config: OrchestratorConfig = None,
         on_step_log: Optional[Callable[[str], None]] = None,
         ocr: Optional["OCREngine"] = None,
+        on_confirm: Optional[Callable[[str, str], bool]] = None,
     ):
         self.router    = router
         self.planner   = planner
@@ -82,7 +87,15 @@ class TaskOrchestrator:
         self.memory    = task_memory
         self.config    = config or OrchestratorConfig()
         self.log       = on_step_log or print
+        # Optional human confirmation handler for destructive commands.
+        # Signature: on_confirm(summary, command) -> bool. When None, the action
+        # firewall blocks HIGH-severity commands and allows MEDIUM ones (logged).
+        self.on_confirm = on_confirm
         self._stop_event = threading.Event()
+        # Set when a subtask completes via a degraded path (loop-guard recovery,
+        # optimistic parse-failure success, etc.). Such a task is NOT stored in
+        # success memory, so broken plans never poison future routing hints.
+        self._degraded = False
         self.burst_executor = BurstExecutor(
             grounder=self.grounder,
             actor=self.actor,
@@ -99,6 +112,29 @@ class TaskOrchestrator:
 
     def stop(self):
         self._stop_event.set()
+
+    # ── Emergency kill switch (C8) ──────────────────────────────────────────────
+
+    def _arm_kill_switch(self) -> None:
+        """Arm the global emergency-stop listener for the duration of a task."""
+        try:
+            self._disarm_kill_switch()  # clear any leaked listener first
+            from tools.desktop_control.controller import KillSwitch
+            controller = getattr(self.actor, "controller", None)
+            self._kill_switch = KillSwitch(on_trigger=self.stop, controller=controller)
+            self._kill_switch.start()
+        except Exception as e:
+            logger.debug(f"[ORCHESTRATOR] Kill switch not armed: {e}")
+            self._kill_switch = None
+
+    def _disarm_kill_switch(self) -> None:
+        ks = getattr(self, "_kill_switch", None)
+        if ks is not None:
+            try:
+                ks.stop()
+            except Exception:
+                pass
+            self._kill_switch = None
 
     def _refresh_own_window_mask(self) -> None:
         """Dynamically mask the GUI agent window from screen captures when it is the topmost window.
@@ -166,8 +202,10 @@ class TaskOrchestrator:
     def execute(self, instruction: str) -> dict:
         self._stop_event.clear()
         self._extracted_data = {}
+        self._degraded = False
         self.log(f"[TASK START] '{instruction}'")
         start_time = time.time()
+        self._arm_kill_switch()
 
         # Memory hint for the router
         memory_hint = None
@@ -212,6 +250,17 @@ class TaskOrchestrator:
                 failed = True
                 break
 
+            # H8: enforce the task-level wall-clock budget.
+            if self.config.task_deadline_s and (
+                time.time() - start_time > self.config.task_deadline_s
+            ):
+                self.log(
+                    f"[TASK] Deadline ({self.config.task_deadline_s:.0f}s) exceeded "
+                    f"— aborting before subtask {subtask.id}"
+                )
+                failed = True
+                break
+
             self.log(f"\n[SUBTASK {subtask.id}] {subtask.description}")
             success = self._execute_subtask(subtask, task_context=completed_subtask_descs)
 
@@ -243,6 +292,8 @@ class TaskOrchestrator:
                 failed = True
                 break
 
+        self._disarm_kill_switch()
+
         elapsed = time.time() - start_time
         summary = self.router.summarize_completion(task_id, completed_subtask_ids, not failed)
 
@@ -253,8 +304,14 @@ class TaskOrchestrator:
 
         self.log(f"\n[TASK DONE] {summary} ({elapsed:.1f}s)")
 
-        if not failed:
+        # Only persist as a reusable success when the task genuinely completed
+        # AND no subtask finished via a degraded path (loop-guard recovery,
+        # optimistic parse-failure success). Storing degraded runs would poison
+        # future routing hints with plans that did not actually work.
+        if not failed and not self._degraded:
             self.memory.store_successful_task(instruction, subtasks, elapsed)
+        elif not failed and self._degraded:
+            self.log("[MEMORY] Task completed via a degraded path — not stored as a reusable success")
 
         return {
             "task_id": task_id,
@@ -313,8 +370,19 @@ class TaskOrchestrator:
             )
         )
 
+        _subtask_start = time.time()
         for step_idx in range(self.config.max_steps_per_subtask):
             if self._stop_event.is_set():
+                return False
+
+            # H8: enforce the per-subtask wall-clock budget.
+            if self.config.subtask_deadline_s and (
+                time.time() - _subtask_start > self.config.subtask_deadline_s
+            ):
+                self.log(
+                    f"  Subtask deadline ({self.config.subtask_deadline_s:.0f}s) "
+                    f"exceeded — aborting subtask"
+                )
                 return False
 
             screen_context = _cached_ocr if _cached_ocr else self._get_screen_context()
@@ -341,6 +409,22 @@ class TaskOrchestrator:
             step_success = False
             last_error = ""
 
+            # Fix C5: classify whether re-executing this exact step is safe.
+            # Non-idempotent actions change state every time they run: typing
+            # appends text again ("hellohello"), Enter submits/creates twice,
+            # ctrl+v pastes twice. For these, once the action has physically
+            # executed we must NOT blind-retry on an uncertain/failed verdict —
+            # we hand control back to the planner, which sees the live screen and
+            # decides the next action (it can tell the text is already there).
+            # Idempotent actions (click same coords, scroll, escape, nav keys)
+            # are safe to repeat, so they keep the normal retry behaviour.
+            _key_l = (step.key or "").lower()
+            _non_idempotent = (
+                step.action_type == "type"
+                or (step.action_type == "key_press" and _key_l in ("enter", "return", "space"))
+                or (step.action_type == "hotkey" and "v" in _key_l.split("+") and "ctrl" in _key_l)
+            )
+
             for attempt in range(self.config.max_retries_per_step):
                 if attempt > 0:
                     self.log(f"  Retry {attempt}/{self.config.max_retries_per_step}…")
@@ -351,10 +435,8 @@ class TaskOrchestrator:
                 _pre_click_hash = None
                 if step.action_type in ("click", "right_click", "double_click"):
                     try:
-                        import imagehash as _ih
-                        _pci = self.capturer.capture()
-                        _pci.thumbnail((320, 180))
-                        _pre_click_hash = _ih.phash(_pci)
+                        from core.capture.screenshot import frame_phash
+                        _pre_click_hash = frame_phash(self.capturer.capture())
                     except Exception:
                         pass
 
@@ -421,7 +503,7 @@ class TaskOrchestrator:
                                  if k in subtask.description.lower()),
                                 None,
                             )
-                            if _proc_early and self._is_process_running(_proc_early):
+                            if _proc_early and self._launch_confirmed(_proc_early):
                                 self.log(
                                     f"  [GOAL-CHECK-EARLY] "
                                     f"'{_proc_early.split('.')[0]}' already running "
@@ -429,6 +511,15 @@ class TaskOrchestrator:
                                 )
                                 step_success = True
                                 break
+                        # Fix C5: do not re-execute a non-idempotent action that
+                        # already fired. Stop here and let the planner re-evaluate
+                        # the live screen rather than typing/submitting again.
+                        if _non_idempotent:
+                            self.log(
+                                "  Non-idempotent step already executed — not "
+                                "re-running; handing back to planner to re-evaluate"
+                            )
+                            break
                     else:
                         # Reflector is confident the step failed.
                         last_error = (
@@ -439,14 +530,24 @@ class TaskOrchestrator:
                             f"  Verification failed: {last_error} "
                             f"(conf={reflection.confidence:.2f})"
                         )
-                        if not reflection.should_retry:
-                            # Definitive failure, no point retrying this attempt.
+                        # A confidently-failed non-idempotent action must also not
+                        # be blind-retried (Fix C5) — same double-execution risk.
+                        if not reflection.should_retry or _non_idempotent:
+                            # Definitive failure (or unsafe to retry) — stop here.
                             break
                 except (ValueError, KeyError, AttributeError) as e:
-                    # Model parse error — proceed optimistically
-                    self.log(f"  Reflection parse error ({type(e).__name__}) — proceeding")
-                    step_success = True
-                    break
+                    # Fix C2: a verifier parse error means the outcome is UNKNOWN,
+                    # not that the step succeeded. The old code set step_success=True
+                    # here, wiring "the verifier broke" to "the action worked" — a
+                    # systematic source of false successes. Treat it as an uncertain
+                    # result and let the retry loop re-verify; if retries are
+                    # exhausted the step is left failed so the planner can recover.
+                    self.log(
+                        f"  Reflection parse error ({type(e).__name__}) — "
+                        f"outcome uncertain, will re-verify"
+                    )
+                    last_error = f"verifier parse error ({type(e).__name__})"
+                    # fall through to next attempt without marking success
                 except Exception as e:
                     # Infrastructure failure — retry with back-off
                     self.log(f"  Reflection error ({type(e).__name__}: {e}) — retry")
@@ -476,7 +577,7 @@ class TaskOrchestrator:
                          if k in _desc_lower_chk),
                         None,
                     )
-                    if _matched_proc and self._is_process_running(_matched_proc):
+                    if _matched_proc and self._launch_confirmed(_matched_proc):
                         _label = _matched_proc.split(".")[0]
                         self.log(f"  [GOAL-CHECK] '{_label}' confirmed running — goal achieved")
                         return True
@@ -489,8 +590,15 @@ class TaskOrchestrator:
                         self.log(
                             f"  [LOOP-GUARD] '{step.action_type}' repeated "
                             f"{_same_step_streak + 1}× (limit={_dedup_limit}) — "
-                            f"loop detected, declaring goal achieved"
+                            f"loop detected, stopping subtask"
                         )
+                        # Fix C4: a loop is a strong signal the plan is not working.
+                        # We still return True so a benign "planner won't emit done"
+                        # loop doesn't abort an otherwise-complete task, but we mark
+                        # the run degraded so it is NEVER stored as a reusable
+                        # success (which would poison future routing with a plan
+                        # that actually looped). See execute()'s memory gate.
+                        self._degraded = True
                         if step.action_type in ("click", "right_click"):
                             try:
                                 _esc = ActionStep(
@@ -527,7 +635,7 @@ class TaskOrchestrator:
                          if k in _desc_lower_chk),
                         None,
                     )
-                    if _matched_proc_fail and self._is_process_running(_matched_proc_fail):
+                    if _matched_proc_fail and self._launch_confirmed(_matched_proc_fail):
                         _label = _matched_proc_fail.split(".")[0]
                         self.log(
                             f"  [GOAL-CHECK] '{_label}' confirmed running "
@@ -625,10 +733,51 @@ class TaskOrchestrator:
                 self._extracted_data[key] = value
                 self.log(f"  [EXTRACT] '{key}' = '{value[:80]}'")
             else:
-                self.log(f"  [EXTRACT] nothing found for '{key}'")
-            return True   # extraction never blocks the task
+                # H10: extraction found nothing. We still don't block the task
+                # (the user may want partial results), but we record the miss and
+                # mark the run degraded so it is not stored as a clean reusable
+                # success — "read me the value" tasks that found no value must not
+                # masquerade as fully-successful in memory.
+                self._extracted_data[key] = ""
+                self._degraded = True
+                self.log(f"  [EXTRACT] nothing found for '{key}' — marked incomplete")
+            return True   # extraction never blocks the step sequence
+
+        # ── Type — run through the destructive-action firewall ─────────────────
+        elif step.action_type == "type":
+            if not self._firewall_allows(step.value):
+                self.log(
+                    f"  [FIREWALL] Blocked typing a destructive command — "
+                    f"step aborted for safety"
+                )
+                return False
 
         return self.actor.execute(step, x=x, y=y, x2=x2, y2=y2)
+
+    # ── Destructive-action firewall ─────────────────────────────────────────────
+
+    def _firewall_allows(self, text: Optional[str]) -> bool:
+        """Return True if `text` is safe to type, or was confirmed/allowed.
+
+        Uses a deterministic regex classifier (immune to prompt injection) plus an
+        optional human confirmation handler. HIGH-severity commands are blocked
+        when no handler is wired; MEDIUM commands are allowed but logged.
+        """
+        try:
+            from core.safety.action_firewall import evaluate, decide, Decision, Severity
+        except Exception:
+            return True  # never let a safety-module import error break execution
+        verdict = evaluate(text)
+        if not verdict.is_dangerous:
+            return True
+        reasons = "; ".join(verdict.matched)
+        self.log(f"  [FIREWALL] {verdict.severity.value.upper()} risk detected: {reasons}")
+        decision = decide(verdict, self.on_confirm)
+        if decision == Decision.BLOCK:
+            return False
+        if verdict.severity == Severity.MEDIUM:
+            self.log("  [FIREWALL] Allowed (medium risk) — proceeding")
+        return True
 
     # ── Data extraction ────────────────────────────────────────────────────────
 
@@ -824,6 +973,13 @@ class TaskOrchestrator:
             return []
         return [name] + words[:2]
 
+    # Processes that are effectively always running, so bare "is it running"
+    # checks are meaningless for confirming a launch (H9). For these we require a
+    # NEW visible top-level window owned by the process instead.
+    _ALWAYS_RUNNING_WINDOWS = frozenset({
+        "explorer.exe",   # the Windows shell itself
+    })
+
     def _is_process_running(self, exe_name: str) -> bool:
         """Check if a process with the given executable name is running (Windows only)."""
         try:
@@ -834,6 +990,68 @@ class TaskOrchestrator:
             return exe_name.lower() in out.lower()
         except Exception:
             return False
+
+    def _process_has_visible_window(self, exe_name: str) -> bool:
+        """True if `exe_name` owns at least one visible, non-trivial top-level window.
+
+        Used for launch confirmation (H9) where bare process existence is a false
+        positive — explorer.exe is always running, and a browser may already be a
+        background process without any visible window. Confirms an actual window
+        is on screen rather than just a process in the table.
+        """
+        if _OS != "Windows":
+            return False
+        try:
+            import ctypes
+            import ctypes.wintypes
+            user32 = ctypes.windll.user32
+            target = exe_name.lower()
+            found = [False]
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+            def _cb(hwnd, _):
+                if found[0] or not user32.IsWindowVisible(hwnd):
+                    return True
+                rect = ctypes.wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                if (rect.right - rect.left) < 200 or (rect.bottom - rect.top) < 120:
+                    return True  # skip tray/tooltip/zero-size windows
+                pid = ctypes.wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                h_proc = ctypes.windll.kernel32.OpenProcess(0x0410, False, pid.value)
+                if not h_proc:
+                    return True
+                buf = ctypes.create_unicode_buffer(260)
+                try:
+                    ctypes.windll.psapi.GetModuleFileNameExW(h_proc, None, buf, 260)
+                except Exception:
+                    try:
+                        ctypes.windll.kernel32.GetModuleFileNameExW(h_proc, None, buf, 260)
+                    except Exception:
+                        buf.value = ""
+                ctypes.windll.kernel32.CloseHandle(h_proc)
+                import os as _os
+                if buf.value and _os.path.basename(buf.value).lower() == target:
+                    found[0] = True
+                return True
+
+            user32.EnumWindows(_cb, 0)
+            return found[0]
+        except Exception:
+            return False
+
+    def _launch_confirmed(self, exe_name: str) -> bool:
+        """Confirm an app launched. Uses window presence for always-running
+        processes (H9), bare process existence otherwise."""
+        if exe_name.lower() in self._ALWAYS_RUNNING_WINDOWS:
+            return self._process_has_visible_window(exe_name)
+        # For normal apps, a running process is a strong signal, but prefer a
+        # visible window when we can confirm one (avoids the background-process
+        # false positive). Fall back to process existence if window enumeration
+        # found nothing (some apps draw via non-standard windows).
+        if self._process_has_visible_window(exe_name):
+            return True
+        return self._is_process_running(exe_name)
 
     def _verify_launch(self, subtask) -> bool:
         desc = subtask.description.lower()
@@ -863,7 +1081,7 @@ class TaskOrchestrator:
                 label = matched_proc.split(".")[0]
                 for attempt, wait_s in enumerate([1.5, 2.5]):
                     time.sleep(wait_s)
-                    if self._is_process_running(matched_proc):
+                    if self._launch_confirmed(matched_proc):
                         self.log(f"  [CHECK] '{label}' process confirmed running")
                         return True
                     if attempt == 0:

@@ -105,6 +105,12 @@ Reply JSON only:
 "error_description": "", "should_retry": true/false, "recovery_hint": ""}}"""
 
 
+# Actions whose success is judged visually (a menu, selection highlight, toggle
+# state, icon change) rather than by text. For these, an uncertain OCR→LLM verdict
+# is escalated to a pixel-level VLM check — the LLM never saw the screenshot.
+_VISUAL_ACTIONS = ("click", "right_click", "double_click", "scroll", "drag")
+
+
 class ReflectionAgent:
     def __init__(
         self,
@@ -112,11 +118,18 @@ class ReflectionAgent:
         capturer: ScreenCapture,
         min_confidence: float = 0.75,
         ocr: Optional[OCREngine] = None,
+        escalate_uncertain: bool = True,
     ):
         self.ovms = ovms_client
         self.capturer = capturer
         self.min_confidence = min_confidence
         self._ocr = ocr if ocr is not None else OCREngine()
+        # When True, an uncertain OCR→LLM verdict on a visual action is resolved
+        # by a second look with the VLM on the actual screenshot. This is the main
+        # accuracy lever for visual-only changes the text path can't see. It is
+        # read via getattr() in verify() so agents built with __new__ (some tests)
+        # safely default to disabled.
+        self._escalate_uncertain = escalate_uncertain
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -142,14 +155,14 @@ class ReflectionAgent:
                 should_retry=False, recovery_hint=""
             )
 
+        from core.capture.screenshot import frame_phash
+
         _CLICK_ACTIONS = ("click", "right_click", "double_click")
         # Use the pre-action hash captured by the orchestrator before execute() fires.
         # Fallback to capturing now only when no pre-hash was supplied.
         _before_hash = pre_hash
         if _before_hash is None and step.action_type in _CLICK_ACTIONS:
-            _pre = self.capturer.capture()
-            _pre.thumbnail((320, 180))
-            _before_hash = imagehash.phash(_pre)
+            _before_hash = frame_phash(self.capturer.capture())
 
         self._adaptive_wait(*self._wait_bounds(step))
 
@@ -157,9 +170,10 @@ class ReflectionAgent:
         screenshot = self.capturer.capture()
 
         if _before_hash is not None:
-            _post = screenshot.copy()
-            _post.thumbnail((320, 180))
-            if (_before_hash - imagehash.phash(_post)) == 0:
+            # High-fidelity frame comparison (H2). delta==0 now genuinely means
+            # "nothing changed on screen", so a click that opened a small menu is
+            # no longer mis-scored as a no-op.
+            if (_before_hash - frame_phash(screenshot)) == 0:
                 result = ReflectionResult(
                     success=False,
                     confidence=0.98,
@@ -189,13 +203,43 @@ class ReflectionAgent:
         # Falling back to VLM for a key-press forces a slow model swap on 6GB VRAM.
         _force_llm = step.action_type in ("key_press", "hotkey", "type", "wait")
 
-        if len(meaningful) >= 3 or _force_llm:
+        _used_llm = len(meaningful) >= 3 or _force_llm
+        if _used_llm:
             ocr_text = ", ".join(w.text for w in meaningful[:40]) if meaningful else "(screen appears blank or icon-only)"
             result = self._verify_with_llm(step, ocr_text, verification)
             result.ocr_text = ocr_text
         else:
+            ocr_text = ""
             img_b64 = self._encode(screenshot)
             result = self._verify_with_vlm(step, img_b64, verification)
+
+        # ── Escalate uncertain visual verdicts to the VLM (pixel-level check) ──
+        # The OCR→LLM path can confirm text but is blind to visual-only outcomes:
+        # a selection highlight, a toggled switch, an icon state change, a menu
+        # that contains no new OCR-able text. When that path is uncertain (neither
+        # a confident success nor a confident failure) on a visual action, take a
+        # second look with the VLM on the real screenshot and reconcile.
+        if (
+            getattr(self, "_escalate_uncertain", False)
+            and _used_llm                                   # primary was the text path
+            and step.action_type in _VISUAL_ACTIONS
+            and result.confidence < self.min_confidence     # uncertain either way
+            and not (result.success and result.confidence >= 0.85)
+        ):
+            try:
+                logger.info(
+                    f"[REFLECTION] Uncertain {step.action_type} verdict "
+                    f"(conf={result.confidence:.2f}) — escalating to VLM screenshot check"
+                )
+                vlm_result = self._verify_with_vlm(
+                    step, self._encode(screenshot), verification
+                )
+                result = self._reconcile(result, vlm_result)
+                result.ocr_text = ocr_text   # preserve OCR for orchestrator reuse
+            except Exception as e:
+                logger.debug(
+                    f"[REFLECTION] VLM escalation failed ({e}) — keeping text verdict"
+                )
 
         status = "SUCCESS" if result.success else "FAILED"
         logger.info(
@@ -239,6 +283,23 @@ class ReflectionAgent:
             temperature=0.1,
         )
         return self._parse(resp.content)
+
+    def _reconcile(self, primary: ReflectionResult, vlm: ReflectionResult) -> ReflectionResult:
+        """Combine an uncertain text verdict with a VLM screenshot verdict.
+
+        The VLM actually saw the pixels, so it is authoritative WHEN it is
+        confident. If the VLM is itself uncertain we keep the primary verdict
+        (escalation didn't add information). This both rescues false failures
+        (text path missed a visual change the VLM confirms) and catches false
+        successes (text matched but the VLM sees nothing happened).
+        """
+        # VLM confidently resolves the outcome either way → trust it.
+        if vlm.confidence >= self.min_confidence:
+            vlm.observation = f"[VLM] {vlm.observation}".strip()
+            return vlm
+        # Both uncertain — keep whichever is more confident, preferring primary
+        # on ties so behaviour stays stable.
+        return vlm if vlm.confidence > primary.confidence else primary
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -300,18 +361,30 @@ class ReflectionAgent:
                     pass
 
         if not data:
+            # Fix C3: when the verdict JSON can't be parsed, DO NOT keyword-sniff
+            # for success words. The old heuristic returned success=True for any
+            # response containing "succeed"/"changed" — including negated
+            # sentences like "this did NOT succeed". An unparseable verdict means
+            # the outcome is UNKNOWN, which must read as uncertain (retry), never
+            # as success. Only an explicit, parsed success can pass a step.
             text_lower = text.lower()
-            success = any(w in text_lower for w in [
-                "success", "succeeded", "yes", "correct", "appeared", "visible",
-                "typed", "entered", "opened", "clicked", "focused", "launched",
-                "showing", "displayed", "changed",
+            negated = any(neg in text_lower for neg in (
+                "not ", "n't", "no ", "fail", "didn't", "did not", "unchanged",
+                "no change", "nothing", "error", "unable", "cannot", "can't",
+            ))
+            looks_positive = any(w in text_lower for w in [
+                "success", "succeeded", "appeared", "opened", "launched",
+                "displayed", "confirmed",
             ])
+            success = looks_positive and not negated
             data = {
                 "success": success,
-                "confidence": 0.85 if success else 0.5,
+                # Uncertain by construction — keep confidence low so the
+                # orchestrator's threshold logic treats it as "retry", not "done".
+                "confidence": 0.5,
                 "observation": text[:120],
                 "error_description": "" if success else text[:120],
-                "should_retry": not success,
+                "should_retry": True,
                 "recovery_hint": "",
             }
 

@@ -102,12 +102,15 @@ def available() -> bool:
 
 # ── Clipboard-paste typing ────────────────────────────────────────────────────
 
-def paste_type(text: str, send_hotkey_fn) -> bool:
+def paste_type(text: str, send_hotkey_fn, sensitive: bool = False) -> bool:
     """
     Type text by setting the clipboard and sending ctrl+v.
     Restores previous clipboard content after 600 ms (async).
 
     send_hotkey_fn: callable that accepts *key_names (e.g. controller._send_hotkey)
+    sensitive:      when True, the clipboard is cleared synchronously right after
+                    the paste so a password/secret never lingers, even briefly,
+                    in addition to the normal async restore.
     """
     if not available():
         return False
@@ -118,11 +121,16 @@ def paste_type(text: str, send_hotkey_fn) -> bool:
     send_hotkey_fn("ctrl", "v")
     time.sleep(0.12)
 
-    # Restore previous clipboard content without blocking
-    if old:
-        def _restore():
-            time.sleep(0.6)
-            write(old)
-        threading.Thread(target=_restore, daemon=True).start()
+    if sensitive:
+        # Overwrite the secret immediately. Don't wait — a clipboard manager
+        # could otherwise snapshot the password during the 600 ms window.
+        write(old or "")
+
+    # Always restore previous clipboard content (even when it was empty, which
+    # clears our text) so we never leave typed content sitting in the clipboard.
+    def _restore():
+        time.sleep(0.6)
+        write(old or "")
+    threading.Thread(target=_restore, daemon=True).start()
 
     return True

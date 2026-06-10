@@ -350,11 +350,59 @@ def detect_burst_from_instruction(instruction: str) -> Optional[ActionBurst]:
     Lets the orchestrator skip the router entirely for known compound-action
     sequences such as "right click → New → Folder → type name → Enter".
     Returns None when the instruction doesn't match any pattern.
+
+    SAFETY (Fix C1): a burst replaces the ENTIRE instruction with one synthetic
+    subtask and skips the router. If the instruction also contains other work
+    ("create a folder X, then open it and add a file"), bursting would silently
+    drop everything after the matched fragment. So we only allow an
+    instruction-level burst when the matched pattern consumes essentially the
+    whole instruction. Anything with additional clauses falls through to the
+    router, which decomposes it properly; per-subtask burst detection can still
+    fire later for the parts that genuinely are bursts.
     """
     class _Stub:
         id = 1   # synthetic subtask id — steps get subtask_id=1, consistent with orchestrator
         description = instruction
-    return detect_burst(_Stub())  # type: ignore[arg-type]
+
+    burst = detect_burst(_Stub())  # type: ignore[arg-type]
+    if burst is None:
+        return None
+
+    if _instruction_has_extra_clauses(instruction):
+        logger.info(
+            "[BURST] Instruction-level burst matched but the instruction contains "
+            "additional clauses — deferring to the router for full decomposition"
+        )
+        return None
+    return burst
+
+
+# Connectives that signal a second, separate step follows the burst fragment.
+# NOTE: the "and <verb>" list deliberately excludes click/select/type — those
+# verbs are part of the burst patterns themselves (e.g. "right-click X and click
+# New"). It only lists verbs that introduce genuinely new work (launching an app,
+# navigating, saving), which a burst would silently drop.
+_SEQUENCE_CONNECTIVES = re.compile(
+    r"\b(?:then|after that|afterwards|next|followed by|and then|"
+    r"and (?:open|launch|run|start|navigate|go to|browse|search|save|close|"
+    r"write|email|send|install|compose))\b",
+    re.IGNORECASE,
+)
+
+
+def _instruction_has_extra_clauses(instruction: str) -> bool:
+    """Heuristic: True when the instruction looks like it has work beyond a single burst.
+
+    Conservative — only treats clear sequencing connectives (then/next/and <verb>)
+    or multiple sentences as 'extra'. A trailing simple clause like
+    "create a folder called test" stays a burst.
+    """
+    text = instruction.strip()
+    # More than one sentence worth of content
+    sentences = [s for s in re.split(r"[.;\n]+", text) if s.strip()]
+    if len(sentences) > 1:
+        return True
+    return bool(_SEQUENCE_CONNECTIVES.search(text))
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

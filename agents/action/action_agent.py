@@ -102,15 +102,19 @@ class ActionExecutionAgent:
                     return False
                 # Substitute {{cred:site:field}} tokens before typing
                 value = step.value
+                sensitive = False
                 try:
                     from utils.credentials import substitute, has_tokens
                     if has_tokens(value):
                         value = substitute(value)
+                        sensitive = True
                         logger.info(f"[ACTION] credential substitution applied")
                 except Exception:
                     pass
                 use_cb = self._should_use_clipboard(step, value)
-                return self.controller.type_text(value, use_clipboard=use_cb)
+                return self.controller.type_text(
+                    value, use_clipboard=use_cb, sensitive=sensitive
+                )
 
             elif step.action_type == "key_press":
                 # Tolerate models that put key in value instead of key field
