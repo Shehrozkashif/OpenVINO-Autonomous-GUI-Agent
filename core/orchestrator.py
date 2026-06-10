@@ -30,7 +30,7 @@ from loguru import logger
 
 from agents.action.action_agent import ActionExecutionAgent
 from agents.grounding.grounding_agent import GroundingResult, UIGroundingAgent
-from agents.planning.planning_agent import PlanningAgent
+from agents.planning.planning_agent import PlanningAgent, PlanningParseError
 from agents.reflection.reflection_agent import ReflectionAgent
 from agents.router.router_agent import RouterAgent
 from core.capture.screen_snapshot import ScreenSnapshot, capture_snapshot
@@ -51,6 +51,10 @@ class OrchestratorConfig:
     # swaps) must not run unbounded. 0 disables a budget.
     task_deadline_s: float = 600.0      # hard cap on a whole instruction
     subtask_deadline_s: float = 240.0   # hard cap on a single subtask
+    # After this many consecutive step failures, planning escalates from the
+    # text path (OCR context → LLM) to the visual path (screenshot → UI-TARS),
+    # which sees icons/layout the text path is blind to. 0 disables escalation.
+    visual_replan_after: int = 2
 
 
 # Per-action-type limit on consecutive identical successful steps.
@@ -109,6 +113,10 @@ class TaskOrchestrator:
             self._ocr = OCREngine()
         self._screen_w, self._screen_h = _screen_size()
         self._extracted_data: Dict[str, str] = {}
+        # Per-task window-count baselines for apps that were ALREADY running
+        # when their launch subtask started. exe_name → window count. Used to
+        # require a NEW window (focusing an existing one must not pass).
+        self._launch_window_baseline: Dict[str, int] = {}
 
     def stop(self):
         self._stop_event.set()
@@ -202,6 +210,7 @@ class TaskOrchestrator:
     def execute(self, instruction: str) -> dict:
         self._stop_event.clear()
         self._extracted_data = {}
+        self._launch_window_baseline = {}
         self._degraded = False
         self.log(f"[TASK START] '{instruction}'")
         start_time = time.time()
@@ -370,6 +379,51 @@ class TaskOrchestrator:
             )
         )
 
+        # Resolve the goal process once. If the app is ALREADY running, record a
+        # window-count baseline: "process exists" is then a vacuous launch signal
+        # (it was true before we did anything), and focusing the existing window
+        # is actively dangerous — that session may be busy running another
+        # program. Only a NEW window proves the launch in that case.
+        _goal_proc: Optional[str] = None
+        _baseline_windows: Optional[int] = None
+        if _OS == "Windows" and _is_launch_goal:
+            _goal_proc = next(
+                (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS
+                 if k in _desc_lower_sub),
+                None,
+            )
+            if _goal_proc and self._is_process_running(_goal_proc):
+                _baseline_windows = self._count_process_windows(_goal_proc)
+                self._launch_window_baseline[_goal_proc] = _baseline_windows
+                task_context = (task_context or []) + [
+                    f"[NOTE] {_goal_proc.split('.')[0]} is ALREADY running with "
+                    f"{_baseline_windows} window(s). The existing window may be "
+                    f"busy running another program — do NOT click its taskbar "
+                    f"button and do NOT focus the existing window. Open a NEW "
+                    f"window instead: key_press winleft → type the app name → "
+                    f"key_press enter."
+                ]
+                self.log(
+                    f"  [PRE-CHECK] {_goal_proc} already running "
+                    f"({_baseline_windows} window(s)) — a NEW window is required"
+                )
+
+        def _goal_confirmed() -> bool:
+            """Launch-goal achieved? New window required when the app pre-existed."""
+            if not _goal_proc:
+                return False
+            if _baseline_windows is not None:
+                return self._count_process_windows(_goal_proc) > _baseline_windows
+            return self._launch_confirmed(_goal_proc)
+
+        # Terminal-command subtasks get DETERMINISTIC verification: a successful
+        # shell command prints nothing (new empty prompt), which OCR-based
+        # reflection systematically mis-reads as "no change → failed". Check the
+        # real world instead: file created/deleted on disk, or error text in
+        # the terminal output.
+        _is_cmd_subtask = "run:" in _desc_lower_sub
+        _typed_ok = False   # a type step succeeded in this subtask
+
         _subtask_start = time.time()
         for step_idx in range(self.config.max_steps_per_subtask):
             if self._stop_event.is_set():
@@ -395,13 +449,61 @@ class TaskOrchestrator:
             except Exception:
                 pass
 
-            step = self.planner.plan_next_step(
-                subtask, screen_context, completed,
-                task_context=task_context, failure_hints=failure_hints,
+            # Escalate to visual planning (screenshot → UI-TARS) once the text
+            # path has failed visual_replan_after times in a row — the text
+            # planner is blind to icons/layout, which is usually why it's stuck.
+            # Exception: terminals. A failing terminal subtask needs a corrected
+            # COMMAND, not a click — visual clicking inside a console wastes a
+            # 30-60s VLM swap and can never fix the error.
+            _visual_mode = (
+                self.config.visual_replan_after > 0
+                and consecutive_failures >= self.config.visual_replan_after
             )
-
-            if step is None:
-                return True   # planner says goal is achieved
+            if _visual_mode and self._foreground_is_terminal():
+                self.log(
+                    "  [VISUAL-REPLAN] Skipped — foreground is a terminal "
+                    "(clicks can't fix command errors)"
+                )
+                _visual_mode = False
+            try:
+                if _visual_mode:
+                    self.log("  [VISUAL-REPLAN] Text planning stuck — asking VLM with screenshot")
+                    try:
+                        step = self._plan_visual(subtask, completed)
+                    except PlanningParseError:
+                        raise
+                    except Exception as e:
+                        # VLM infrastructure error (timeout, model swap failure):
+                        # degrade gracefully to the text planner for this step.
+                        self.log(f"  [VISUAL-REPLAN] VLM error ({e}) — using text planner")
+                        _visual_mode = False
+                    if _visual_mode and step is None:
+                        # VLM says finished() — plausible (earlier failures may
+                        # have been reflection false-negatives), but don't store
+                        # this run as a clean reusable success.
+                        self._degraded = True
+                        return True
+                if not _visual_mode:
+                    step = self.planner.plan_next_step(
+                        subtask, screen_context, completed,
+                        task_context=task_context, failure_hints=failure_hints,
+                    )
+                    if step is None:
+                        return True   # planner says goal is achieved
+            except PlanningParseError as e:
+                # Unparseable planner output is a planning FAILURE, not goal
+                # achievement. Record it and let the loop try again (or abort
+                # via the consecutive-failures limit).
+                self.log(f"  Planning failed: {e}")
+                completed.append("[FAILED: planner produced unparseable output]")
+                consecutive_failures += 1
+                if consecutive_failures >= self.config.consecutive_failures_limit:
+                    self.log(
+                        f"  {self.config.consecutive_failures_limit} consecutive failures"
+                        f" — aborting subtask"
+                    )
+                    return False
+                continue
 
             self.log(f"  Step {step_idx + 1}: [{step.action_type}] {step.description}")
 
@@ -448,6 +550,25 @@ class TaskOrchestrator:
                 if skip_reflection:
                     step_success = True
                     break
+
+                # Deterministic verification for the execute-Enter of a
+                # "run: <command>" subtask — checks the filesystem / terminal
+                # output instead of LLM reflection. On confirmed effect the
+                # whole subtask is done (command typed + executed + verified).
+                if (
+                    _is_cmd_subtask
+                    and step.action_type == "key_press"
+                    and (step.key or "").lower() == "enter"
+                ):
+                    _ok, _why = self._verify_command_effect(
+                        subtask, _subtask_start, _typed_ok
+                    )
+                    if _ok:
+                        self.log(f"  [CMD-CHECK] {_why} — command effect confirmed")
+                        return True
+                    last_error = _why
+                    self.log(f"  [CMD-CHECK] {_why}")
+                    break   # never blind-retry Enter; planner corrects the command
 
                 try:
                     # Give apps extra time to open after a launcher Enter press.
@@ -497,16 +618,10 @@ class TaskOrchestrator:
                             step.action_type in ("click", "double_click")
                             or _is_launch_enter
                         ):
-                            _proc_early = next(
-                                (self._PROCESS_MAP_WINDOWS[k]
-                                 for k in self._PROCESS_MAP_WINDOWS
-                                 if k in subtask.description.lower()),
-                                None,
-                            )
-                            if _proc_early and self._launch_confirmed(_proc_early):
+                            if _goal_confirmed():
                                 self.log(
                                     f"  [GOAL-CHECK-EARLY] "
-                                    f"'{_proc_early.split('.')[0]}' already running "
+                                    f"'{_goal_proc.split('.')[0]}' confirmed "
                                     f"— accepting step"
                                 )
                                 step_success = True
@@ -555,6 +670,8 @@ class TaskOrchestrator:
                     time.sleep(1.0)
 
             if step_success:
+                if step.action_type == "type":
+                    _typed_ok = True
                 # Append extract result to step description for context
                 if step.action_type == "extract":
                     key = step.target or step.description or f"item_{step.id}"
@@ -569,18 +686,10 @@ class TaskOrchestrator:
                 # goal is achieved — return True immediately so the planner never gets a
                 # chance to generate spurious continuation steps (e.g. pressing Enter
                 # again inside a Calculator that is already open).
-                if _OS == "Windows" and _is_launch_goal:
-                    _desc_lower_chk = subtask.description.lower()
-                    _matched_proc = next(
-                        (self._PROCESS_MAP_WINDOWS[k]
-                         for k in self._PROCESS_MAP_WINDOWS
-                         if k in _desc_lower_chk),
-                        None,
-                    )
-                    if _matched_proc and self._launch_confirmed(_matched_proc):
-                        _label = _matched_proc.split(".")[0]
-                        self.log(f"  [GOAL-CHECK] '{_label}' confirmed running — goal achieved")
-                        return True
+                if _OS == "Windows" and _is_launch_goal and _goal_confirmed():
+                    _label = _goal_proc.split(".")[0]
+                    self.log(f"  [GOAL-CHECK] '{_label}' confirmed — goal achieved")
+                    return True
 
                 sig = (step.action_type, step.target, step.value, step.key)
                 if sig == _last_step_sig:
@@ -599,6 +708,19 @@ class TaskOrchestrator:
                         # success (which would poison future routing with a plan
                         # that actually looped). See execute()'s memory gate.
                         self._degraded = True
+                        # Exception: a terminal-command subtask ("run: <cmd>") that
+                        # looped AND has failed steps in its history almost
+                        # certainly never ran its command successfully. Declaring
+                        # it complete poisons every dependent subtask (they build
+                        # on a file/state that doesn't exist) — fail it honestly.
+                        if "run:" in subtask.description.lower() and any(
+                            c.startswith("[FAILED") for c in completed
+                        ):
+                            self.log(
+                                "  [LOOP-GUARD] Command subtask looped after "
+                                "failures — marking subtask FAILED"
+                            )
+                            return False
                         if step.action_type in ("click", "right_click"):
                             try:
                                 _esc = ActionStep(
@@ -627,21 +749,13 @@ class TaskOrchestrator:
                 # This handles the common case where key_press enter launches an app
                 # but the reflector times out before the app's UI is fully visible
                 # (reflection confidence 0.50 → step marked failed, yet app IS open).
-                if _OS == "Windows" and _is_launch_goal:
-                    _desc_lower_chk = subtask.description.lower()
-                    _matched_proc_fail = next(
-                        (self._PROCESS_MAP_WINDOWS[k]
-                         for k in self._PROCESS_MAP_WINDOWS
-                         if k in _desc_lower_chk),
-                        None,
+                if _OS == "Windows" and _is_launch_goal and _goal_confirmed():
+                    _label = _goal_proc.split(".")[0]
+                    self.log(
+                        f"  [GOAL-CHECK] '{_label}' confirmed "
+                        f"despite step failure — goal achieved"
                     )
-                    if _matched_proc_fail and self._launch_confirmed(_matched_proc_fail):
-                        _label = _matched_proc_fail.split(".")[0]
-                        self.log(
-                            f"  [GOAL-CHECK] '{_label}' confirmed running "
-                            f"despite step failure — goal achieved"
-                        )
-                        return True
+                    return True
 
                 consecutive_failures += 1
                 self.log(f"  Step failed — re-evaluating next action")
@@ -667,13 +781,126 @@ class TaskOrchestrator:
         self.log(f"  MAX_STEPS ({self.config.max_steps_per_subtask}) reached")
         return False
 
+    # Foreground processes where visual replanning can't help: command errors
+    # need corrected text, not clicks.
+    _TERMINAL_PROCS = frozenset({
+        "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
+        "conhost.exe", "openconsole.exe",
+    })
+
+    def _foreground_is_terminal(self) -> bool:
+        if _OS != "Windows":
+            return False
+        import os
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return False  # tests themselves run inside a terminal
+        try:
+            from core.capture.screen_snapshot import (
+                _get_foreground_hwnd_and_title, _get_foreground_process,
+            )
+            hwnd, _ = _get_foreground_hwnd_and_title()
+            proc = _get_foreground_process(hwnd)
+            return proc.lower() in self._TERMINAL_PROCS
+        except Exception:
+            return False
+
+    # ── Visual planning (UI-TARS recovery path) ────────────────────────────────
+
+    def _plan_visual(self, subtask: SubTask, completed: List[str]):
+        """Capture the screen and ask the VLM for the next action directly."""
+        import base64
+        import io
+        img = self.capturer.capture()
+        thumb = img.copy()
+        thumb.thumbnail((960, 540))
+        buf = io.BytesIO()
+        thumb.convert("RGB").save(buf, format="JPEG", quality=85)
+        img_b64 = base64.b64encode(buf.getvalue()).decode()
+        return self.planner.plan_next_step_visual(
+            subtask, img_b64, completed,
+            screen_w=self._screen_w, screen_h=self._screen_h,
+        )
+
     # ── Step execution ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _explicit_coords(value: Optional[str]) -> Optional[tuple]:
+        """Parse an explicit "x,y" pixel pair from a step's value field.
+
+        Visual-planner click steps (and burst steps) carry direct screen
+        coordinates this way, bypassing grounding entirely.
+        """
+        if not value or "," not in value:
+            return None
+        parts = value.split(",", 1)
+        if all(p.strip().lstrip("-").isdigit() for p in parts):
+            return int(parts[0].strip()), int(parts[1].strip())
+        return None
+
+    # Keys that are safe to press even when the agent's own console is focused —
+    # they navigate AWAY from it (launcher) or dismiss overlays, never inject
+    # input into the console session itself.
+    _SAFE_OWN_CONSOLE_KEYS = frozenset({"winleft", "super", "win", "escape", "esc"})
+
+    def _keyboard_blocked_by_own_console(self, step: ActionStep) -> bool:
+        """True when keyboard input must be blocked: the foreground window is the
+        agent's own host console (classic conhost). Typing there would inject
+        into the very terminal session that launched the agent. Best-effort —
+        under Windows Terminal the console window is a hidden ConPTY handle that
+        is never foreground, so this guard stays inert there (the new-window
+        launch enforcement covers that case).
+        """
+        if _OS != "Windows":
+            return False
+        import os
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return False  # unit tests run inside a console themselves
+        if step.action_type == "key_press" and (step.key or "").lower() in self._SAFE_OWN_CONSOLE_KEYS:
+            return False
+        try:
+            import ctypes
+            own = ctypes.windll.kernel32.GetConsoleWindow()
+            if not own or not ctypes.windll.user32.IsWindowVisible(own):
+                return False
+            if ctypes.windll.user32.GetForegroundWindow() == own:
+                self.log(
+                    "  [GUARD] Foreground is the agent's own console — keyboard "
+                    "input blocked (would inject into the agent's host terminal)"
+                )
+                return True
+        except Exception:
+            return False
+        return False
 
     def _execute_step(self, step: ActionStep) -> bool:
         x, y, x2, y2 = None, None, None, None
 
+        # Never type into the agent's own host terminal session.
+        if step.action_type in ("type", "key_press", "hotkey") and \
+                self._keyboard_blocked_by_own_console(step):
+            return False
+
+        # Ctrl+C in a terminal interrupts the shell (it does NOT copy) — the
+        # planner sometimes invents it as a "copy the error" recovery step.
+        # Hard-block it; the planner must type a corrected command instead.
+        if (
+            step.action_type == "hotkey"
+            and (step.key or "").lower().replace(" ", "") == "ctrl+c"
+            and self._foreground_is_terminal()
+        ):
+            self.log(
+                "  [GUARD] ctrl+c in a terminal interrupts the shell — blocked "
+                "(type a corrected command instead)"
+            )
+            return False
+
         # ── Click family ──────────────────────────────────────────────────────
         if step.action_type in ("click", "right_click", "double_click"):
+            _coords = self._explicit_coords(step.value)
+            if _coords is not None:
+                # Explicit pixel coordinates (visual planner / burst convention)
+                x, y = _coords
+                return self.actor.execute(step, x=x, y=y)
             if not step.target:
                 self.log(f"  {step.action_type} has no target")
                 return False
@@ -753,6 +980,89 @@ class TaskOrchestrator:
                 return False
 
         return self.actor.execute(step, x=x, y=y, x2=x2, y2=y2)
+
+    # ── Deterministic terminal-command verification ─────────────────────────────
+
+    # Shell error fragments that indicate a command failed. Deliberately
+    # specific — a bare "error" would false-positive on file contents.
+    _SHELL_ERROR_MARKERS = (
+        "is denied", "cannot find", "could not find", "not recognized",
+        "no such file", "exception", "categoryinfo", "command not found",
+        "permission denied", "syntax error", "fatal:", "access denied",
+    )
+
+    def _verify_command_effect(
+        self, subtask: SubTask, started_at: float, typed_ok: bool
+    ) -> tuple:
+        """Ground-truth verification for "run: <command>" subtasks.
+
+        A successful shell command usually prints NOTHING (just a new empty
+        prompt) — OCR reflection mis-reads that silence as failure. Instead:
+          1. delete commands  → success when the target no longer exists
+          2. create/redirect  → success when the target exists AND is fresh
+             (mtime within this subtask — stale files from old runs don't pass)
+          3. anything else    → success when no shell error text is on screen
+        Returns (ok, reason).
+        """
+        import os
+
+        m = re.search(r"run:\s*(.+)$", subtask.description,
+                      re.IGNORECASE | re.DOTALL)
+        cmd = (m.group(1) if m else subtask.description).strip()
+        time.sleep(0.8)   # let the command finish writing
+
+        _PATH = r"(\"[^\"]+\"|'[^']+'|\S+)"
+
+        def _norm(p: str) -> str:
+            return os.path.expandvars(p.strip().strip("'\""))
+
+        # 1. Deletion — target must be gone
+        m_del = re.search(rf"^(?:del|rm|remove-item)\s+(?:-\S+\s+)*{_PATH}",
+                          cmd, re.IGNORECASE)
+        if m_del:
+            t = _norm(m_del.group(1))
+            if not os.path.exists(t):
+                return True, f"'{t}' no longer exists"
+            return False, f"'{t}' still exists — delete did not run or failed"
+
+        # 2. Creation — redirect target or ni/touch/mkdir argument must exist
+        #    and be fresh (modified during this subtask).
+        m_new = re.search(rf">>?\s*{_PATH}", cmd) or re.search(
+            rf"^(?:ni|new-item|touch|mkdir|md)\s+(?:-\S+\s+)*{_PATH}",
+            cmd, re.IGNORECASE)
+        if m_new:
+            t = _norm(m_new.group(1))
+            if os.path.exists(t):
+                try:
+                    fresh = os.path.getmtime(t) >= started_at - 2
+                except OSError:
+                    fresh = True
+                if fresh:
+                    return True, f"'{t}' exists on disk (freshly written)"
+                return False, (
+                    f"'{t}' exists but was NOT modified by this command "
+                    f"(stale file from an earlier run)"
+                )
+            return False, (
+                f"expected '{t}' on disk but it does not exist — "
+                f"the command did not run or failed"
+            )
+
+        # 3. Generic command — shell silence means success
+        if not typed_ok:
+            return False, "Enter pressed but no command was typed first"
+        try:
+            img = self.capturer.capture()
+            img.thumbnail((960, 540))
+            text = " ".join(
+                w.text for w in self._ocr.extract(img) if w.conf >= 0.6
+            ).lower()
+            hit = next((mk for mk in self._SHELL_ERROR_MARKERS if mk in text), None)
+            if hit:
+                return False, f"error text visible in terminal output ('{hit}')"
+            return True, "no error output — shell silence means success"
+        except Exception:
+            return True, "no error detected (output check unavailable)"
 
     # ── Destructive-action firewall ─────────────────────────────────────────────
 
@@ -860,7 +1170,15 @@ class TaskOrchestrator:
                 break
             prev_ocr_text = cur_text
 
-            result = self.grounder.ground(target)
+            # Fast grounding only (UIA + OCR). Full ground() escalates to the
+            # VLM, which forces a 30-60s model swap on small-VRAM machines —
+            # per scroll, that alone can blow the whole subtask deadline.
+            # Check the class dict (not the instance) so MagicMock grounders in
+            # tests don't fabricate a ground_fast attribute.
+            if "ground_fast" in type(self.grounder).__dict__:
+                result = self.grounder.ground_fast(target)
+            else:
+                result = self.grounder.ground(target)
             if result.found and result.confidence >= self.grounder.min_confidence:
                 self.log(f"  [SCROLL-FIND] Found '{target}' after {i + 1} scroll(s)")
                 return result
@@ -991,26 +1309,26 @@ class TaskOrchestrator:
         except Exception:
             return False
 
-    def _process_has_visible_window(self, exe_name: str) -> bool:
-        """True if `exe_name` owns at least one visible, non-trivial top-level window.
+    def _count_process_windows(self, exe_name: str) -> int:
+        """Count visible, non-trivial top-level windows owned by `exe_name`.
 
-        Used for launch confirmation (H9) where bare process existence is a false
-        positive — explorer.exe is always running, and a browser may already be a
-        background process without any visible window. Confirms an actual window
-        is on screen rather than just a process in the table.
+        Used both for launch confirmation (H9: explorer.exe is always running,
+        so only a window proves anything) and for new-window verification when
+        the app was already running before the launch subtask started (focusing
+        the pre-existing window keeps the count flat; a real launch raises it).
         """
         if _OS != "Windows":
-            return False
+            return 0
         try:
             import ctypes
             import ctypes.wintypes
             user32 = ctypes.windll.user32
             target = exe_name.lower()
-            found = [False]
+            count = [0]
 
             @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
             def _cb(hwnd, _):
-                if found[0] or not user32.IsWindowVisible(hwnd):
+                if not user32.IsWindowVisible(hwnd):
                     return True
                 rect = ctypes.wintypes.RECT()
                 user32.GetWindowRect(hwnd, ctypes.byref(rect))
@@ -1032,13 +1350,17 @@ class TaskOrchestrator:
                 ctypes.windll.kernel32.CloseHandle(h_proc)
                 import os as _os
                 if buf.value and _os.path.basename(buf.value).lower() == target:
-                    found[0] = True
+                    count[0] += 1
                 return True
 
             user32.EnumWindows(_cb, 0)
-            return found[0]
+            return count[0]
         except Exception:
-            return False
+            return 0
+
+    def _process_has_visible_window(self, exe_name: str) -> bool:
+        """True if `exe_name` owns at least one visible, non-trivial top-level window."""
+        return self._count_process_windows(exe_name) > 0
 
     def _launch_confirmed(self, exe_name: str) -> bool:
         """Confirm an app launched. Uses window presence for always-running
@@ -1079,14 +1401,22 @@ class TaskOrchestrator:
             )
             if matched_proc:
                 label = matched_proc.split(".")[0]
+                baseline = self._launch_window_baseline.get(matched_proc)
                 for attempt, wait_s in enumerate([1.5, 2.5]):
                     time.sleep(wait_s)
-                    if self._launch_confirmed(matched_proc):
+                    if baseline is not None:
+                        # App pre-existed this subtask: a bare process check is
+                        # vacuous and focusing the old window must NOT pass —
+                        # only a NEW window proves the launch.
+                        if self._count_process_windows(matched_proc) > baseline:
+                            self.log(f"  [CHECK] '{label}' NEW window confirmed")
+                            return True
+                    elif self._launch_confirmed(matched_proc):
                         self.log(f"  [CHECK] '{label}' process confirmed running")
                         return True
                     if attempt == 0:
-                        self.log(f"  [CHECK] '{label}' not yet running — retrying in 2.5s")
-                self.log(f"  [CHECK] Process '{matched_proc}' not found after launch")
+                        self.log(f"  [CHECK] '{label}' not yet confirmed — retrying in 2.5s")
+                self.log(f"  [CHECK] Launch of '{matched_proc}' not confirmed")
                 return False
 
         # Fallback: OCR-based signal check (Linux/macOS, or apps not in process map)

@@ -351,7 +351,11 @@ class UIGroundingAgent:
         words = self.ocr.extract(display) if self.ocr.is_available() else []
 
         for attempt in range(max_retries + 1):
-            result = self._locate(target, display, img_b64, words, scale_x, scale_y)
+            # Stage 2 (VLM) only on the first attempt: on shared-VRAM machines a
+            # VLM call costs a 30-60s model swap, and re-asking it the identical
+            # question on an unchanged screen returns the same answer anyway.
+            result = self._locate(target, display, img_b64, words, scale_x, scale_y,
+                                  use_vlm=(attempt == 0))
             if result:
                 x, y, conf, method, element_type = result
                 x = max(0, min(x, self.screen_w - 1))
@@ -372,7 +376,10 @@ class UIGroundingAgent:
         alternatives = self._rephrase_targets(target)
         for alt in alternatives:
             logger.info(f"[GROUNDING] Rephrasing: trying '{alt}' for '{target}'")
-            result = self._locate(alt, display, img_b64, words, scale_x, scale_y)
+            # Rephrased labels are alternative TEXT spellings — UIA/OCR are the
+            # right matchers for them; skip the expensive VLM here.
+            result = self._locate(alt, display, img_b64, words, scale_x, scale_y,
+                                  use_vlm=False)
             if result:
                 x, y, conf, method, element_type = result
                 x = max(0, min(x, self.screen_w - 1))
@@ -447,6 +454,7 @@ class UIGroundingAgent:
         words: List[OCRWord],
         scale_x: float,
         scale_y: float,
+        use_vlm: bool = True,
     ) -> Optional[Tuple[int, int, float, str, str]]:
         # Stage 0: Windows UIAutomation — fast, pixel-perfect, no model needed
         # UIA elements are always interactive → element_type="foreground_interactive"
@@ -472,7 +480,7 @@ class UIGroundingAgent:
 
         # Stage 2: VLM direct coordinate prediction
         # VLM is expected to hit interactive elements → element_type="foreground_interactive"
-        if self.client:
+        if use_vlm and self.client:
             result = self._vlm_coords(target, img_b64, int(display.width), int(display.height))
             if result:
                 return result
@@ -531,6 +539,11 @@ class UIGroundingAgent:
           Point:  <point>500 300</point>                 0-1000 or display pixels
           BBox:   (x1,y1),(x2,y2)                       same scale rules
         """
+        # Explicit not-found answer — fast, clean exit (no format warning)
+        if "not_found" in text.lower():
+            logger.debug("[GROUNDING/S2] VLM reports element not visible")
+            return None
+
         # Effective display dimensions for pixel-to-screen scaling.
         # Fall back to screen dims (identity scale) when not provided.
         dw = display_w if display_w > 1 else screen_w
@@ -545,10 +558,11 @@ class UIGroundingAgent:
 
         # UI-TARS native action format (0-1000 scale, independent of display size):
         #   click(start_box='[[x1, y1, x2, y2]]')
+        # Bracket count varies in practice ('[[', '[[[', …) — tolerate 0-4.
         m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[?\[?"
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
             r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
-            r"\]?\]?'?\s*\)",
+            r"\]{0,4}'?\s*\)",
             text,
         )
         if m:
@@ -559,7 +573,7 @@ class UIGroundingAgent:
         # 2-value form: model emits [[cx, cy]] instead of [[x1,y1,x2,y2]].
         # Treat as center point on the 0-1000 scale.
         m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[?\[?"
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
             r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
             r"\s*[\]\)']+",
             text,

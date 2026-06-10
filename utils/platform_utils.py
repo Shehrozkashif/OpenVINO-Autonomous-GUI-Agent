@@ -51,6 +51,37 @@ def detect_firefox() -> str:
     return "firefox"
 
 
+# ── Desktop path ──────────────────────────────────────────────────────────────
+
+def get_desktop_path() -> str:
+    """Return the REAL Desktop folder path for this machine.
+
+    On Windows the Desktop is frequently redirected by OneDrive
+    (C:\\Users\\<u>\\OneDrive\\Desktop), so '%USERPROFILE%\\Desktop' and
+    '$env:USERPROFILE\\Desktop' point at a directory that does not exist.
+    Ask the shell for the actual known-folder location instead, and bake the
+    resolved LITERAL path into prompts — it works in any shell, no expansion.
+    """
+    if _OS == "Windows":
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(260)
+            # CSIDL_DESKTOPDIRECTORY = 0x0010 — follows OneDrive redirection
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 0x0010, None, 0, buf) == 0:
+                if buf.value and os.path.isdir(buf.value):
+                    return buf.value
+        except Exception:
+            pass
+        fallback = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+        if os.path.isdir(fallback):
+            return fallback
+        onedrive = os.path.join(os.environ.get("OneDrive", ""), "Desktop")
+        if os.path.isdir(onedrive):
+            return onedrive
+        return fallback or "~\\Desktop"
+    return os.path.expanduser("~/Desktop")
+
+
 # ── GPU detection ─────────────────────────────────────────────────────────────
 
 @dataclass

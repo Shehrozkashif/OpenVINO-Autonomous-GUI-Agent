@@ -39,6 +39,9 @@ class ScreenSnapshot:
     foreground_process: str
     screen_hash: str
     ocr_regions: List[OCRRegion] = field(default_factory=list)
+    # (name, control_type) pairs from the foreground window's UIA tree —
+    # ground-truth clickable elements, Windows only ([] elsewhere).
+    interactive_elements: List[Tuple[str, str]] = field(default_factory=list)
 
     def foreground_texts(self) -> List[str]:
         """Deduplicated text tokens visible in the foreground window."""
@@ -63,6 +66,15 @@ class ScreenSnapshot:
         """Human-readable context string for the planning prompt."""
         proc = self.foreground_process or "unknown"
         lines = [f'Foreground window: "{self.foreground_window_title}" ({proc})']
+
+        if self.interactive_elements:
+            quoted = ", ".join(
+                f'"{name}" ({ctype})' for name, ctype in self.interactive_elements[:40]
+            )
+            lines.append(
+                f"Clickable controls (accessibility tree — these labels are "
+                f"reliable click targets): {quoted}"
+            )
 
         fg_texts = self.foreground_texts()
         if fg_texts:
@@ -182,6 +194,14 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
     fg_process = _get_foreground_process(fg_hwnd)
     windows = _enum_visible_windows()
 
+    interactive: list = []
+    if _IS_WINDOWS:
+        try:
+            from core.grounding.windows_uia import get_interactive_elements  # noqa: PLC0415
+            interactive = get_interactive_elements()
+        except Exception:
+            interactive = []
+
     img = capturer.capture()
     thumb = img.copy()
     thumb.thumbnail((960, 540))
@@ -242,4 +262,5 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
         foreground_process=fg_process,
         screen_hash=screen_hash,
         ocr_regions=regions,
+        interactive_elements=interactive,
     )

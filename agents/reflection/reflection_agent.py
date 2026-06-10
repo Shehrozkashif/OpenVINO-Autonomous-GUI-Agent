@@ -62,6 +62,9 @@ Rules — base your verdict on evidence in the screen text:
                        FAIL if the text appears only in unrelated logs or chat.
   key_press "enter"  : SUCCEED if the intended effect occurred (command ran,
                        dialog confirmed, folder renamed, search executed).
+                       In a TERMINAL: shell silence means success — a new empty
+                       prompt line with NO error text = the command SUCCEEDED.
+                       Only FAIL if error text is visible (denied, not found, …).
   key_press "super"  : SUCCEED if a search bar or launcher panel is visible.
   key_press "escape" : SUCCEED if a dialog or menu closed.
   hotkey ctrl+s      : SUCCEED if no error dialog appeared. Silence = success —

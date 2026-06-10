@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple
 from loguru import logger
 
 from core.protocols.a2a import InferenceClient, SubTask
-from utils.platform_utils import detect_firefox
+from utils.platform_utils import detect_firefox, get_desktop_path
 
 _SUBTASK_SCHEMA = {
     "type": "array",
@@ -33,7 +33,11 @@ _SHELL_PROMPT = _USER  # username only — hostnames can be too long for OCR
 
 if _OS == "Windows":
     _ROUTER_OS_CONTEXT = "Windows 11"
-    _DESKTOP_PATH = "%USERPROFILE%\\Desktop"
+    # Resolved LITERAL path (handles OneDrive-redirected Desktops, where
+    # $env:USERPROFILE\Desktop does not exist). Forward slashes: backslashes
+    # need \\ escaping in the JSON the LLM emits and small models mangle them
+    # (observed truncation to "C:\"). All Windows shells/dialogs accept "/".
+    _DESKTOP_PATH = get_desktop_path().replace("\\", "/")
     _TERMINAL_APP = "Windows Terminal"
     _CALC_APP     = "Calculator"
     _FILES_APP    = "File Explorer"
@@ -85,7 +89,11 @@ Decompose any user instruction into the MINIMUM ordered sub-tasks a GUI agent ca
   method into the description removes that choice and forces extra steps.
 
 ━━━ TASK → METHOD ━━━
-  File / folder ops   →  terminal (touch / mkdir / rm / mv / echo / cp). NEVER use the file manager.
+  File / folder ops   →  terminal (touch / mkdir / rm / mv / echo / cp) — most reliable.
+                         EXCEPTION: if the user explicitly says to use the mouse, GUI,
+                         File Explorer, or right-click — honor that and describe the
+                         GUI route instead (e.g. "right click on the desktop, click New,
+                         click Text Document, type <name>, press enter").
   Web browsing        →  the browser named in the instruction, else Firefox (specify exact URL or search query)
   Code editing        →  VS Code
   Documents           →  LibreOffice Writer / Calc / Impress
@@ -184,9 +192,13 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 
 "open terminal, create notes.txt on the desktop, write hello world in it, then open it in notepad"
 → [{"id":1,"description":"open TERMINAL_APP_PLACEHOLDER","depends_on":[]},
-   {"id":2,"description":"with the terminal already open, run: echo hello world > DESKTOP_PATH_PLACEHOLDER\\notes.txt","depends_on":[1]},
+   {"id":2,"description":"with the terminal already open, run: echo 'hello world' > DESKTOP_PATH_PLACEHOLDER/notes.txt","depends_on":[1]},
    {"id":3,"description":"open Notepad","depends_on":[2]},
-   {"id":4,"description":"with Notepad already open, open the file DESKTOP_PATH_PLACEHOLDER\\notes.txt","depends_on":[3]}]"""
+   {"id":4,"description":"with Notepad already open, open the file DESKTOP_PATH_PLACEHOLDER/notes.txt","depends_on":[3]}]
+
+PATHS: always copy file paths EXACTLY as given above (DESKTOP_PATH_PLACEHOLDER is the
+real desktop folder on this machine). Use forward slashes. NEVER invent paths like
+C:/Users/Public — they require admin rights."""
 
 # Apply runtime substitutions — no hardcoded machine values
 ROUTER_SYSTEM_PROMPT = (

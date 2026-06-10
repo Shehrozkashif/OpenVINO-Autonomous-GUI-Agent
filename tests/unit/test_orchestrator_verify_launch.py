@@ -99,6 +99,7 @@ class TestVerifyLaunchTriggerCondition:
         """
         orch = _make_orch()
         with patch.object(orch, '_is_process_running', return_value=False), \
+             patch.object(orch, '_process_has_visible_window', return_value=False), \
              patch('core.orchestrator.capture_snapshot') as mock_snap:
             snap = MagicMock()
             snap.ocr_regions = []
@@ -115,6 +116,7 @@ class TestVerifyLaunchTriggerCondition:
         """
         orch = _make_orch()
         with patch.object(orch, '_is_process_running', return_value=False), \
+             patch.object(orch, '_process_has_visible_window', return_value=False), \
              patch('core.orchestrator.capture_snapshot') as mock_snap:
             snap = MagicMock()
             # Simulate no matching OCR text on screen
@@ -137,7 +139,8 @@ class TestVerifyLaunchAppKeywordCheck:
         This confirms the verification path was entered (not skipped).
         """
         orch = _make_orch()
-        with patch.object(orch, '_is_process_running', return_value=False):
+        with patch.object(orch, '_is_process_running', return_value=False), \
+             patch.object(orch, '_process_has_visible_window', return_value=False):
             result = orch._verify_launch(_sub("open notepad"))
         assert result is False, (
             "'open notepad' must trigger launch verification; "
@@ -147,21 +150,24 @@ class TestVerifyLaunchAppKeywordCheck:
     def test_open_calculator_triggers_verification(self):
         """'open calculator' → triggers verification (process not found → False)."""
         orch = _make_orch()
-        with patch.object(orch, '_is_process_running', return_value=False):
+        with patch.object(orch, '_is_process_running', return_value=False), \
+             patch.object(orch, '_process_has_visible_window', return_value=False):
             result = orch._verify_launch(_sub("open calculator"))
         assert result is False
 
     def test_open_terminal_triggers_verification(self):
         """'open windows terminal' → triggers verification."""
         orch = _make_orch()
-        with patch.object(orch, '_is_process_running', return_value=False):
+        with patch.object(orch, '_is_process_running', return_value=False), \
+             patch.object(orch, '_process_has_visible_window', return_value=False):
             result = orch._verify_launch(_sub("open windows terminal"))
         assert result is False
 
     def test_open_notepad_process_found_returns_true(self):
         """'open notepad' with Notepad process running → verification passes → True."""
         orch = _make_orch()
-        with patch.object(orch, '_is_process_running', return_value=True):
+        with patch.object(orch, '_is_process_running', return_value=True), \
+             patch.object(orch, '_process_has_visible_window', return_value=False):
             result = orch._verify_launch(_sub("open notepad"))
         assert result is True
 

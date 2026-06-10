@@ -11,9 +11,17 @@ import re
 from typing import List, Optional
 
 from loguru import logger
-from utils.platform_utils import detect_firefox
+from utils.platform_utils import detect_firefox, get_desktop_path
 
 from core.protocols.a2a import ActionStep, InferenceClient, SubTask
+
+
+class PlanningParseError(Exception):
+    """Planner LLM output could not be parsed into steps, even after a retry.
+
+    Distinct from "goal achieved" (an empty step array): the orchestrator must
+    treat this as a FAILED planning attempt, never as subtask completion.
+    """
 
 # Imported inside functions to avoid a hard circular-import at module load time.
 # TYPE_CHECKING guard is sufficient for type hints only; we need the class at
@@ -36,7 +44,13 @@ if _OS == "Windows":
     _CLOSE_WIN      = "alt+f4"
     _NEW_TAB        = "ctrl+t"
     _REOPEN_TAB     = "ctrl+shift+t"
-    _DESKTOP_PATH   = "%USERPROFILE%\\Desktop"
+    # Resolved LITERAL path from the shell (handles OneDrive-redirected
+    # Desktops, where $env:USERPROFILE\Desktop does not exist). Forward
+    # slashes on purpose: backslashes need \\ escaping inside the JSON the
+    # LLM emits and small models mangle them (observed: path truncated to
+    # "C:\" then hallucinated). PowerShell, cmd built-ins, and Windows file
+    # dialogs all accept forward slashes.
+    _DESKTOP_PATH   = get_desktop_path().replace("\\", "/")
     _SCREENSHOT_KEY = "print_screen"
     _ICON_NOTE = (
         "Windows exposes every icon's accessible name through UI Automation, so "
@@ -84,12 +98,10 @@ _FIREFOX_LAUNCH = _FIREFOX_CMD if _OS == "Windows" else f"{_FIREFOX_CMD} &"
 # Pre-compute OS-specific values used inside f-string examples
 # (f-strings can't contain backslashes in expression parts before Python 3.12)
 _TERM_APP   = "cmd" if _OS == "Windows" else "gnome-terminal"
-_ECHO_CMD   = (f"echo hello > {_DESKTOP_PATH}\\hello.txt"
+_ECHO_CMD   = (f"echo 'hello' > {_DESKTOP_PATH}/hello.txt"
                if _OS == "Windows"
                else f"echo 'hello world' > {_DESKTOP_PATH}/hello.txt")
-_MKDIR_CMD  = (f"mkdir {_DESKTOP_PATH}\\projects"
-               if _OS == "Windows"
-               else f"mkdir {_DESKTOP_PATH}/projects")
+_MKDIR_CMD  = f"mkdir {_DESKTOP_PATH}/projects"
 
 # Launcher instructions differ between Windows (no click-to-focus needed) and Linux/macOS
 _LAUNCHER_NOTE = (
@@ -126,14 +138,16 @@ _TERMINAL_FRESH_LAUNCH = (
 if _OS == "Windows":
     _D = _DESKTOP_PATH   # already uses backslash from the assignment above
     _TERMINAL_COMMANDS = (
-        f"  Create file  :  type nul > {_D}\\name.txt\n"
-        f"  Write file   :  echo text > {_D}\\name.txt\n"
-        f"  Append file  :  echo text >> {_D}\\name.txt\n"
-        f"  Make folder  :  mkdir {_D}\\foldername\n"
-        f"  Delete file  :  del {_D}\\name.txt\n"
-        f"  Move/rename  :  move {_D}\\old {_D}\\new\n"
+        f"  Shell is PowerShell (Windows Terminal default) — use PowerShell syntax.\n"
+        f"  Use FORWARD slashes in paths (PowerShell accepts them; no escaping issues).\n"
+        f"  Create file  :  ni {_D}/name.txt -ItemType File\n"
+        f"  Write file   :  echo 'text' > {_D}/name.txt\n"
+        f"  Append file  :  echo 'text' >> {_D}/name.txt\n"
+        f"  Make folder  :  mkdir {_D}/foldername\n"
+        f"  Delete file  :  del {_D}/name.txt\n"
+        f"  Move/rename  :  move {_D}/old {_D}/new\n"
         f"  Copy file    :  copy source destination\n"
-        f"  Run Python   :  python {_D}\\script.py\n"
+        f"  Run Python   :  python {_D}/script.py\n"
         f"  Install pkg  :  pip install packagename\n"
         f"  List files   :  dir {_D}\n"
         f"  Git clone    :  git clone https://github.com/user/repo"
@@ -224,6 +238,10 @@ PRIMARY — click a visible icon (ONLY when the exact app name appears in screen
   CRITICAL: Company names ("Microsoft", "Google", "Apple") in copyright text,
   window headers, or log output are NOT app icons. Only the EXACT short app name
   (e.g. "Notepad", "Firefox") visible as a taskbar/desktop element counts.
+  CRITICAL: A taskbar button labelled like "Terminal - 1 running window" switches
+  to an EXISTING window that may be busy running another program. If the context
+  contains a [NOTE] saying the app is already running, NEVER click such a button —
+  open a NEW window via the search launcher instead.
 
 FALLBACK → PREFERRED — search launcher (use whenever the app is not in screen text):
   {_LAUNCHER_NOTE}
@@ -233,9 +251,12 @@ FALLBACK → PREFERRED — search launcher (use whenever the app is not in scree
       wait 1.5–2.0s after launch, then click the shell prompt or window to confirm focus.
 
 ━━━ FOCUS MANAGEMENT ━━━
-• Click a window before typing in it. Always. Except: fresh terminal (ctrl+alt+t) already has focus.
+• FIRST check the "Foreground window:" line in the screen context. If it already
+  names the target app (e.g. WindowsTerminal.exe, notepad.exe), the app IS focused —
+  type or press keys directly. Do NOT add a click step just to focus it.
+• Click a window before typing in it ONLY when it is not the foreground window.
 • Focus browser address bar  →  hotkey ctrl+l  (NEVER click the address bar visually)
-• Focus terminal already open  →  click the username visible in the shell prompt (e.g. {_SHELL_PROMPT})
+• Focus a terminal that is NOT foreground  →  click the username visible in the shell prompt (e.g. {_SHELL_PROMPT})
 • After alt+tab or clicking taskbar  →  always click target window before typing
 
 ━━━ FIREFOX ━━━
@@ -257,10 +278,24 @@ Fresh terminal (use search launcher — reliable on all machines):
 {_TERMINAL_FRESH_LAUNCH}
 
 Terminal already open (from previous sub-task):
-  click {_SHELL_PROMPT} → wait "0.5" → type command → key_press enter
+  If "Foreground window" in screen context IS the terminal (WindowsTerminal.exe,
+  cmd.exe, powershell.exe, gnome-terminal): type command → key_press enter. NO click.
+  Only if another window is foreground: click {_SHELL_PROMPT} → wait "0.5" → type command → key_press enter
 
 Common commands ({_OS_CONTEXT}):
 {_TERMINAL_COMMANDS}
+
+COMMAND ERRORS — if the step history shows a command FAILED with an error message:
+  • Do NOT press enter again — re-running the identical command fails identically.
+  • Type a CORRECTED command that addresses the error, then press enter.
+  • "Could not find a part of the path" / "No such file or directory" → the
+    directory does not exist: create it first (mkdir <dir>) or use a path that
+    exists. Never reuse the failing path unchanged.
+  • "Access to the path is denied" → that location needs admin rights: use the
+    Desktop path shown above instead.
+  • FORBIDDEN recovery steps: ctrl+c (it INTERRUPTS the shell, it does not copy),
+    "copy error message", "troubleshoot", or any diagnostic step. The ONLY valid
+    recovery is typing a corrected command.
 
 ━━━ VS CODE ━━━
 Launch   :  search launcher value="code" → wait "2.0"
@@ -358,6 +393,9 @@ CRITICAL: After typing the filename (step a), your very next step MUST be key_pr
 ✗ Never re-launch an app that the sub-task description says is already open
 ✗ Never use ctrl+alt+del — Windows intercepts it; it cannot be sent by automation
 ✗ Never click an app icon whose name is not in the visible screen text
+✗ Never click a taskbar button labelled "... running window" to OPEN an app — it focuses an existing session instead of opening a new one
+✗ Never press ctrl+c in a terminal — it interrupts the shell, it does NOT copy text
+✗ Never plan "copy error message" or troubleshooting steps — fix the failing command instead
 ✗ Never press Ctrl+S when a Save or Save-As dialog is already visible — use Enter instead
 
 ━━━ OUTPUT ━━━
@@ -383,12 +421,11 @@ EXAMPLE 2 — open terminal and run a command (no terminal icon visible — use 
   {{"id":8,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute command","verification":"New prompt appears, no error"}}
 ]
 
-EXAMPLE 3 — terminal already open from previous sub-task:
+EXAMPLE 3 — terminal already open AND foreground (screen context shows
+"Foreground window: ... (WindowsTerminal.exe)") — type directly, no focus click:
 [
-  {{"id":1,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Click prompt to focus terminal","verification":"Terminal is active"}},
-  {{"id":2,"action_type":"wait","target":null,"value":"0.5","key":null,"description":"Wait for focus","verification":"Cursor blinking"}},
-  {{"id":3,"action_type":"type","target":null,"value":"{_MKDIR_CMD}","key":null,"description":"Type command","verification":"Command at prompt"}},
-  {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute","verification":"New prompt, no error"}}
+  {{"id":1,"action_type":"type","target":null,"value":"{_MKDIR_CMD}","key":null,"description":"Type command","verification":"Command at prompt"}},
+  {{"id":2,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute","verification":"New prompt, no error"}}
 ]
 
 EXAMPLE 4 — browser already open, navigate to URL:
@@ -415,9 +452,160 @@ EXAMPLE 6 — type in a LibreOffice Writer document:
 ]"""
 
 
+# ── Visual planning (UI-TARS native action space) ─────────────────────────────
+# Used as a recovery path when text-based planning fails repeatedly: the VLM
+# sees the actual screenshot and proposes the next action directly, including
+# pixel coordinates — no OCR or grounding required.
+
+_VISUAL_PLAN_SYSTEM = (
+    "You are a GUI agent operating a computer. You see a screenshot and output "
+    "exactly ONE next action to progress toward the user's goal."
+)
+
+_VISUAL_PLAN_PROMPT = """\
+You are operating a {os_name} desktop. Screenshot attached.
+
+GOAL: {goal}
+{history}
+Output exactly ONE action line in this format (no explanation):
+
+click(start_box='[[x1, y1, x2, y2]]')        — left-click the element in that box
+left_double(start_box='[[x1, y1, x2, y2]]')  — double-click
+right_single(start_box='[[x1, y1, x2, y2]]') — right-click
+type(content='text to type')                 — type into the focused field
+hotkey(key='ctrl s')                         — press a key combination
+press(key='enter')                           — press a single key
+scroll(direction='down')                     — scroll the page
+wait()                                       — wait for the screen to settle
+finished()                                   — the goal is fully achieved
+
+All coordinates are on a 0-1000 scale where (0,0) is top-left and (1000,1000)
+is bottom-right of the screenshot."""
+
+
+def _parse_visual_action(
+    text: str, subtask_id: int, screen_w: int, screen_h: int
+) -> Optional[ActionStep]:
+    """Parse a UI-TARS action line into an ActionStep.
+
+    Click-family steps carry explicit screen-pixel coordinates in `value`
+    ("x,y" — the same convention the burst executor uses), so the orchestrator
+    executes them directly without grounding.
+
+    Returns None for finished(). Raises PlanningParseError when nothing parses.
+    """
+    if "</think>" in text:
+        text = text.split("</think>")[-1]
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    if re.search(r"\bfinished\s*\(", text):
+        return None
+
+    def _step(action_type, *, target=None, value=None, key=None, desc=""):
+        return ActionStep(
+            id=1, subtask_id=subtask_id, action_type=action_type,
+            target=target, value=value, key=key,
+            description=desc, verification="",
+        )
+
+    # Click family with a 0-1000 bounding box (bracket count varies: '[['/'[[['…)
+    m = re.search(
+        r"(click|left_double|right_single)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
+        r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)",
+        text,
+    )
+    if m:
+        kind = {"click": "click", "left_double": "double_click",
+                "right_single": "right_click"}[m.group(1)]
+        x1, y1, x2, y2 = (float(m.group(i)) for i in range(2, 6))
+        px = int((x1 + x2) / 2 / 1000 * screen_w)
+        py = int((y1 + y2) / 2 / 1000 * screen_h)
+        return _step(kind, value=f"{px},{py}",
+                     desc=f"[visual] {kind} at ({px},{py})")
+
+    # Click family with a 0-1000 center point ([[cx, cy]])
+    m = re.search(
+        r"(click|left_double|right_single)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
+        r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*[\]\)']",
+        text,
+    )
+    if m:
+        kind = {"click": "click", "left_double": "double_click",
+                "right_single": "right_click"}[m.group(1)]
+        px = int(float(m.group(2)) / 1000 * screen_w)
+        py = int(float(m.group(3)) / 1000 * screen_h)
+        return _step(kind, value=f"{px},{py}",
+                     desc=f"[visual] {kind} at ({px},{py})")
+
+    m = re.search(r"type\s*\(\s*content\s*=\s*'(.*?)'\s*\)", text, re.DOTALL)
+    if m:
+        content = m.group(1).replace("\\'", "'").replace("\\n", "\n")
+        return _step("type", value=content, desc=f"[visual] type '{content[:40]}'")
+
+    m = re.search(r"hotkey\s*\(\s*key\s*=\s*'([^']+)'\s*\)", text)
+    if m:
+        combo = "+".join(m.group(1).replace("+", " ").split())
+        return _step("hotkey", key=combo, desc=f"[visual] hotkey {combo}")
+
+    m = re.search(r"press\s*\(\s*key\s*=\s*'([^']+)'\s*\)", text)
+    if m:
+        return _step("key_press", key=m.group(1).strip(),
+                     desc=f"[visual] press {m.group(1).strip()}")
+
+    m = re.search(r"scroll\s*\(\s*direction\s*=\s*'([^']+)'\s*\)", text)
+    if m:
+        return _step("scroll", value=m.group(1).strip().lower(),
+                     desc=f"[visual] scroll {m.group(1).strip()}")
+
+    if re.search(r"\bwait\s*\(", text):
+        return _step("wait", value="1.0", desc="[visual] wait for screen")
+
+    raise PlanningParseError(f"unrecognised visual action: {text[:120]}")
+
+
 class PlanningAgent:
     def __init__(self, ovms_client: InferenceClient):
         self.ovms = ovms_client
+
+    def plan_next_step_visual(
+        self,
+        subtask: SubTask,
+        image_base64: str,
+        completed: List[str] = None,
+        screen_w: int = 1920,
+        screen_h: int = 1080,
+    ) -> Optional[ActionStep]:
+        """
+        Visual recovery planning: send the actual screenshot to the VLM (UI-TARS)
+        and get the next action directly, with pixel coordinates.
+
+        Used by the orchestrator when text-based planning has failed repeatedly —
+        the text path is blind to icons, images, and layout, which is usually why
+        it got stuck. Returns None when the VLM says finished().
+        Raises PlanningParseError when the output is unusable.
+        """
+        history = ""
+        if completed:
+            lines = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(completed[-8:]))
+            history = f"\nSteps attempted so far (FAILED ones are marked):\n{lines}\n"
+
+        prompt = _VISUAL_PLAN_PROMPT.format(
+            os_name=_OS_CONTEXT, goal=subtask.description, history=history,
+        )
+        resp = self.ovms.query_vlm(
+            prompt=prompt,
+            image_base64=image_base64,
+            max_tokens=150,
+            temperature=0.0,
+            system_prompt=_VISUAL_PLAN_SYSTEM,
+        )
+        step = _parse_visual_action(resp.content, subtask.id, screen_w, screen_h)
+        if step is not None:
+            step.id = len(completed or []) + 1
+            logger.info(f"[PLANNING/VISUAL] Next: [{step.action_type}] {step.description}")
+        else:
+            logger.info("[PLANNING/VISUAL] VLM reports goal achieved (finished())")
+        return step
 
     def plan_next_step(
         self,
@@ -511,8 +699,21 @@ class PlanningAgent:
         try:
             steps = self._parse_steps(resp.content, subtask.id)
         except (ValueError, json.JSONDecodeError) as e:
-            logger.warning(f"[PLANNING] plan_next_step parse error: {e} — skipping")
-            return None
+            # A parse error is NOT "goal achieved" — returning None here made the
+            # orchestrator mark the subtask complete on garbage output. Retry once
+            # at temperature 0; if still unparseable, raise so the orchestrator
+            # counts a planning failure and can recover.
+            logger.warning(f"[PLANNING] parse error: {e} — retrying once at temperature 0")
+            resp = self.ovms.query_llm(
+                messages, max_tokens=768, temperature=0.0,
+                response_schema=_STEP_SCHEMA,
+            )
+            try:
+                steps = self._parse_steps(resp.content, subtask.id)
+            except (ValueError, json.JSONDecodeError) as e2:
+                raise PlanningParseError(
+                    f"planner output unparseable after retry: {e2}"
+                ) from e2
 
         if not steps:
             logger.info(f"[PLANNING] Goal achieved — no more steps needed")

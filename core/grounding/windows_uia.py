@@ -55,6 +55,20 @@ def is_available() -> bool:
     return _load()
 
 
+def _thread_com_init():
+    """Initialize COM for the current worker thread.
+
+    uiautomation requires per-thread COM initialization when called outside the
+    import thread ("CoInitialize has not been called" otherwise). Returns the
+    initializer object — keep it referenced for the duration of the UIA work;
+    its destructor uninitializes COM.
+    """
+    try:
+        return _uia.UIAutomationInitializerInThread()
+    except Exception:
+        return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def find_element(
@@ -79,6 +93,7 @@ def find_element(
     result: list = [None]
 
     def _search():
+        _com = _thread_com_init()
         try:
             query = _strip_roles(target).lower().strip()
             if not query:
@@ -110,6 +125,8 @@ def find_element(
 
         except Exception as e:
             logger.debug(f"[UIA] Search error for '{target}': {e}")
+        finally:
+            del _com   # release per-thread COM
 
     t = threading.Thread(target=_search, daemon=True)
     t.start()
@@ -141,6 +158,80 @@ def find_element(
         logger.debug(f"[UIA] '{target}' not found (timeout={timeout_s}s)")
 
     return result[0]
+
+
+def get_interactive_elements(
+    max_elements: int = 40,
+    max_depth: int = 7,
+    timeout_s: float = 1.5,
+) -> list:
+    """
+    Collect interactive controls from the foreground window's UIA subtree.
+
+    Returns [(name, control_type)] — e.g. [("Save", "Button"), ("File", "MenuItem")].
+    Gives the planner a ground-truth list of elements it can actually click,
+    instead of guessing from OCR tokens. Names returned here are guaranteed to
+    be findable by Stage 0 grounding (same UIA tree, same matching).
+
+    Runs in a daemon thread with a hard timeout so it can never stall planning.
+    Returns [] on non-Windows, on timeout, or when uiautomation is unavailable.
+    """
+    if not _load():
+        return []
+
+    result: list = [[]]
+
+    def _collect():
+        _com = _thread_com_init()
+        try:
+            out: list = []
+            seen: set = set()
+
+            def _walk(ctrl, depth: int):
+                if depth > max_depth or len(out) >= max_elements:
+                    return
+                try:
+                    ctype = ctrl.ControlTypeName
+                    name = (ctrl.Name or "").strip()
+                    if (
+                        name
+                        and len(name) <= 60
+                        and ctype in _INTERACTIVE_CONTROL_TYPES
+                        # Skip glyph-only names (icon-font codepoints like
+                        # '') — meaningless as planner click targets.
+                        and any(ch.isalnum() for ch in name)
+                    ):
+                        key = (name.lower(), ctype)
+                        if key not in seen:
+                            seen.add(key)
+                            out.append((name, ctype.replace("Control", "")))
+                    for child in ctrl.GetChildren():
+                        if len(out) >= max_elements:
+                            return
+                        _walk(child, depth + 1)
+                except Exception:
+                    pass  # controls can vanish mid-walk
+
+            _walk(_uia.GetForegroundControl(), 0)
+            result[0] = out
+        except Exception as e:
+            logger.debug(f"[UIA] Interactive-element collection error: {e}")
+        finally:
+            del _com   # release per-thread COM
+
+    t = threading.Thread(target=_collect, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    return result[0]
+
+
+# UIA control types a user can act on — used by get_interactive_elements().
+_INTERACTIVE_CONTROL_TYPES = frozenset({
+    "ButtonControl", "MenuItemControl", "ListItemControl", "TreeItemControl",
+    "TabItemControl", "HyperlinkControl", "ComboBoxControl", "CheckBoxControl",
+    "RadioButtonControl", "EditControl", "SplitButtonControl",
+    "DocumentControl", "SliderControl", "SpinnerControl",
+})
 
 
 # ── Tree walking ──────────────────────────────────────────────────────────────
