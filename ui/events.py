@@ -57,7 +57,7 @@ _RX_SETTLE       = re.compile(r"\[SETTLE\]")
 # ── Deep pipeline events (loguru bridge — agents/, tools/, core/) ────────────
 _RX_PLANNED      = re.compile(r"\[PLANNING\] Next: \[(\w+)\] (.*)")
 _RX_LOCATED      = re.compile(
-    r"\[GROUNDING\] '(.+?)' → \((\d+),(\d+)\) conf=([\d.]+) method=(\w+)")
+    r"\[GROUNDING\] '(.+?)' → \((\d+),(\d+)\) conf=([\d.]+) method=([\w/-]+)")
 _RX_EXECUTED     = re.compile(r"\[ACTION\] (\w+)")
 _RX_VLM_VERIFY   = re.compile(r"\[REFLECTION\] .*escalating to VLM")
 _RX_KILLSWITCH   = re.compile(r"\[KILL-SWITCH\] Armed — (.*)")

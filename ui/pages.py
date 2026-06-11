@@ -312,6 +312,7 @@ class MissionPage(QWidget):
         root.addWidget(self.timeline, stretch=4)
 
         self._t0 = None
+        self._screen_dims = None
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(500)
         self._tick_timer.timeout.connect(self._tick)
@@ -331,12 +332,15 @@ class MissionPage(QWidget):
         bus.state_changed.connect(self._on_state)
         # live narration on the preview ("Located 'X' (80% · vlm)…")
         bus.detail.connect(self.preview.set_action_text)
+        # grounding-overlay reticle at the located element
+        bus.element_located.connect(self._on_located)
 
     def _on_task_started(self, instruction: str):
         self.timeline.clear()
         self._t0 = time.time()
         self._tick_timer.start()
         self.preview.set_active(True)
+        self.preview.clear_targets()
         self.preview.set_action_text(f"Mission: {instruction}")
         for w, default in ((self.s_steps, "0"), (self.s_fail, "0"),
                            (self.s_conf, "—")):
@@ -358,6 +362,23 @@ class MissionPage(QWidget):
     def _on_failed(self, reason: str, conf: float):
         self.timeline.fail_step(reason)
         self.s_fail[1].setText(str(self.bus.steps_failed + self.bus.retries))
+
+    def _on_located(self, target: str, x: int, y: int, conf: float,
+                    method: str):
+        sw, sh = self._screen_wh()
+        self.preview.mark_target(target, x / sw, y / sh, conf)
+
+    def _screen_wh(self):
+        """Logical screen size — the grounder's coordinate space."""
+        if self._screen_dims is None:
+            try:
+                from core.capture.screenshot import _screen_size
+                w, h = _screen_size()
+            except Exception:
+                geo = self.screen().geometry()
+                w, h = geo.width(), geo.height()
+            self._screen_dims = (max(1, w), max(1, h))
+        return self._screen_dims
 
     def _on_done(self, summary: str, elapsed: float):
         self.preview.set_action_text(summary)

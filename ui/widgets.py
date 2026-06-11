@@ -656,9 +656,14 @@ class Timeline(QScrollArea):
 class ScreenPreview(QWidget):
     """Rounded live view of the desktop with a scan sweep while the agent acts.
 
-    The sweep tells the user "the agent is looking at this" without any fake
-    bounding boxes — we only visualize what we actually know.
+    Grounding-overlay reticles mark elements the grounder actually located
+    (real coordinates from [GROUNDING] events — we only visualize what we
+    know). Drawn here, inside the agent's own capture-masked window, they can
+    never contaminate the screenshots the pipeline verifies against.
     """
+
+    TARGET_TTL = 5.0    # seconds a located-element reticle stays on screen
+    TARGET_FADE = 1.0   # fade-out portion at the end of the TTL
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -666,6 +671,7 @@ class ScreenPreview(QWidget):
         self._active = False
         self._sweep = 0.0
         self._action_text = ""
+        self._targets = []  # (label, fx, fy, conf, born_ts) — fx/fy in 0..1
         self.setMinimumSize(480, 280)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
@@ -675,6 +681,18 @@ class ScreenPreview(QWidget):
 
     def set_frame(self, pixmap: QPixmap):
         self._pixmap = pixmap
+        self.update()
+
+    def mark_target(self, label: str, fx: float, fy: float, conf: float):
+        """Reticle at a located element. fx/fy are screen-size fractions."""
+        fx = max(0.0, min(1.0, fx))
+        fy = max(0.0, min(1.0, fy))
+        self._targets.append((label, fx, fy, conf, time.time()))
+        del self._targets[:-3]  # at most 3 reticles at once
+        self.update()
+
+    def clear_targets(self):
+        self._targets.clear()
         self.update()
 
     def set_active(self, active: bool):
@@ -700,6 +718,10 @@ class ScreenPreview(QWidget):
 
     def _tick(self):
         self._sweep = (self._sweep + 0.012) % 1.4
+        if self._targets:
+            now = time.time()
+            self._targets = [t for t in self._targets
+                             if now - t[4] < self.TARGET_TTL]
         self.update()
 
     def paintEvent(self, e):
@@ -719,6 +741,9 @@ class ScreenPreview(QWidget):
             x = (self.width() - scaled.width()) / 2
             y = (self.height() - scaled.height()) / 2
             p.drawPixmap(int(x), int(y), scaled)
+            if self._targets:
+                self._paint_targets(
+                    p, QRectF(x, y, scaled.width(), scaled.height()))
         else:
             p.setPen(QColor(C.TEXT_FAINT))
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter,
@@ -773,6 +798,58 @@ class ScreenPreview(QWidget):
                        Qt.AlignmentFlag.AlignVCenter,
                        fm.elidedText(text, Qt.TextElideMode.ElideRight,
                                      int(tw) - 36))
+
+    def _paint_targets(self, p: QPainter, frame: QRectF):
+        """Corner-tick reticles over the frame at each located element."""
+        now = time.time()
+        for label, fx, fy, conf, born in self._targets:
+            age = now - born
+            if age >= self.TARGET_TTL:
+                continue
+            fade = min(1.0, (self.TARGET_TTL - age) / self.TARGET_FADE)
+            color = ConfidenceBar.color_for(conf)
+            color.setAlphaF(fade)
+            cx = frame.left() + fx * frame.width()
+            cy = frame.top() + fy * frame.height()
+
+            # the first ~0.3s the reticle zooms in onto the point
+            grow = 1.0 + max(0.0, 0.3 - age) * 3.0
+            hw, hh = 26 * grow, 18 * grow
+            tick = 9.0
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(color, 2))
+            for sx, sy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+                corner_x, corner_y = cx + sx * hw, cy + sy * hh
+                p.drawLine(QPointF(corner_x, corner_y),
+                           QPointF(corner_x - sx * tick, corner_y))
+                p.drawLine(QPointF(corner_x, corner_y),
+                           QPointF(corner_x, corner_y - sy * tick))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawEllipse(QPointF(cx, cy), 3, 3)
+
+            # label chip above (below if clipped by the frame top)
+            f = p.font()
+            f.setPointSizeF(8)
+            f.setWeight(QFont.Weight.Bold)
+            p.setFont(f)
+            fm = p.fontMetrics()
+            text = f"{label} · {conf:.0%}"
+            tw = min(fm.horizontalAdvance(text) + 20, frame.width() - 8)
+            cx_chip = max(frame.left() + 4,
+                          min(cx - tw / 2, frame.right() - tw - 4))
+            cy_chip = cy - hh - 28
+            if cy_chip < frame.top() + 4:
+                cy_chip = cy + hh + 8
+            chip = QRectF(cx_chip, cy_chip, tw, 20)
+            p.setBrush(QColor(0, 0, 0, int(185 * fade)))
+            p.drawRoundedRect(chip, 10, 10)
+            tcol = QColor(C.TEXT)
+            tcol.setAlphaF(fade)
+            p.setPen(tcol)
+            p.drawText(chip, Qt.AlignmentFlag.AlignCenter,
+                       fm.elidedText(text, Qt.TextElideMode.ElideRight,
+                                     int(tw) - 14))
 
 
 # ── Command dock ──────────────────────────────────────────────────────────────

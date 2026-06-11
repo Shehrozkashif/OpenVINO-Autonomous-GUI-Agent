@@ -99,6 +99,8 @@ PIPELINE_LOG = [
     "[PLANNING] Next: [click] Click Microsoft Edge pinned button to open it",
     "[GROUNDING] 'Microsoft Edge pinned' → (1073,1050) conf=1.00 "
     "method=uia attempt=1 latency=1301ms",
+    "[GROUNDING] 'Save button' → (200,300) conf=0.93 method=cache/ocr",
+    "[GROUNDING] 'Submit' → (640,480) conf=0.88 method=rephrase/uia (as 'OK')",
     "[ACTION] click(left) @ (1073,1050)",
     "[REFLECTION] Uncertain click verdict (conf=0.50) — escalating to VLM "
     "screenshot check",
@@ -123,6 +125,9 @@ def test_event_bus_parses_pipeline_loguru_lines(app):
     assert AgentState.ACTING in states        # element located → acting
     assert AgentState.VERIFYING in states     # [ACTION] fired → verifying
     assert ("Microsoft Edge pinned", 1073, 1050, 1.0, "uia") in elements
+    # cache-hit and rephrase locates use compound method names
+    assert ("Save button", 200, 300, 0.93, "cache/ocr") in elements
+    assert ("Submit", 640, 480, 0.88, "rephrase/uia") in elements
     assert "KILL-SWITCH" in guards
     assert any("vision model" in d for d in details)   # VLM wait explained
     assert any("Located" in d for d in details)
@@ -157,6 +162,45 @@ def test_mission_hud_masks_itself_from_captures(app):
             "mask must be cleared when the HUD hides"
     finally:
         hud.close()
+
+
+def test_grounding_overlay_marks_preview(app):
+    """[GROUNDING] events must place a reticle on the Mission Control preview
+    at the located element's normalized screen position."""
+    from ui.main_window import DesktopGUIAgent
+
+    win = DesktopGUIAgent(orchestrator=None)
+    try:
+        win.signals.log_update.emit("[TASK START] 'click save'")
+        win.signals.log_update.emit("  Step 1: [click] Click the Save button")
+        app.processEvents()
+        preview = win.page_mission.preview
+        assert preview._targets == []  # task start clears stale reticles
+
+        sw, sh = win.page_mission._screen_wh()
+        win.signals.log_update.emit(
+            f"[GROUNDING] 'Save button' → ({sw // 2},{sh // 4}) "
+            f"conf=0.93 method=cache/ocr")
+        app.processEvents()
+
+        assert len(preview._targets) == 1
+        label, fx, fy, conf, _born = preview._targets[0]
+        assert label == "Save button"
+        assert abs(fx - (sw // 2) / sw) < 1e-6
+        assert abs(fy - (sh // 4) / sh) < 1e-6
+        assert conf == 0.93
+
+        # markers are capped and a new mission wipes them
+        for i in range(5):
+            preview.mark_target(f"el{i}", 0.5, 0.5, 0.9)
+        assert len(preview._targets) == 3
+        win.signals.log_update.emit("[TASK START] 'next mission'")
+        app.processEvents()
+        assert preview._targets == []
+    finally:
+        win._screen_timer.stop()
+        win.tray.hide()
+        win.close()
 
 
 def test_window_end_to_end_wiring(app):

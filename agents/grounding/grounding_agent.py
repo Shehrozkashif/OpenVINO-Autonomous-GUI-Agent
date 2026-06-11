@@ -341,7 +341,10 @@ class UIGroundingAgent:
         cached = self.cache.get(target, screen_hash)
         if cached:
             x, y, conf, method, element_type = cached
-            logger.info(f"[GROUNDING] Cache hit: '{target}' → ({x},{y}) via {method}")
+            # Canonical "[GROUNDING] '…' → (x,y) conf=… method=…" format — the
+            # UI event bus parses these lines (ui/events.py _RX_LOCATED).
+            logger.info(f"[GROUNDING] '{target}' → ({x},{y}) "
+                        f"conf={conf:.2f} method=cache/{method}")
             return GroundingResult(x=x, y=y, confidence=conf, found=True,
                                    latency_ms=(time.time() - start) * 1000,
                                    target=target, method=f"cache/{method}",
@@ -385,7 +388,9 @@ class UIGroundingAgent:
                 x = max(0, min(x, self.screen_w - 1))
                 y = max(0, min(y, self.screen_h - 1))
                 self.cache.put(target, x, y, conf, f"rephrase/{method}", screen_hash, element_type)
-                logger.info(f"[GROUNDING] Rephrasing succeeded: '{alt}' → ({x},{y})")
+                logger.info(f"[GROUNDING] '{target}' → ({x},{y}) "
+                            f"conf={conf:.2f} method=rephrase/{method} "
+                            f"(as '{alt}')")
                 return GroundingResult(x=x, y=y, confidence=conf,
                                        found=conf >= self.min_confidence,
                                        latency_ms=(time.time() - start) * 1000,
