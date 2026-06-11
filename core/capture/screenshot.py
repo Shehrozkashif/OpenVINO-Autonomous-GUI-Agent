@@ -116,15 +116,21 @@ class ScreenCapture:
         self._last_hash: Optional[imagehash.ImageHash] = None
         # Regions (x1, y1, x2, y2) to black out in every captured frame.
         # Used to mask the agent's own GUI window so its text doesn't pollute OCR.
+        # NOTE: the orchestrator overwrites this list every refresh cycle.
         self.exclude_regions: list = []
+        # Additional always-applied mask regions that survive the orchestrator's
+        # exclude_regions refresh — used for the always-on-top mission HUD,
+        # whose text would otherwise contaminate OCR/planning.
+        self.persistent_exclude_regions: list = []
 
     def capture(self) -> Image.Image:
         """Full-screen capture. Does not alter input focus on any platform."""
         img = _grab()
-        if self.exclude_regions:
+        regions = self.exclude_regions + self.persistent_exclude_regions
+        if regions:
             from PIL import ImageDraw
             draw = ImageDraw.Draw(img)
-            for (x1, y1, x2, y2) in self.exclude_regions:
+            for (x1, y1, x2, y2) in regions:
                 draw.rectangle([x1, y1, x2, y2], fill=(0, 0, 0))
         return img
 
