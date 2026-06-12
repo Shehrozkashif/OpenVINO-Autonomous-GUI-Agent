@@ -590,6 +590,4 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 **Google Summer of Code 2026 — Intel® OpenVINO™ Desktop Agent**
 
-*Intel, the Intel logo, and OpenVINO are trademarks of Intel Corporation or its subsidiaries.*
-
 </div>
