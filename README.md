@@ -230,11 +230,8 @@ Model ids live in [`config.py`](config.py) — the single source of truth.
 | Role | Model | Size | Purpose |
 |------|-------|------|---------|
 | **LLM** | `qwen3:8b` via Ollama | ~5 GB | Routing, planning, reflection reasoning |
-| **VLM (primary)** | `UI-TARS-1.5-7B` Q4_K_S via Ollama — or via vLLM when it is running on port 8000 | ~5 GB | GUI grounding, visual verification |
-| **VLM (fallback)** | `qwen2.5vl-gui` via Ollama | 6 GB | Optional backup when UI-TARS is unavailable |
-
-`qwen2.5vl-gui` is a custom Ollama build of `qwen2.5vl:7b` with a 4096-token
-context window so it fits in GPU VRAM alongside the LLM.
+| **VLM (preferred)** | `ByteDance-Seed/UI-TARS-1.5-7B` via vLLM on port 8000 | ~16 GB download | GUI grounding, visual verification |
+| **VLM (Ollama)** | `hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S` via Ollama | ~5 GB | Used when vLLM is unavailable |
 
 > **OpenVINO™ roadmap** — inference currently runs through Ollama (with
 > optional vLLM for the VLM). An OpenVINO execution backend is planned work:
@@ -247,7 +244,7 @@ context window so it fits in GPU VRAM alongside the LLM.
 ## Quick Start
 
 ```bash
-git clone https://github.com/your-org/intel-openvino-desktop-agent.git
+git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
 cd intel-openvino-desktop-agent
 python -m venv venv && source venv/bin/activate    # Windows: venv\Scripts\activate
 pip install -r requirements.txt
@@ -255,8 +252,8 @@ python start.py
 ```
 
 `start.py` does the rest: detects your GPU, starts Ollama with the right
-device assignment, pulls any missing models (first run only), and opens the
-agent GUI.
+device assignment, starts vLLM when it is installed, prepares any missing
+Ollama models, and opens the agent GUI.
 
 ```bash
 # Pre-fill the instruction box
@@ -287,7 +284,7 @@ python start.py --prompt "Search for OpenVINO documentation" --auto-run
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-org/intel-openvino-desktop-agent.git
+git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
 cd intel-openvino-desktop-agent
 
 # 2. Create and activate a virtual environment
@@ -308,7 +305,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 ```powershell
 # 1. Clone the repository
-git clone https://github.com/your-org/intel-openvino-desktop-agent.git
+git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
 cd intel-openvino-desktop-agent
 
 # 2. Create and activate a virtual environment
@@ -345,7 +342,7 @@ python start.py
 2. **GPU detection** — finds AMD ROCm / NVIDIA CUDA GPUs and assigns devices
 3. **Ollama check** — verifies Ollama is running; starts it with the right GPU env if not
 4. **vLLM check** — starts vLLM for UI-TARS when installed (optional, better accuracy)
-5. **Model check** — pulls any missing Ollama models on first run (one-time only)
+5. **Model check** — pulls the LLM and configured Ollama VLM when needed
 6. **Launches** `main.py` — the agent GUI opens
 
 <details>
@@ -362,9 +359,12 @@ Platform: Linux
 Ollama (LLM):
   [OK] Ollama already running on localhost:11434
 
+vLLM (VLM — UI-TARS):
+  [OK] vLLM already running — UI-TARS active
+
 Models:
   [OK] qwen3:8b                       LLM — planning, routing, reflection
-  [OK] UI-TARS-1.5-7B (Q4_K_S)        VLM — GUI grounding & verification
+  [OK] VLM served by vLLM (UI-TARS)
 
 Starting Desktop GUI Agent...
 ```
@@ -475,10 +475,6 @@ export LD_LIBRARY_PATH="$HOME/.local_xcb/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PA
 ollama pull qwen3:8b
 ollama pull hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S
 
-# Optional VLM fallback (4096-token context so it fits in VRAM)
-ollama pull qwen2.5vl:7b
-printf 'FROM qwen2.5vl:7b\nPARAMETER num_ctx 4096\n' | ollama create qwen2.5vl-gui -f -
-
 # Launch
 source venv/bin/activate
 python main.py
@@ -490,12 +486,6 @@ python main.py
 # Pull models
 ollama pull qwen3:8b
 ollama pull hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S
-
-# Optional VLM fallback (4096-token context so it fits in VRAM)
-ollama pull qwen2.5vl:7b
-$modelfile = "FROM qwen2.5vl:7b`nPARAMETER num_ctx 4096"
-$modelfile | Out-File -FilePath "$env:TEMP\qwen2.5vl-gui.Modelfile" -Encoding utf8
-ollama create qwen2.5vl-gui -f "$env:TEMP\qwen2.5vl-gui.Modelfile"
 
 # Launch
 venv\Scripts\activate
