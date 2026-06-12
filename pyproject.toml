@@ -1,0 +1,33 @@
+[project]
+name = "intel-openvino-desktop-agent"
+version = "0.1.0"
+description = "Local-first desktop GUI agent: See → Plan → Act → Verify loop driven by on-device LLM/VLM inference"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+
+# Runtime dependencies are managed in requirements.txt (pip install -r requirements.txt).
+# This file carries project metadata and tool configuration only.
+
+[tool.pytest.ini_options]
+# Repo root on sys.path so `pytest tests/unit` works without PYTHONPATH=.
+pythonpath = ["."]
+testpaths = ["tests/unit"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+extend-exclude = ["models"]
+
+[tool.ruff.lint]
+# F: pyflakes (unused imports/vars, undefined names)
+# E7: statement style    E9: syntax errors    W: warnings
+select = ["F", "E7", "E9", "W"]
+# E741 allowed in vendored/generated code only; project code keeps it on.
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Tests insert the repo root onto sys.path before importing project modules,
+# and live tests keep compact inline helpers.
+"tests/*" = ["E402"]

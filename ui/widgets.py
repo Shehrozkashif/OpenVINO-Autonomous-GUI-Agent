@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.icons import draw_icon, icon_pixmap
-from ui.theme import C, S, T, qcolor
+from ui.theme import C, S
 
 
 # ── PulseOrb — the agent's visual presence ───────────────────────────────────
@@ -133,16 +133,50 @@ class GlassCard(QFrame):
 
 
 def fade_in(widget: QWidget, duration: int = 260):
-    eff = QGraphicsOpacityEffect(widget)
-    widget.setGraphicsEffect(eff)
-    anim = QPropertyAnimation(eff, b"opacity", widget)
-    anim.setDuration(duration)
-    anim.setStartValue(0.0)
-    anim.setEndValue(1.0)
-    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-    # Drop the effect when done — stacked opacity effects slow painting.
-    anim.finished.connect(lambda: widget.setGraphicsEffect(None))
-    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+    """Fade `widget` in.
+
+    Lifecycle-safe by construction: one (opacity effect, animation) pair is
+    created per widget on first use and reused on every later fade — nothing
+    is recreated, deleted, or disconnected mid-flight, and no Python slot is
+    ever attached to the animation's signals. Earlier versions that rebuilt
+    these objects per call (and dropped the effect from a finished-slot)
+    caused intermittent native use-after-free crashes when fades overlapped
+    or a widget died while its animation was still ticking.
+
+    The effect is *disabled* (never deleted — the reused animation still
+    targets it) shortly after each fade ends: a permanently active
+    QGraphicsOpacityEffect floods stderr with re-entrant "QPainter::begin"
+    warnings when timer-driven children repaint through it, and slows
+    painting. The cleanup runs from an independent one-shot timer, not from
+    an animation signal.
+    """
+    anim = getattr(widget, "_fade_anim", None)
+    eff = getattr(widget, "_fade_eff", None)
+    try:
+        if anim is None:
+            eff = QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(eff)
+            anim = QPropertyAnimation(eff, b"opacity", widget)
+            anim.setDuration(duration)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            widget._fade_anim = anim
+            widget._fade_eff = eff
+        eff.setEnabled(True)
+        anim.stop()
+        anim.start()
+    except RuntimeError:
+        return  # C++ side already destroyed — nothing to animate
+
+    def _disable_idle_effect(anim=anim, eff=eff):
+        try:
+            if anim.state() != QPropertyAnimation.State.Running:
+                eff.setEnabled(False)
+        except RuntimeError:
+            pass  # widget died while the timer was pending
+
+    QTimer.singleShot(duration + 80, _disable_idle_effect)
 
 
 # ── Status chip ───────────────────────────────────────────────────────────────
@@ -154,20 +188,20 @@ class StatusChip(QWidget):
         super().__init__(parent)
         self._text = text
         self._color = QColor(color)
-        self._anim = None
+        # One reusable animation. Recreating it per state change drops the old
+        # wrapper while it may still be mid-emission — a native use-after-free
+        # under rapid state updates.
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(350)
+        self._anim.valueChanged.connect(self._on_color)
         self.setFixedHeight(28)
         self.setMinimumWidth(110)
 
     def set_state(self, text: str, color: str):
         self._text = text
-        target = QColor(color)
-        if self._anim:
-            self._anim.stop()
-        self._anim = QVariantAnimation(self)
-        self._anim.setDuration(350)
+        self._anim.stop()
         self._anim.setStartValue(self._color)
-        self._anim.setEndValue(target)
-        self._anim.valueChanged.connect(self._on_color)
+        self._anim.setEndValue(QColor(color))
         self._anim.start()
         self.update()
 
@@ -344,18 +378,17 @@ class ConfidenceBar(QWidget):
         self._value = 0.0
         self._shown = 0.0
         self.setFixedHeight(8)
-        self._anim = None
+        # One reusable animation — see StatusChip for why it is never recreated.
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(420)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_anim)
 
     def set_value(self, v: float):
         v = max(0.0, min(1.0, v))
-        if self._anim:
-            self._anim.stop()
-        self._anim = QVariantAnimation(self)
-        self._anim.setDuration(420)
+        self._anim.stop()
         self._anim.setStartValue(self._shown)
         self._anim.setEndValue(v)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._anim.valueChanged.connect(self._on_anim)
         self._anim.start()
         self._value = v
 

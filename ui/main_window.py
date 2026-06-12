@@ -16,7 +16,7 @@ import threading
 import time
 from collections import deque
 
-from PyQt6.QtCore import QObject, QSettings, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QSettings, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QIcon, QLinearGradient, QPainter, \
     QPixmap, QRadialGradient
 from PyQt6.QtWidgets import (
@@ -33,7 +33,7 @@ from ui.pages import (
 )
 from ui.panels import IntelligencePanel
 from ui.theme import C, S, STATE_STYLE, build_stylesheet
-from ui.widgets import CommandDock, NavRail, StatusChip, fade_in
+from ui.widgets import CommandDock, NavRail, StatusChip
 
 
 class WorkerSignals(QObject):
@@ -201,10 +201,13 @@ class DesktopGUIAgent(QMainWindow):
         self.bus.state_changed.connect(self._on_state)
 
     def _goto_page(self, idx: int):
+        # No fade here: pages contain GlassCards with drop-shadow effects, and
+        # nesting those inside a page-level QGraphicsOpacityEffect makes Qt
+        # emit a re-entrant-QPainter warning for every shadowed child on every
+        # frame of the fade. Leaf widgets (feed/timeline items) still fade.
         self.stack.setCurrentIndex(idx)
         self.page_title.setText(_PAGES[idx][1])
         self.nav.set_active(idx)
-        fade_in(self.stack.currentWidget(), 200)
 
     def _toggle_panel(self):
         # isHidden() (explicit hide state) — isVisible() is False whenever the

@@ -180,7 +180,8 @@ def test_vlm_direct():
     print("\n  Forcing VLM call for 'taskbar clock' (UIA+OCR are very reliable here,")
     print("  so we call _vlm_coords directly to test coordinate quality):")
 
-    import base64, io
+    import base64
+    import io
     img = capturer.capture()
     img.thumbnail((960, 540))
     buf = io.BytesIO()
@@ -195,7 +196,7 @@ def test_vlm_direct():
             x, y, conf, method, element_type = result
             print(f"  → screen({x}, {y}), conf={conf:.2f}, method={method}, type={element_type}")
         else:
-            print(f"  → not found (VLM returned null)")
+            print("  → not found (VLM returned null)")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ Covers:
 import sys
 sys.path.insert(0, ".")
 
-import pytest
 from unittest.mock import MagicMock
 
 from core.protocols.a2a import SubTask

@@ -1,6 +1,5 @@
 # tests/unit/test_capture.py
 import base64
-import pytest
 from core.capture.screenshot import ScreenCapture
 
 

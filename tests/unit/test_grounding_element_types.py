@@ -15,14 +15,13 @@ Additional coverage:
   - OCR grounding result carries the matched word's element_type
 """
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from agents.grounding.grounding_agent import (
     ElementCache,
     GroundingResult,
     OCREngine,
     OCRWord,
-    UIGroundingAgent,
 )
 from core.protocols.a2a import ActionStep
 
@@ -139,10 +138,6 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
         ocr.is_available.return_value = False
         ocr.extract.return_value = []
 
-        from agents.router.router_agent import RouterAgent
-        from agents.planning.planning_agent import PlanningAgent
-        from agents.reflection.reflection_agent import ReflectionAgent
-        from agents.action.action_agent import ActionExecutionAgent
 
         orch = TaskOrchestrator.__new__(TaskOrchestrator)
         orch.grounder = grounder

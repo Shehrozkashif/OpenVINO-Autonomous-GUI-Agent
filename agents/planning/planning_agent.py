@@ -564,8 +564,8 @@ def _parse_visual_action(
 
 
 class PlanningAgent:
-    def __init__(self, ovms_client: InferenceClient):
-        self.ovms = ovms_client
+    def __init__(self, client: InferenceClient):
+        self.client = client
 
     def plan_next_step_visual(
         self,
@@ -592,7 +592,7 @@ class PlanningAgent:
         prompt = _VISUAL_PLAN_PROMPT.format(
             os_name=_OS_CONTEXT, goal=subtask.description, history=history,
         )
-        resp = self.ovms.query_vlm(
+        resp = self.client.query_vlm(
             prompt=prompt,
             image_base64=image_base64,
             max_tokens=150,
@@ -692,7 +692,7 @@ class PlanningAgent:
             {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
-        resp = self.ovms.query_llm(
+        resp = self.client.query_llm(
             messages, max_tokens=768, temperature=0.2,
             response_schema=_STEP_SCHEMA,
         )
@@ -704,7 +704,7 @@ class PlanningAgent:
             # at temperature 0; if still unparseable, raise so the orchestrator
             # counts a planning failure and can recover.
             logger.warning(f"[PLANNING] parse error: {e} — retrying once at temperature 0")
-            resp = self.ovms.query_llm(
+            resp = self.client.query_llm(
                 messages, max_tokens=768, temperature=0.0,
                 response_schema=_STEP_SCHEMA,
             )
@@ -716,7 +716,7 @@ class PlanningAgent:
                 ) from e2
 
         if not steps:
-            logger.info(f"[PLANNING] Goal achieved — no more steps needed")
+            logger.info("[PLANNING] Goal achieved — no more steps needed")
             return None
 
         step = steps[0]

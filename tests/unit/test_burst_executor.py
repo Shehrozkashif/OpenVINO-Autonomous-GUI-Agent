@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, ".")
 
 import pytest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from core.executor.burst_executor import BurstExecutor, detect_burst, _INTER_STEP_DELAY_S
 from core.protocols.a2a import ActionBurst, ActionStep, BurstResult, SubTask
@@ -247,7 +247,6 @@ class TestBurstExecutorRun:
         burst = ActionBurst(steps=[s1, s2], verify_at_end=False)
 
         ground_call_times: list = []
-        execute_call_times: list = []
 
         counter = {"t": 0}
         def _inc_and_return_ok(t):

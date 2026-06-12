@@ -21,7 +21,6 @@ Tests verify:
 import sys
 sys.path.insert(0, ".")
 
-import pytest
 from unittest.mock import MagicMock
 
 from core.orchestrator import TaskOrchestrator, OrchestratorConfig, DEDUP_LIMIT_BY_ACTION_TYPE

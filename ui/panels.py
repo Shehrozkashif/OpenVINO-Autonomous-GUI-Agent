@@ -5,11 +5,11 @@ IntelligencePanel — the right-hand "agent mind" column.
 Shows what the agent is thinking, doing and how confident it is. Everything
 here is driven by AgentEventBus signals; nothing polls.
 """
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget,
 )
 
 from ui.events import AgentEventBus, AgentState, BUSY_STATES

@@ -13,8 +13,7 @@ Tests also verify that the OCR-based check uses foreground-only snapshot regions
 import sys
 sys.path.insert(0, ".")
 
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from core.orchestrator import TaskOrchestrator, OrchestratorConfig
 from core.protocols.a2a import SubTask
@@ -129,6 +128,8 @@ class TestVerifyLaunchTriggerCondition:
 
 
 # ── tests: "open + known app" correctly triggers verification ─────────────────
+# These exercise the Windows process-check branch, so the platform is pinned —
+# on Linux the orchestrator would otherwise fall through to the OCR check.
 
 class TestVerifyLaunchAppKeywordCheck:
 
@@ -139,7 +140,9 @@ class TestVerifyLaunchAppKeywordCheck:
         This confirms the verification path was entered (not skipped).
         """
         orch = _make_orch()
-        with patch.object(orch, '_is_process_running', return_value=False), \
+        with patch('core.orchestrator._OS', 'Windows'), \
+             patch('core.orchestrator.time.sleep'), \
+             patch.object(orch, '_is_process_running', return_value=False), \
              patch.object(orch, '_process_has_visible_window', return_value=False):
             result = orch._verify_launch(_sub("open notepad"))
         assert result is False, (
@@ -150,7 +153,9 @@ class TestVerifyLaunchAppKeywordCheck:
     def test_open_calculator_triggers_verification(self):
         """'open calculator' → triggers verification (process not found → False)."""
         orch = _make_orch()
-        with patch.object(orch, '_is_process_running', return_value=False), \
+        with patch('core.orchestrator._OS', 'Windows'), \
+             patch('core.orchestrator.time.sleep'), \
+             patch.object(orch, '_is_process_running', return_value=False), \
              patch.object(orch, '_process_has_visible_window', return_value=False):
             result = orch._verify_launch(_sub("open calculator"))
         assert result is False
@@ -158,7 +163,9 @@ class TestVerifyLaunchAppKeywordCheck:
     def test_open_terminal_triggers_verification(self):
         """'open windows terminal' → triggers verification."""
         orch = _make_orch()
-        with patch.object(orch, '_is_process_running', return_value=False), \
+        with patch('core.orchestrator._OS', 'Windows'), \
+             patch('core.orchestrator.time.sleep'), \
+             patch.object(orch, '_is_process_running', return_value=False), \
              patch.object(orch, '_process_has_visible_window', return_value=False):
             result = orch._verify_launch(_sub("open windows terminal"))
         assert result is False
@@ -166,7 +173,9 @@ class TestVerifyLaunchAppKeywordCheck:
     def test_open_notepad_process_found_returns_true(self):
         """'open notepad' with Notepad process running → verification passes → True."""
         orch = _make_orch()
-        with patch.object(orch, '_is_process_running', return_value=True), \
+        with patch('core.orchestrator._OS', 'Windows'), \
+             patch('core.orchestrator.time.sleep'), \
+             patch.object(orch, '_is_process_running', return_value=True), \
              patch.object(orch, '_process_has_visible_window', return_value=False):
             result = orch._verify_launch(_sub("open notepad"))
         assert result is True

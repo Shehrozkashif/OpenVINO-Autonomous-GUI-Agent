@@ -14,7 +14,6 @@ Covers:
 """
 import time
 import unittest
-from dataclasses import dataclass
 from typing import List
 from unittest.mock import MagicMock, patch
 
@@ -354,7 +353,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
             resp.content = "[]"
             return resp
 
-        planner.ovms.query_llm = fake_query_llm
+        planner.client.query_llm = fake_query_llm
 
         from core.protocols.a2a import SubTask
         subtask = SubTask(id=1, description="create a folder")
@@ -376,7 +375,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
             resp.content = "[]"
             return resp
 
-        planner.ovms.query_llm = fake_query_llm
+        planner.client.query_llm = fake_query_llm
 
         from core.protocols.a2a import SubTask
         subtask = SubTask(id=1, description="do something")
@@ -396,7 +395,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
             resp.content = "[]"
             return resp
 
-        planner.ovms.query_llm = fake_query_llm
+        planner.client.query_llm = fake_query_llm
 
         from core.protocols.a2a import SubTask
         subtask = SubTask(id=1, description="do something")
@@ -406,7 +405,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
 
     def test_snapshot_none_does_not_crash(self):
         planner = self._make_planner()
-        planner.ovms.query_llm = MagicMock(return_value=MagicMock(content="[]"))
+        planner.client.query_llm = MagicMock(return_value=MagicMock(content="[]"))
         from core.protocols.a2a import SubTask
         subtask = SubTask(id=1, description="do something")
         result = planner.plan_next_step(subtask, snapshot=None)

@@ -70,7 +70,7 @@ def test_pipeline():
     if icon_result.found:
         print(f"  FOUND  ({icon_result.x},{icon_result.y})  conf={icon_result.confidence:.2f}  method={icon_result.method}")
     else:
-        print(f"  NOT FOUND (element may genuinely not be on screen right now)")
+        print("  NOT FOUND (element may genuinely not be on screen right now)")
 
     print("\n=== All checks passed — pipeline is functional ===")
 

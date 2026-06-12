@@ -21,14 +21,12 @@ Requirements:
     - UI-TARS GGUF pulled (VLM fallback)
     - Real Windows display, desktop visible, no fullscreen app
 """
-import io
 import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, ".")
 
@@ -139,7 +137,7 @@ class LiveUseCaseTester:
         stats = self._instrument()
         t0 = time.perf_counter()
         try:
-            result = self.orch.execute(task)
+            self.orch.execute(task)
         except Exception as e:
             elapsed = time.perf_counter() - t0
             print(f"  [EXCEPTION] {e}")
@@ -184,8 +182,10 @@ class LiveUseCaseTester:
 
         def pre():
             if folder.exists():
-                try: folder.rmdir()
-                except: pass
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
 
         def verify():
             ok = folder.exists() and folder.is_dir()
@@ -200,8 +200,10 @@ class LiveUseCaseTester:
         def cleanup():
             for p in self.desktop.iterdir():
                 if p.is_dir() and "LiveTestFolder" in p.name:
-                    try: p.rmdir()
-                    except: pass
+                    try:
+                        p.rmdir()
+                    except OSError:
+                        pass
 
         return self._run(
             "1. Create folder on desktop",
@@ -275,19 +277,23 @@ class LiveUseCaseTester:
             if notepad_ok and file_ok:
                 return True, f"notepad running + file saved at {save_path}"
             notes = []
-            if not notepad_ok: notes.append("notepad not running")
-            if not file_ok:    notes.append(f"file '{save_path.name}' not on desktop")
+            if not notepad_ok:
+                notes.append("notepad not running")
+            if not file_ok:
+                notes.append(f"file '{save_path.name}' not on desktop")
             return False, "; ".join(notes)
 
         def cleanup():
             _kill("notepad.exe")
             try:
-                if save_path.exists(): save_path.unlink()
-            except: pass
+                if save_path.exists():
+                    save_path.unlink()
+            except OSError:
+                pass
 
         task = (
             "Open Notepad, then type the text 'Hello from the GUI Agent', "
-            f"then save the file as agent_test_note.txt on the Desktop."
+            "then save the file as agent_test_note.txt on the Desktop."
         )
         return self._run(
             "5. Notepad: open, type, save file",

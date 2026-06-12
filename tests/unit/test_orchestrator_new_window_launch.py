@@ -18,8 +18,18 @@ sys.path.insert(0, ".")
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from core.orchestrator import TaskOrchestrator, OrchestratorConfig
 from core.protocols.a2a import SubTask
+
+
+@pytest.fixture(autouse=True)
+def _pin_windows():
+    """Every test here exercises Windows launch semantics (process maps,
+    window-count baselines), so pin the platform regardless of the host OS."""
+    with patch("core.orchestrator._OS", "Windows"):
+        yield
 
 
 def _sub(desc):

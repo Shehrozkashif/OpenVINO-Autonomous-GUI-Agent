@@ -6,7 +6,7 @@ from typing import Any, List, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from core.pipeline.ollama_client import OVMSResponse
+from core.pipeline.ollama_client import InferenceResponse
 
 
 # ── Agent communication enums / models ───────────────────────────────────────
@@ -87,7 +87,7 @@ class InferenceClient(Protocol):
         max_tokens: int = 1024,
         temperature: float = 0.7,
         response_schema: dict = None,
-    ) -> OVMSResponse: ...
+    ) -> InferenceResponse: ...
 
     def query_vlm(
         self,
@@ -96,6 +96,6 @@ class InferenceClient(Protocol):
         max_tokens: int = 200,
         temperature: float = 0.0,
         system_prompt: str = None,
-    ) -> OVMSResponse: ...
+    ) -> InferenceResponse: ...
 
     def check_health(self) -> dict: ...

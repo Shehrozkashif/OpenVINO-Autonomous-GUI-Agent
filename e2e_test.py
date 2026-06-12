@@ -5,7 +5,6 @@ Run: python e2e_test.py
 """
 import sys
 import time
-import json
 
 from loguru import logger
 logger.remove()
@@ -17,10 +16,8 @@ from agents.router.router_agent import RouterAgent
 from agents.planning.planning_agent import PlanningAgent
 from agents.grounding.grounding_agent import UIGroundingAgent
 from agents.action.action_agent import ActionExecutionAgent
-from agents.reflection.reflection_agent import ReflectionAgent
 from core.capture.screenshot import ScreenCapture
 from tools.desktop_control.controller import DesktopController
-from core.protocols.a2a import SubTask
 
 PASS = "✅ PASS"
 FAIL = "❌ FAIL"
@@ -44,20 +41,22 @@ for k, v in health.items():
 results["backend"] = PASS if all_ok else FAIL
 print(f"\n  → {results['backend']}")
 if not all_ok:
-    print("  Pull model first: ollama pull qwen2.5vl:3b")
+    print("  Pull model first: ollama pull qwen3:8b")
     sys.exit(1)
 
 # ═══════════════════════════════════════════════════════════════
-# 2. Tool server
+# 2. Desktop controller
 # ═══════════════════════════════════════════════════════════════
-section("2. Tool Server")
-controller = DesktopController()
-if controller.is_server_running():
-    print("  ✅ Tool server on port 8015: OK")
-    results["tool_server"] = PASS
-else:
-    print("  ❌ Tool server not reachable — run: python -m tools.desktop_control.server")
-    results["tool_server"] = FAIL
+section("2. Desktop Controller")
+try:
+    controller = DesktopController()
+    import tools.desktop_control.controller as _ctl
+    backend = "XTest (X11)" if getattr(_ctl, "_XTEST_OK", False) else "pynput"
+    print(f"  ✅ Input backend: {backend}")
+    results["controller"] = PASS
+except Exception as e:
+    print(f"  ❌ Controller init failed: {e}")
+    results["controller"] = FAIL
     sys.exit(1)
 
 # ═══════════════════════════════════════════════════════════════

@@ -214,8 +214,8 @@ ROUTER_SYSTEM_PROMPT = (
 
 
 class RouterAgent:
-    def __init__(self, ovms_client: InferenceClient):
-        self.ovms = ovms_client
+    def __init__(self, client: InferenceClient):
+        self.client = client
 
     def decompose(
         self,
@@ -240,7 +240,7 @@ class RouterAgent:
             {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
-        resp = self.ovms.query_llm(messages, max_tokens=768, temperature=0.1,
+        resp = self.client.query_llm(messages, max_tokens=768, temperature=0.1,
                                    response_schema=_SUBTASK_SCHEMA)
         try:
             subtasks = self._parse_subtasks(resp.content)
@@ -250,7 +250,7 @@ class RouterAgent:
                 {"role": "system", "content": "Output ONLY a JSON array of sub-tasks."},
                 {"role": "user", "content": f"Sub-tasks for: {instruction}"},
             ]
-            resp = self.ovms.query_llm(retry_messages, max_tokens=512, temperature=0.0,
+            resp = self.client.query_llm(retry_messages, max_tokens=512, temperature=0.0,
                                        response_schema=_SUBTASK_SCHEMA)
             subtasks = self._parse_subtasks(resp.content)
 
@@ -294,5 +294,5 @@ class RouterAgent:
             {"role": "system", "content": "Write a brief one-line task summary. No JSON."},
             {"role": "user", "content": f"Task {'succeeded' if success else 'failed'}. Sub-tasks completed: {completed}."},
         ]
-        resp = self.ovms.query_llm(messages, max_tokens=80, temperature=0.3)
+        resp = self.client.query_llm(messages, max_tokens=80, temperature=0.3)
         return re.sub(r"<think>.*?</think>", "", resp.content, flags=re.DOTALL).strip()

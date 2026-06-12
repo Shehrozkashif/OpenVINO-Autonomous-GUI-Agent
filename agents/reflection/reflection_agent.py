@@ -2,8 +2,9 @@
 """
 Reflection Agent — verifies that each action step succeeded.
 
-Primary path: OCR the after-screenshot, pass visible text to the LLM (qwen3:14b).
-  - qwen3 is a reasoning model and handles conditional success logic accurately.
+Primary path: OCR the after-screenshot, pass visible text to the LLM
+(config.LLM_MODEL).
+  - A reasoning LLM handles conditional success logic accurately.
   - No image encoding needed — fast, cheap, high quality.
 
 Fallback path: VLM (qwen2.5vl / UI-TARS) is used only when OCR returns fewer
@@ -17,8 +18,6 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-import imagehash
-import numpy as np
 from loguru import logger
 from PIL import Image
 
@@ -39,7 +38,7 @@ class ReflectionResult:
 
 
 # ── LLM reflection prompt (primary path) ─────────────────────────────────────
-# Sent to qwen3:14b with OCR text. Much more reliable than asking a grounding
+# Sent to the LLM with OCR text. Much more reliable than asking a grounding
 # VLM to reason about conditional success criteria.
 
 _LLM_SYSTEM = "You are a desktop automation verifier. Reply with valid JSON only."
@@ -117,13 +116,13 @@ _VISUAL_ACTIONS = ("click", "right_click", "double_click", "scroll", "drag")
 class ReflectionAgent:
     def __init__(
         self,
-        ovms_client: InferenceClient,
+        client: InferenceClient,
         capturer: ScreenCapture,
         min_confidence: float = 0.75,
         ocr: Optional[OCREngine] = None,
         escalate_uncertain: bool = True,
     ):
-        self.ovms = ovms_client
+        self.client = client
         self.capturer = capturer
         self.min_confidence = min_confidence
         self._ocr = ocr if ocr is not None else OCREngine()
@@ -268,7 +267,7 @@ class ReflectionAgent:
             {"role": "system", "content": _LLM_SYSTEM},
             {"role": "user", "content": prompt},
         ]
-        resp = self.ovms.query_llm(messages, max_tokens=120, temperature=0.1)
+        resp = self.client.query_llm(messages, max_tokens=120, temperature=0.1)
         return self._parse(resp.content)
 
     def _verify_with_vlm(
@@ -279,7 +278,7 @@ class ReflectionAgent:
             description=step.description,
             verification=verification,
         )
-        resp = self.ovms.query_vlm(
+        resp = self.client.query_vlm(
             prompt=prompt,
             image_base64=img_b64,
             max_tokens=120,
@@ -414,6 +413,28 @@ class ReflectionAgent:
 
 # ── verification hint generator ───────────────────────────────────────────────
 
+# Hotkey combo → expected observable effect, checked in order (first substring
+# match wins, so more specific combos must come before their prefixes).
+_HOTKEY_HINTS = {
+    "ctrl+shift+s": "Save As dialog appeared",
+    "ctrl+alt+t":   "terminal window opened",
+    "ctrl+s": (
+        "File saved — silence is success (named file saves with no dialog). "
+        "A Save-As dialog appearing is also success. Fail only if an error message appears."
+    ),
+    "ctrl+l":       "address bar focused and highlighted",
+    "ctrl+t":       "new tab opened",
+    "ctrl+w":       "current tab or window closed",
+    "ctrl+f":       "find bar appeared",
+    "ctrl+a":       "all content selected",
+    "ctrl+c":       "content copied to clipboard",
+    "ctrl+v":       "clipboard content pasted and visible",
+    "ctrl+z":       "last action undone",
+    "alt+f4":       "active window closed",
+    "alt+tab":      "window switcher appeared or focus changed",
+}
+
+
 def _infer_verification(step: ActionStep) -> str:
     key = (step.key or "").lower()
     val = (step.value or "")
@@ -434,23 +455,9 @@ def _infer_verification(step: ActionStep) -> str:
             return "focus moved to next field"
         return f"pressing '{key}' caused a visible change"
     if step.action_type == "hotkey":
-        if "ctrl+s" in key:
-            return (
-                "File saved — silence is success (named file saves with no dialog). "
-                "A Save-As dialog appearing is also success. Fail only if an error message appears."
-            )
-        if "ctrl+shift+s" in key: return "Save As dialog appeared"
-        if "ctrl+l" in key:       return "address bar focused and highlighted"
-        if "ctrl+t" in key:       return "new tab opened"
-        if "ctrl+w" in key:       return "current tab or window closed"
-        if "ctrl+alt+t" in key:   return "terminal window opened"
-        if "ctrl+f" in key:       return "find bar appeared"
-        if "ctrl+a" in key:       return "all content selected"
-        if "ctrl+c" in key:       return "content copied to clipboard"
-        if "ctrl+v" in key:       return "clipboard content pasted and visible"
-        if "ctrl+z" in key:       return "last action undone"
-        if "alt+f4" in key:       return "active window closed"
-        if "alt+tab" in key:      return "window switcher appeared or focus changed"
+        for combo, hint in _HOTKEY_HINTS.items():
+            if combo in key:
+                return hint
         return f"hotkey '{key}' produced expected effect"
     if step.action_type == "type":
         if val:

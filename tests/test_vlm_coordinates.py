@@ -19,7 +19,7 @@ import io
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 sys.path.insert(0, ".")
 
@@ -130,10 +130,10 @@ def run_vlm_coord_test():
             print(f"    Result    : [{status}]")
             results.append(CoordResult(target, px, py, conf, ok, raw, latency))
         else:
-            print(f"    Predicted : NOT FOUND / parse failed")
+            print("    Predicted : NOT FOUND / parse failed")
             print(f"    Raw VLM   : {raw[:120]}")
             print(f"    Latency   : {latency:.0f}ms")
-            print(f"    Result    : [FAIL — no coordinates parsed]")
+            print("    Result    : [FAIL — no coordinates parsed]")
             results.append(CoordResult(target, None, None, 0.0, False, raw, latency))
 
     # ── Annotate and save screenshot ───────────────────────────────────────────

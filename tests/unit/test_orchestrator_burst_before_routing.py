@@ -12,8 +12,7 @@ Verifies:
 import sys
 sys.path.insert(0, ".")
 
-import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from core.orchestrator import TaskOrchestrator, OrchestratorConfig
 from core.protocols.a2a import ActionBurst, ActionStep, SubTask

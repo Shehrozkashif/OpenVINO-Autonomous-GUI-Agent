@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, ".")
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from agents.planning.planning_agent import (
     PlanningAgent,

@@ -19,10 +19,10 @@ import sys
 sys.path.insert(0, ".")
 
 import pytest
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 from PIL import Image
 
-from agents.reflection.reflection_agent import ReflectionAgent, ReflectionResult
+from agents.reflection.reflection_agent import ReflectionAgent
 from core.protocols.a2a import ActionStep
 
 
@@ -55,9 +55,9 @@ def _make_agent_click(before_img, after_img):
     agent.capturer.capture = MagicMock(side_effect=[before_img, after_img])
     agent._ocr = MagicMock()
     agent._ocr.extract = MagicMock(return_value=[])
-    agent.ovms = MagicMock()
-    agent.ovms.query_llm = MagicMock()
-    agent.ovms.query_vlm = MagicMock()
+    agent.client = MagicMock()
+    agent.client.query_llm = MagicMock()
+    agent.client.query_vlm = MagicMock()
     agent.min_confidence = 0.75
     return agent
 
@@ -77,11 +77,11 @@ def _make_agent_nonclick(after_img):
         MagicMock(text="foo", conf=0.9),
         MagicMock(text="baz", conf=0.9),
     ])
-    agent.ovms = MagicMock()
-    agent.ovms.query_llm = MagicMock(return_value=MagicMock(
+    agent.client = MagicMock()
+    agent.client.query_llm = MagicMock(return_value=MagicMock(
         content='{"success": true, "confidence": 0.9, "observation": "ok"}'
     ))
-    agent.ovms.query_vlm = MagicMock()
+    agent.client.query_vlm = MagicMock()
     agent.min_confidence = 0.75
     return agent
 
@@ -121,8 +121,8 @@ class TestDeltaZero:
 
         agent.verify(_step("click"))
 
-        agent.ovms.query_llm.assert_not_called()
-        agent.ovms.query_vlm.assert_not_called()
+        agent.client.query_llm.assert_not_called()
+        agent.client.query_vlm.assert_not_called()
 
     def test_right_click_unchanged_returns_failure(self):
         img = _solid((50, 100, 150))
@@ -132,7 +132,7 @@ class TestDeltaZero:
 
         assert result.success is False
         assert result.confidence == pytest.approx(0.98)
-        agent.ovms.query_llm.assert_not_called()
+        agent.client.query_llm.assert_not_called()
 
     def test_double_click_unchanged_returns_failure(self):
         img = _solid((0, 0, 0))
@@ -173,14 +173,14 @@ class TestDeltaNonzero:
         before = _solid((0, 0, 0))
         after = _solid((255, 255, 255))
         agent = _make_agent_click(before_img=before, after_img=after)
-        agent.ovms.query_vlm = MagicMock(return_value=MagicMock(
+        agent.client.query_vlm = MagicMock(return_value=MagicMock(
             content='{"success": true, "confidence": 0.85, "observation": "menu appeared"}'
         ))
 
-        result = agent.verify(_step("click"))
+        agent.verify(_step("click"))
 
-        agent.ovms.query_vlm.assert_called_once()
-        agent.ovms.query_llm.assert_not_called()
+        agent.client.query_vlm.assert_called_once()
+        agent.client.query_llm.assert_not_called()
 
     def test_click_changed_with_rich_ocr_calls_llm(self):
         """
@@ -194,13 +194,13 @@ class TestDeltaNonzero:
             MagicMock(text="Folder", conf=0.9),
             MagicMock(text="File", conf=0.9),
         ])
-        agent.ovms.query_llm = MagicMock(return_value=MagicMock(
+        agent.client.query_llm = MagicMock(return_value=MagicMock(
             content='{"success": true, "confidence": 0.9, "observation": "context menu visible"}'
         ))
 
-        result = agent.verify(_step("click"))
+        agent.verify(_step("click"))
 
-        agent.ovms.query_llm.assert_called_once()
+        agent.client.query_llm.assert_called_once()
 
     def test_click_changed_result_follows_llm(self):
         """Result comes from LLM, not from the delta check."""
@@ -212,7 +212,7 @@ class TestDeltaNonzero:
             MagicMock(text="bbb", conf=0.9),
             MagicMock(text="ccc", conf=0.9),
         ])
-        agent.ovms.query_llm = MagicMock(return_value=MagicMock(
+        agent.client.query_llm = MagicMock(return_value=MagicMock(
             content='{"success": false, "confidence": 0.8, "observation": "wrong menu"}'
         ))
 
@@ -255,12 +255,12 @@ class TestActionScoping:
         """type always calls LLM (forced, regardless of screen change)."""
         agent = _make_agent_nonclick(_solid())
         agent.verify(_step("type", value="hello"))
-        agent.ovms.query_llm.assert_called_once()
+        agent.client.query_llm.assert_called_once()
 
     def test_key_press_calls_llm_regardless_of_screen(self):
         agent = _make_agent_nonclick(_solid())
         agent.verify(_step("key_press", key="enter"))
-        agent.ovms.query_llm.assert_called_once()
+        agent.client.query_llm.assert_called_once()
 
     def test_type_result_not_098_confidence(self):
         """type result must never be the delta-check sentinel confidence=0.98."""

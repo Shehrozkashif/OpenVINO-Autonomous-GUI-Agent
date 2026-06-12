@@ -300,12 +300,12 @@ class UIGroundingAgent:
 
     def __init__(
         self,
-        ovms_client: InferenceClient,
+        client: InferenceClient,
         capturer: ScreenCapture,
         min_confidence: float = 0.5,
         ocr: Optional["OCREngine"] = None,
     ):
-        self.client = ovms_client
+        self.client = client
         self.capturer = capturer
         self.cache = ElementCache()
         self.ocr = ocr if ocr is not None else OCREngine()

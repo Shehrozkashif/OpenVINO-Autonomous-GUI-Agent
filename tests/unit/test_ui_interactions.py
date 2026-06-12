@@ -22,6 +22,13 @@ def app():
     yield QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def _no_live_screen_capture(monkeypatch):
+    """UI tests must never grab the real screen (see test_ui_smoke.py)."""
+    from ui.main_window import DesktopGUIAgent
+    monkeypatch.setattr(DesktopGUIAgent, "_refresh_screen", lambda self: None)
+
+
 @pytest.fixture()
 def win(app):
     from ui.main_window import DesktopGUIAgent

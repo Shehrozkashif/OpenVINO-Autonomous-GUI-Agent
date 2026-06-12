@@ -16,7 +16,7 @@ reading the step description off the HUD and declaring success).
 """
 import time
 
-from PyQt6.QtCore import QPoint, QRectF, Qt, QTimer
+from PyQt6.QtCore import QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
@@ -81,9 +81,9 @@ class MissionHUD(QWidget):
         self.stop_btn.setFixedSize(32, 32)
         self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stop_btn.setStyleSheet(
-            f"QPushButton {{ background: rgba(248,113,110,26);"
-            f"border: 1px solid rgba(248,113,110,70); border-radius: 16px; }}"
-            f"QPushButton:hover {{ background: rgba(248,113,110,60); }}")
+            "QPushButton { background: rgba(248,113,110,26);"
+            "border: 1px solid rgba(248,113,110,70); border-radius: 16px; }"
+            "QPushButton:hover { background: rgba(248,113,110,60); }")
         lay.addWidget(self.stop_btn)
 
         self._timer = QTimer(self)

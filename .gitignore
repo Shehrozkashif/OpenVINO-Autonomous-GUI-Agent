@@ -9,13 +9,18 @@ models/OpenVINO/
 *.bin
 *.onnx
 *.xml
+*.gguf
 
-# Logs
+# Runtime artifacts
 logs/
 *.log
+@AutomationLog.txt
+memory/interaction_memory.db
+*.db
 
-# Test cache
+# Test / lint cache
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 

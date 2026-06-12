@@ -1,6 +1,7 @@
 # main.py
 """Desktop GUI Agent — application entry point."""
 import sys
+from typing import Optional
 
 from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMessageBox
@@ -18,7 +19,7 @@ from tools.desktop_control.controller import DesktopController
 from ui.main_window import DesktopGUIAgent
 
 
-def _warmup_models(client: OllamaClient, task_memory: TaskMemory = None) -> None:
+def _warmup_models(client: OllamaClient, task_memory: Optional[TaskMemory] = None) -> None:
     """
     Fire cheap dummy requests to the LLM and VLM backends, and pre-load the
     sentence-transformer embedder, in a background thread. The first real user
@@ -45,7 +46,8 @@ def _warmup_models(client: OllamaClient, task_memory: TaskMemory = None) -> None
         # use instead (visual replan / Stage-2 grounding, both rare paths).
         if client.vlm_base_url != client.llm_base_url:
             try:
-                import base64, io
+                import base64
+                import io
                 from PIL import Image
                 tiny = Image.new("RGB", (64, 64), color=(128, 128, 128))
                 buf = io.BytesIO()
@@ -103,9 +105,11 @@ def build_orchestrator() -> TaskOrchestrator:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt", type=str, default=None)
-    parser.add_argument("--auto-run", action="store_true")
+    parser = argparse.ArgumentParser(description="Desktop GUI Agent")
+    parser.add_argument("--prompt", type=str, default=None,
+                        help="pre-fill the instruction input with this text")
+    parser.add_argument("--auto-run", action="store_true",
+                        help="run the pre-filled --prompt immediately on launch")
     args, unknown = parser.parse_known_args()
 
     app = QApplication([sys.argv[0]] + unknown)

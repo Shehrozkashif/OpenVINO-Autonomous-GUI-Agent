@@ -29,6 +29,16 @@ def app():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _no_live_screen_capture(monkeypatch):
+    """UI tests must never grab the real screen. Live Xlib captures firing on
+    the 1 s preview timer while Qt pumps events have caused native segfaults
+    in full-suite runs (X11 + offscreen Qt in one process), and the preview
+    path is already exercised deterministically via WorkerSignals."""
+    from ui.main_window import DesktopGUIAgent
+    monkeypatch.setattr(DesktopGUIAgent, "_refresh_screen", lambda self: None)
+
+
 # Verbatim log lines as core/orchestrator.py emits them
 ORCHESTRATOR_LOG = [
     "[TASK START] 'open notepad and type hello'",

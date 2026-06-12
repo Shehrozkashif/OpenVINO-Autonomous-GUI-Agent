@@ -373,10 +373,6 @@ class DesktopController:
             except Exception:
                 pass
 
-    def is_server_running(self) -> bool:
-        return True
-
-
 # ── Global emergency kill switch ──────────────────────────────────────────────
 
 class KillSwitch:

@@ -1,6 +1,6 @@
 # tests/unit/test_controller.py
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 from tools.desktop_control.controller import DesktopController
 
 
@@ -74,7 +74,3 @@ def test_screenshot_base64(mock_pynput):
     # Must be valid base64
     base64.b64decode(result)
 
-
-def test_is_server_running(mock_pynput):
-    controller = DesktopController()
-    assert controller.is_server_running() is True

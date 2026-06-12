@@ -4,7 +4,7 @@ import os
 import platform
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
 
 _OS = platform.system()
@@ -107,7 +107,8 @@ def detect_gpus() -> List[GPUInfo]:
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode == 0:
-            lines = [l.strip() for l in r.stdout.splitlines() if l.strip() and not l.startswith("device")]
+            lines = [ln.strip() for ln in r.stdout.splitlines()
+                     if ln.strip() and not ln.startswith("device")]
             for i, line in enumerate(lines):
                 parts = line.split(",")
                 name = parts[-1].strip() if parts else f"AMD GPU {i}"
@@ -119,8 +120,8 @@ def detect_gpus() -> List[GPUInfo]:
                 capture_output=True, text=True, timeout=5,
             )
             if rv.returncode == 0:
-                vram_lines = [l.strip() for l in rv.stdout.splitlines()
-                              if l.strip() and not l.startswith("device")]
+                vram_lines = [ln.strip() for ln in rv.stdout.splitlines()
+                              if ln.strip() and not ln.startswith("device")]
                 for i, vl in enumerate(vram_lines):
                     if i < len(gpus):
                         parts = vl.split(",")

@@ -777,7 +777,7 @@ class SettingsPage(QWidget):
         form.setHorizontalSpacing(S.XL)
         try:
             from config import (LLM_BASE_URL, LLM_MODEL, VLM_BASE_URL,
-                                VLM_OLLAMA, VLM_VLLM)
+                                VLM_VLLM)
             rows = [
                 ("Language model", f"{LLM_MODEL} — routing · planning · reflection"),
                 ("Vision model", f"{VLM_VLLM.split('/')[-1]} via vLLM ({VLM_BASE_URL})"),

@@ -21,10 +21,8 @@ import re
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
-
-_OS = platform.system()
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from loguru import logger
 
@@ -33,11 +31,17 @@ from agents.grounding.grounding_agent import GroundingResult, UIGroundingAgent
 from agents.planning.planning_agent import PlanningAgent, PlanningParseError
 from agents.reflection.reflection_agent import ReflectionAgent
 from agents.router.router_agent import RouterAgent
-from core.capture.screen_snapshot import ScreenSnapshot, capture_snapshot
+from core.capture.screen_snapshot import capture_snapshot
 from core.capture.screenshot import ScreenCapture, _screen_size
 from core.executor.burst_executor import BurstExecutor, detect_burst, detect_burst_from_instruction
 from core.protocols.a2a import ActionStep, SubTask
 from memory.task.task_memory import TaskMemory
+
+if TYPE_CHECKING:
+    from agents.grounding.grounding_agent import OCREngine
+
+# Tests patch this to pin platform-specific code paths (e.g. Windows process checks).
+_OS = platform.system()
 
 
 @dataclass
@@ -77,7 +81,7 @@ class TaskOrchestrator:
         reflector: ReflectionAgent,
         capturer: ScreenCapture,
         task_memory: TaskMemory,
-        config: OrchestratorConfig = None,
+        config: Optional[OrchestratorConfig] = None,
         on_step_log: Optional[Callable[[str], None]] = None,
         ocr: Optional["OCREngine"] = None,
         on_confirm: Optional[Callable[[str, str], bool]] = None,
@@ -758,7 +762,7 @@ class TaskOrchestrator:
                     return True
 
                 consecutive_failures += 1
-                self.log(f"  Step failed — re-evaluating next action")
+                self.log("  Step failed — re-evaluating next action")
 
                 # Persist failure so future tasks can avoid this pattern
                 try:
@@ -920,7 +924,7 @@ class TaskOrchestrator:
         # ── Drag ──────────────────────────────────────────────────────────────
         elif step.action_type == "drag":
             if not step.target:
-                self.log(f"  drag has no source target")
+                self.log("  drag has no source target")
                 return False
             src = self.grounder.ground(step.target)
             if not src.found or src.confidence < self.grounder.min_confidence:
@@ -941,7 +945,7 @@ class TaskOrchestrator:
                         return False
                     x2, y2 = dst.x, dst.y
             else:
-                self.log(f"  drag has no destination (value empty)")
+                self.log("  drag has no destination (value empty)")
                 return False
 
         # ── Scroll ────────────────────────────────────────────────────────────
@@ -974,8 +978,8 @@ class TaskOrchestrator:
         elif step.action_type == "type":
             if not self._firewall_allows(step.value):
                 self.log(
-                    f"  [FIREWALL] Blocked typing a destructive command — "
-                    f"step aborted for safety"
+                    "  [FIREWALL] Blocked typing a destructive command — "
+                    "step aborted for safety"
                 )
                 return False
 
@@ -1122,7 +1126,7 @@ class TaskOrchestrator:
                     "content": f"Screen text:\n{ocr_text}\n\nExtract: {what}",
                 },
             ]
-            resp = self.reflector.ovms.query_llm(messages, max_tokens=120, temperature=0.0)
+            resp = self.reflector.client.query_llm(messages, max_tokens=120, temperature=0.0)
             value = re.sub(r"<think>.*?</think>", "", resp.content, flags=re.DOTALL).strip()
             return value or None
         except Exception as e:
@@ -1166,7 +1170,7 @@ class TaskOrchestrator:
             img.thumbnail((960, 540))
             cur_text = " ".join(w.text for w in self._ocr.extract(img) if w.conf >= 0.6)
             if cur_text == prev_ocr_text and i > 0:
-                self.log(f"  [SCROLL-FIND] Reached end of page — stopping")
+                self.log("  [SCROLL-FIND] Reached end of page — stopping")
                 break
             prev_ocr_text = cur_text
 
@@ -1469,7 +1473,7 @@ class TaskOrchestrator:
                 img.thumbnail((320, 180))
                 cur_hash = str(_ih.phash(img))
                 if prev_hash is not None and cur_hash == prev_hash:
-                    self.log(f"  [SETTLE] Screen stable — proceeding")
+                    self.log("  [SETTLE] Screen stable — proceeding")
                     return
                 prev_hash = cur_hash
                 time.sleep(poll_interval)

@@ -63,84 +63,22 @@ def inject_linux_env():
 
 # ── 2. GPU detection ─────────────────────────────────────────────────────────
 
-def _detect_amd_gpus():
-    gpus = []
-    try:
-        rn = subprocess.run(
-            ["rocm-smi", "--showproductname", "--csv"],
-            capture_output=True, text=True, timeout=5
-        )
-        if rn.returncode != 0:
-            return []
-        name_lines = [l.strip() for l in rn.stdout.splitlines()
-                      if l.strip() and not l.lower().startswith("device")]
-        for i, line in enumerate(name_lines):
-            parts = line.split(",")
-            name = parts[-1].strip() if parts else f"AMD GPU {i}"
-            gpus.append({"index": i, "name": name, "vram_gb": 0})
-
-        rv = subprocess.run(
-            ["rocm-smi", "--showmeminfo", "vram", "--csv"],
-            capture_output=True, text=True, timeout=5
-        )
-        if rv.returncode == 0:
-            vram_lines = [l.strip() for l in rv.stdout.splitlines()
-                          if l.strip() and not l.lower().startswith("device")]
-            for i, vl in enumerate(vram_lines):
-                if i < len(gpus):
-                    try:
-                        vram_bytes = int(vl.split(",")[-1].strip())
-                        gpus[i]["vram_gb"] = round(vram_bytes / (1024 ** 3), 1)
-                    except (ValueError, IndexError):
-                        pass
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return gpus
-
-
-def _detect_nvidia_gpus():
-    gpus = []
-    try:
-        r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,name,memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5
-        )
-        if r.returncode == 0:
-            for line in r.stdout.strip().splitlines():
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 3:
-                    gpus.append({
-                        "index": int(parts[0]),
-                        "name": parts[1],
-                        "vram_gb": round(int(parts[2]) / 1024, 1),
-                    })
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return gpus
-
-
 def check_gpus():
     """Detect GPUs, print a summary, return (gpu_type, gpus)."""
+    from utils.platform_utils import detect_gpus
+
     print(_bold("\nGPU Detection:"))
-    amd = _detect_amd_gpus()
-    if amd:
-        total = sum(g["vram_gb"] for g in amd)
-        for g in amd:
-            print(_green(f"  [AMD] GPU{g['index']}: {g['name']}  {g['vram_gb']}GB VRAM"))
-        print(_green(f"  Total: {len(amd)} AMD GPU(s), {total:.1f}GB VRAM"))
-        return "amd", amd
+    gpus = detect_gpus()
+    if not gpus:
+        print(_yellow("  No GPU detected — running in CPU-only mode (slow)"))
+        return "cpu", []
 
-    nvidia = _detect_nvidia_gpus()
-    if nvidia:
-        total = sum(g["vram_gb"] for g in nvidia)
-        for g in nvidia:
-            print(_green(f"  [NVIDIA] GPU{g['index']}: {g['name']}  {g['vram_gb']}GB VRAM"))
-        print(_green(f"  Total: {len(nvidia)} NVIDIA GPU(s), {total:.1f}GB VRAM"))
-        return "nvidia", nvidia
-
-    print(_yellow("  No GPU detected — running in CPU-only mode (slow)"))
-    return "cpu", []
+    backend = gpus[0].backend
+    total = sum(g.vram_gb for g in gpus)
+    for g in gpus:
+        print(_green(f"  [{backend.upper()}] GPU{g.index}: {g.name}  {g.vram_gb}GB VRAM"))
+    print(_green(f"  Total: {len(gpus)} {backend.upper()} GPU(s), {total:.1f}GB VRAM"))
+    return backend, gpus
 
 
 # ── 3. Ollama ─────────────────────────────────────────────────────────────────
@@ -300,9 +238,9 @@ def ensure_vlm_model(pulled: list) -> bool:
     here = os.path.dirname(os.path.abspath(__file__))
     gguf_path = os.path.join(here, UITARS_GGUF_NAME)
     if not os.path.exists(gguf_path):
-        print(_yellow(f"  [INFO] UI-TARS GGUF not found — to use it via Ollama:"))
-        print(_yellow(f"    huggingface-cli download Mungert/UI-TARS-1.5-7B \\"))
-        print(_yellow(f"        --include '*.gguf' --local-dir . --local-dir-use-symlinks False"))
+        print(_yellow("  [INFO] UI-TARS GGUF not found — to use it via Ollama:"))
+        print(_yellow("    huggingface-cli download Mungert/UI-TARS-1.5-7B \\"))
+        print(_yellow("        --include '*.gguf' --local-dir . --local-dir-use-symlinks False"))
         print(_yellow(f"    mv *Q4_K_M*.gguf {UITARS_GGUF_NAME}"))
         return False
     print(_yellow("  [SETUP] Registering ui-tars-1.5-7b-gui with Ollama..."))
@@ -336,7 +274,7 @@ def check_models() -> bool:
 
     # vLLM is already handling UI-TARS if it's running — skip Ollama VLM in that case
     if check_vllm():
-        print(_green(f"  [OK] VLM served by vLLM (UI-TARS)"))
+        print(_green("  [OK] VLM served by vLLM (UI-TARS)"))
         return all_ok
 
     uitars_ok = any("ui-tars-1.5-7b-gui" in m for m in pulled)
@@ -344,7 +282,7 @@ def check_models() -> bool:
     fallback_ok = any(vlm_fb_base in m for m in pulled)
 
     if uitars_ok:
-        print(_green(f"  [OK] ui-tars-1.5-7b-gui               VLM primary (Ollama/GGUF)"))
+        print(_green("  [OK] ui-tars-1.5-7b-gui               VLM primary (Ollama/GGUF)"))
     else:
         uitars_ok = ensure_vlm_model(pulled)
 

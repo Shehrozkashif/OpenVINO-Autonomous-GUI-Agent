@@ -21,12 +21,16 @@ from pydantic import BaseModel
 from config import LLM_MODEL, VLM_OLLAMA, VLM_VLLM, LLM_BASE_URL, VLM_BASE_URL
 
 
-class OVMSResponse(BaseModel):
+class InferenceResponse(BaseModel):
     """Unified response type for all inference calls."""
     content: str
     model: str
     latency_ms: float
     tokens_generated: int
+
+
+# Backward-compat alias — the class predates the OVMS backend being dropped.
+OVMSResponse = InferenceResponse
 
 _DEFAULT_LLM        = LLM_MODEL
 _DEFAULT_VLM_VLLM   = VLM_VLLM
@@ -100,10 +104,9 @@ def _post_with_retry(
 
 class OllamaClient:
     """
-    Dual-backend client.
-    - query_llm() → Ollama (qwen3:14b) for planning, routing, reflection
-    - query_vlm() → vLLM (UI-TARS) if running, else Ollama (qwen2.5vl:7b)
-    Both backends use the OpenAI-compatible /v1/chat/completions endpoint.
+    Dual-backend client (models configured in config.py).
+    - query_llm() → Ollama (LLM_MODEL) for planning, routing, reflection
+    - query_vlm() → vLLM (VLM_VLLM) if running, else Ollama (VLM_OLLAMA)
     """
 
     def __init__(
@@ -151,7 +154,7 @@ class OllamaClient:
         max_tokens: int = 200,
         temperature: float = 0.0,
         system_prompt: str = None,
-    ) -> OVMSResponse:
+    ) -> InferenceResponse:
         """Send screenshot + prompt to the VLM for visual grounding.
 
         Uses vLLM's OpenAI endpoint when vLLM is running, otherwise falls back
@@ -214,7 +217,7 @@ class OllamaClient:
 
         latency_ms = (time.time() - start) * 1000
         logger.debug(f"[VLM] {prompt[:60]}… → {content[:100]} ({latency_ms:.0f}ms)")
-        return OVMSResponse(
+        return InferenceResponse(
             content=content,
             model=self.vlm_model,
             latency_ms=latency_ms,
@@ -227,8 +230,8 @@ class OllamaClient:
         max_tokens: int = 1024,
         temperature: float = 0.7,
         response_schema: dict = None,
-    ) -> OVMSResponse:
-        """Send text messages to qwen3:14b via Ollama's native /api/chat.
+    ) -> InferenceResponse:
+        """Send text messages to the configured LLM via Ollama's native /api/chat.
 
         Uses Ollama native API so we can pass:
           think=False        — suppresses chain-of-thought filling
@@ -253,7 +256,7 @@ class OllamaClient:
         content = (data.get("message") or {}).get("content") or ""
         latency_ms = (time.time() - start) * 1000
         logger.debug(f"[LLM] → {content[:100]} ({latency_ms:.0f}ms)")
-        return OVMSResponse(
+        return InferenceResponse(
             content=content,
             model=self.llm_model,
             latency_ms=latency_ms,

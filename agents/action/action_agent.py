@@ -108,7 +108,7 @@ class ActionExecutionAgent:
                     if has_tokens(value):
                         value = substitute(value)
                         sensitive = True
-                        logger.info(f"[ACTION] credential substitution applied")
+                        logger.info("[ACTION] credential substitution applied")
                 except Exception:
                     pass
                 use_cb = self._should_use_clipboard(step, value)
