@@ -1,8 +1,8 @@
 <div align="center">
 
-<a href="https://www.intel.com"><img src="https://upload.wikimedia.org/wikipedia/commons/8/85/Intel_logo_2023.svg" alt="Intel" height="56"></a>
+<a href="https://www.intel.com"><img src="docs/assets/intel-logo.svg" alt="Intel" height="48"></a>
 &nbsp;&nbsp;&nbsp;&nbsp;
-<a href="https://github.com/openvinotoolkit/openvino"><img src="https://raw.githubusercontent.com/openvinotoolkit/openvino/master/docs/dev/assets/openvino-logo-purple-black.svg" alt="OpenVINO" height="56"></a>
+<a href="https://github.com/openvinotoolkit/openvino"><img src="docs/assets/openvino-logo.svg" alt="OpenVINO" height="48"></a>
 
 # Desktop GUI Agent
 
