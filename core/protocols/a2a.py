@@ -6,7 +6,7 @@ from typing import Any, List, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from core.pipeline.ollama_client import InferenceResponse
+from core.pipeline.ovms_client import InferenceResponse
 
 
 # ── Agent communication enums / models ───────────────────────────────────────
@@ -79,7 +79,7 @@ class BurstResult:
 
 @runtime_checkable
 class InferenceClient(Protocol):
-    """Interface that OllamaClient satisfies. Agents type-hint against this."""
+    """Interface that OVMSClient satisfies. Agents type-hint against this."""
 
     def query_llm(
         self,

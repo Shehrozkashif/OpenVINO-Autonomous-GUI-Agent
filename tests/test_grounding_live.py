@@ -2,7 +2,7 @@
 Live grounding test — tests Stage 0 (UIA), Stage 1 (OCR), Stage 2 (VLM),
 coordinate parsing, and mouse click accuracy.
 
-Requires: Ollama running, real display, Windows.
+Requires: OpenVINO Model Server running (python start.py), real display, Windows.
 Run: python tests/test_grounding_live.py
 """
 import sys
@@ -10,7 +10,7 @@ import time
 sys.path.insert(0, ".")
 
 from core.capture.screenshot import ScreenCapture
-from core.pipeline.ollama_client import OllamaClient
+from core.pipeline.ovms_client import OVMSClient
 from agents.grounding.grounding_agent import UIGroundingAgent, OCREngine
 from tools.desktop_control.controller import DesktopController
 
@@ -38,7 +38,7 @@ def test_parse_coords():
 
     from agents.grounding.grounding_agent import UIGroundingAgent
     capturer = ScreenCapture()
-    client = OllamaClient()
+    client = OVMSClient()
     ocr = OCREngine()
     grounder = UIGroundingAgent(client, capturer, ocr=ocr)
 
@@ -85,7 +85,7 @@ def test_parse_coords():
 def test_uia_grounding():
     sep("2. Stage 0 — Windows UIA grounding")
     capturer = ScreenCapture()
-    client = OllamaClient()
+    client = OVMSClient()
     ocr = OCREngine()
     grounder = UIGroundingAgent(client, capturer, ocr=ocr)
 
@@ -105,7 +105,7 @@ def test_uia_grounding():
 def test_ocr_grounding():
     sep("3. Stage 1 — OCR text grounding")
     capturer = ScreenCapture()
-    client = OllamaClient()
+    client = OVMSClient()
     ocr = OCREngine()
     grounder = UIGroundingAgent(client, capturer, ocr=ocr)
 
@@ -126,7 +126,7 @@ def test_ocr_grounding():
 def test_click_accuracy():
     sep("4. Click accuracy test")
     capturer = ScreenCapture()
-    client = OllamaClient()
+    client = OVMSClient()
     ocr = OCREngine()
     grounder = UIGroundingAgent(client, capturer, ocr=ocr)
     controller = DesktopController()
@@ -173,7 +173,7 @@ def _screen_hash(capturer):
 def test_vlm_direct():
     sep("5. Stage 2 — VLM direct coordinate test")
     capturer = ScreenCapture()
-    client = OllamaClient()
+    client = OVMSClient()
     ocr = OCREngine()
     grounder = UIGroundingAgent(client, capturer, ocr=ocr)
 

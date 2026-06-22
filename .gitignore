@@ -4,12 +4,16 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Model files (BIG - 6.4 GB, don't commit!)
-models/OpenVINO/
+# Model files (BIG, don't commit!) — OVMS model repository + IR artifacts
+models/
+!models/.gitkeep
 *.bin
 *.onnx
 *.xml
 *.gguf
+
+# Downloaded OVMS helper script
+tools/ovms/
 
 # Runtime artifacts
 logs/

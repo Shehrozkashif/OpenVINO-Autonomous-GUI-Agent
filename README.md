@@ -12,7 +12,7 @@ No cloud. No API keys. No data ever leaves your desk.
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](#installation)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
-[![Backend](https://img.shields.io/badge/inference-Ollama%20%2B%20vLLM-orange)](https://ollama.com)
+[![Backend](https://img.shields.io/badge/inference-OpenVINO%E2%84%A2%20Model%20Server-0068b5)](https://github.com/openvinotoolkit/model_server)
 [![GUI](https://img.shields.io/badge/GUI-PyQt6-41cd52)](https://www.riverbankcomputing.com/software/pyqt/)
 [![Tests](https://img.shields.io/badge/tests-355%20passing-brightgreen)](#running-tests)
 
@@ -55,7 +55,7 @@ Agent: [ROUTER]   2 sub-tasks: open Firefox → navigate to URL
 
 |     | Feature | What it means |
 |-----|---------|---------------|
-| 🔒 | **100 % local** | All inference runs on your GPU via Ollama / vLLM — nothing is sent to the cloud |
+| 🔒 | **100 % local** | All inference runs on your Intel® GPU via OpenVINO™ Model Server — nothing is sent to the cloud |
 | 👁 | **Verifies every step** | A reflection agent checks the screen after each action; failures trigger automatic replanning |
 | 🎯 | **3-stage grounding** | UIA accessibility tree → OCR fuzzy-match → vision model, fastest path first |
 | 🛡 | **Prompt-injection-proof firewall** | Destructive shell commands are blocked by a deterministic classifier that never calls a model |
@@ -165,11 +165,9 @@ flowchart TB
 
     subgraph INFER_LAYER["&nbsp;Inference Layer · core/pipeline — 100% local&nbsp;"]
         direction LR
-        OLLAMA["Ollama<br/>qwen3:8b LLM ·<br/>UI-TARS VLM fallback"]
-        CLIENT["OllamaClient<br/>implements<br/>InferenceClient"]
-        VLLM["vLLM · optional<br/>UI-TARS-1.5-7B<br/>primary VLM"]
-        CLIENT --> OLLAMA
-        CLIENT -- "auto-detected<br/>on :8000" --> VLLM
+        CLIENT["OVMSClient<br/>implements<br/>InferenceClient"]
+        OVMS["OpenVINO™ Model Server<br/>qwen3-8b-int4-ov LLM ·<br/>ui-tars-1.5-7b-int4-ov VLM<br/>OpenAI API · :8000"]
+        CLIENT -- "/v3/chat/completions" --> OVMS
     end
 
     USER --> UI_LAYER
@@ -184,7 +182,8 @@ routing, screens every typed command through the firewall, and arms the kill
 switch for the duration of a task. Agents do one job each and touch the world
 only through the platform layer. All model calls funnel through a single
 client behind the `InferenceClient` protocol (`core/protocols/a2a.py`) — which
-is what makes the planned OpenVINO backend a drop-in addition, not a rewrite.
+is what let the inference backend be swapped to OpenVINO™ Model Server without
+touching a single agent.
 
 | Agent | Consumes | Produces |
 |-------|----------|----------|
@@ -225,17 +224,21 @@ that actually happen in live runs:
 
 Model ids live in [`config.py`](config.py) — the single source of truth.
 
-| Role | Model | Size | Purpose |
-|------|-------|------|---------|
-| **LLM** | `qwen3:8b` via Ollama | ~5 GB | Routing, planning, reflection reasoning |
-| **VLM (preferred)** | `ByteDance-Seed/UI-TARS-1.5-7B` via vLLM on port 8000 | ~16 GB download | GUI grounding, visual verification |
-| **VLM (Ollama)** | `hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S` via Ollama | ~5 GB | Used when vLLM is unavailable |
+| Role | Model (OVMS servable) | Source | Purpose |
+|------|-----------------------|--------|---------|
+| **LLM** | `qwen3-8b-int4-ov` | [`OpenVINO/Qwen3-8B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3-8B-int4-ov) (pre-converted) | Routing, planning, reflection reasoning |
+| **VLM** | `ui-tars-1.5-7b-int4-ov` | [`ByteDance-Seed/UI-TARS-1.5-7B`](https://huggingface.co/ByteDance-Seed/UI-TARS-1.5-7B) (converted to INT4 on first run) | GUI grounding, visual verification |
 
-> **OpenVINO™ roadmap** — inference currently runs through Ollama (with
-> optional vLLM for the VLM). An OpenVINO execution backend is planned work:
-> the `InferenceClient` protocol in `core/protocols/a2a.py` keeps every agent
-> backend-agnostic, and `models/OpenVINO/` holds candidate INT4/INT8 model
-> packages for that integration, targeting Intel® CPU / iGPU / NPU execution.
+Both models are served by a **single OpenVINO™ Model Server instance** on one
+OpenAI-compatible endpoint (`http://localhost:8000/v3/chat/completions`) and
+selected per request by the `model` field. On a 16 GB Intel® GPU both INT4
+models (~4.5 GB each) stay resident — no model swapping.
+
+> **OpenVINO™ backend** — inference runs entirely through OpenVINO™ Model Server
+> (OVMS) on Intel® CPU / iGPU / Arc™ GPU / NPU. The `InferenceClient` protocol in
+> `core/protocols/a2a.py` keeps every agent backend-agnostic; `OVMSClient`
+> (`core/pipeline/ovms_client.py`) is the only component that talks to the server.
+> Set the device in [`config.py`](config.py) via `TARGET_DEVICE`.
 
 ---
 
@@ -249,9 +252,10 @@ pip install -r requirements.txt
 python start.py
 ```
 
-`start.py` does the rest: detects your GPU, starts Ollama with the right
-device assignment, starts vLLM when it is installed, prepares any missing
-Ollama models, and opens the agent GUI.
+`start.py` does the rest: detects your GPU, prepares both OpenVINO models in the
+OVMS model repository (converting UI-TARS on first run), starts OpenVINO™ Model
+Server (native binary if present, otherwise the Docker image), waits for both
+models to load, and opens the agent GUI.
 
 ```bash
 # Pre-fill the instruction box
@@ -292,8 +296,13 @@ source venv/bin/activate
 # 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 4. Install Ollama  (if not already installed)
-curl -fsSL https://ollama.com/install.sh | sh
+# 4. Install OpenVINO™ Model Server  (native binary or Docker)
+#    Docker (simplest on Linux):
+docker pull openvino/model_server:latest-gpu
+#    Native binary: see https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html
+
+# 5. (first run only) install the conversion toolchain for UI-TARS
+pip install "optimum-intel[openvino]" nncf
 ```
 
 > **No sudo required.** `start.py` extracts the missing Qt system library
@@ -313,8 +322,13 @@ venv\Scripts\activate
 # 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 4. Install Ollama
-# Download from https://ollama.com/download/windows and run the installer
+# 4. Install OpenVINO™ Model Server (native Windows binary)
+# Download the OVMS Windows package, extract it, then point start.py at it:
+#   setx OVMS_DIR "C:\path\to\ovms"     (folder containing ovms.exe)
+# See https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html
+
+# 5. (first run only) install the conversion toolchain for UI-TARS
+pip install "optimum-intel[openvino]" nncf
 ```
 
 > **Note:** On Windows, `pynput` uses `win32 SendInput` for keyboard injection —
@@ -337,10 +351,10 @@ python start.py
 `start.py` handles everything automatically:
 
 1. **Environment setup** — configures `LD_LIBRARY_PATH` on Linux (no sudo)
-2. **GPU detection** — finds AMD ROCm / NVIDIA CUDA GPUs and assigns devices
-3. **Ollama check** — verifies Ollama is running; starts it with the right GPU env if not
-4. **vLLM check** — starts vLLM for UI-TARS when installed (optional, better accuracy)
-5. **Model check** — pulls the LLM and configured Ollama VLM when needed
+2. **GPU detection** — finds Intel / AMD / NVIDIA GPUs for the startup banner
+3. **Model prep** — pulls `qwen3-8b-int4-ov` and converts UI-TARS to INT4 into the OVMS repo (first run only)
+4. **Server start** — launches OpenVINO™ Model Server (native binary, else Docker) serving both models on port 8000
+5. **Readiness wait** — polls until both models report AVAILABLE
 6. **Launches** `main.py` — the agent GUI opens
 
 <details>
@@ -354,15 +368,16 @@ python start.py
 Platform: Linux
   [OK] Linux environment configured
 
-Ollama (LLM):
-  [OK] Ollama already running on localhost:11434
-
-vLLM (VLM — UI-TARS):
-  [OK] vLLM already running — UI-TARS active
+GPU Detection:
+  [INTEL] GPU0: Intel(R) Arc(TM) 140V GPU (16GB)
+  OVMS target device: GPU
 
 Models:
-  [OK] qwen3:8b                       LLM — planning, routing, reflection
-  [OK] VLM served by vLLM (UI-TARS)
+  [OK] qwen3-8b-int4-ov         already in repository
+  [OK] ui-tars-1.5-7b-int4-ov   already in repository
+
+OpenVINO Model Server:
+  [OK] OVMS ready — both models loaded (12s)
 
 Starting Desktop GUI Agent...
 ```
@@ -439,7 +454,7 @@ intel-openvino-desktop-agent/
 │   │   └── screen_snapshot.py     # Foreground/background-aware OCR snapshot
 │   ├── executor/burst_executor.py # Fast multi-action sequences (no per-step LLM)
 │   ├── grounding/windows_uia.py   # Stage 0: Windows UIA accessibility tree
-│   ├── pipeline/ollama_client.py  # Dual-backend client (Ollama LLM + vLLM/Ollama VLM)
+│   ├── pipeline/ovms_client.py    # OVMSClient — LLM + VLM via OpenVINO Model Server
 │   ├── protocols/a2a.py           # Shared data models + InferenceClient protocol
 │   ├── safety/action_firewall.py  # Deterministic destructive-command classifier
 │   └── orchestrator.py            # Central coordinator — runs the full loop
@@ -459,58 +474,47 @@ intel-openvino-desktop-agent/
 <details>
 <summary><h2>Manual Setup (without start.py)</h2></summary>
 
-If you prefer to control each step manually:
-
-### Linux
+If you prefer to control each step manually (these are exactly what `start.py`
+automates). The export helper is the one bundled with OVMS —
+[`demos/common/export_models/export_model.py`](https://github.com/openvinotoolkit/model_server/tree/main/demos/common/export_models).
 
 ```bash
-# Set Qt library path (one-time, no sudo)
-apt-get download libxcb-cursor0
-dpkg-deb -x libxcb-cursor0_*.deb ~/.local_xcb/
-export LD_LIBRARY_PATH="$HOME/.local_xcb/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+pip install "optimum-intel[openvino]" nncf
 
-# Pull models
-ollama pull qwen3:8b
-ollama pull hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S
+# 1. Pull / convert both models into the OVMS repository (writes models/config.json)
+python export_model.py text_generation \
+  --source_model OpenVINO/Qwen3-8B-int4-ov  --model_name qwen3-8b-int4-ov \
+  --weight-format int4 --config_file_path models/config.json \
+  --model_repository_path models --target_device GPU
 
-# Launch
-source venv/bin/activate
+python export_model.py text_generation \
+  --source_model ByteDance-Seed/UI-TARS-1.5-7B --model_name ui-tars-1.5-7b-int4-ov \
+  --weight-format int4 --config_file_path models/config.json \
+  --model_repository_path models --target_device GPU
+
+# 2. Serve both from one OVMS instance
+#    native:
+ovms --config_path models/config.json --rest_port 8000 --target_device GPU
+#    or Docker:
+docker run --rm -p 8000:8000 -v $PWD/models:/models:rw --device /dev/dri \
+  openvino/model_server:latest-gpu \
+  --config_path /models/config.json --rest_port 8000 --target_device GPU
+
+# 3. Launch the agent against the running server
 python main.py
 ```
 
-### Windows
-
-```powershell
-# Pull models
-ollama pull qwen3:8b
-ollama pull hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S
-
-# Launch
-venv\Scripts\activate
-python main.py
-```
-
-### Optional: UI-TARS via vLLM (best grounding accuracy)
+### Checking the server
 
 ```bash
-pip install vllm
-vllm serve ByteDance-Seed/UI-TARS-1.5-7B --port 8000
-# The agent auto-detects vLLM on port 8000 and uses it as the VLM backend
+curl http://localhost:8000/v1/config        # servable states (AVAILABLE?)
+curl http://localhost:8000/v3/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3-8b-int4-ov","messages":[{"role":"user","content":"hi"}],"max_tokens":10}'
 ```
 
-### Checking GPU usage
-
-```bash
-ollama ps
-```
-
-```
-NAME        SIZE     PROCESSOR    CONTEXT
-qwen3:8b    6.4 GB   100% GPU     40960
-```
-
-If a model shows `100% CPU`, your GPU may not have enough VRAM.
-Try closing other GPU applications and restarting Ollama.
+If a model fails to load, check `ovms.log`. For GPU execution make sure the Intel
+GPU drivers are installed and (Docker on Linux) `/dev/dri` is passed through.
 
 </details>
 
@@ -528,7 +532,7 @@ pytest
 # Lint
 ruff check .
 
-# End-to-end pipeline check (requires Ollama running + a live desktop)
+# End-to-end pipeline check (requires OVMS running + a live desktop)
 python e2e_test.py
 ```
 
@@ -536,15 +540,15 @@ python e2e_test.py
 
 ## Performance Reference
 
-Measured on a 6 GB-VRAM GPU with Ollama (models swap as needed):
+Measured on an Intel® Arc™ 140V (16 GB) with OVMS (both INT4 models resident):
 
 | Operation | Latency |
 |-----------|---------|
-| Screen capture (Xlib) | < 20 ms |
+| Screen capture (Xlib / GDI) | < 20 ms |
 | Windows UIA grounding | 20 – 50 ms |
 | OCR (RapidOCR) | < 150 ms |
-| VLM grounding (UI-TARS) | 1 – 3 s (plus one-time model swap on small VRAM) |
-| LLM planning (`qwen3:8b`) | 1 – 3 s |
+| VLM grounding (`ui-tars-1.5-7b-int4-ov`) | 1 – 3 s |
+| LLM planning (`qwen3-8b-int4-ov`) | 1 – 3 s |
 | Full task (3–5 steps) | 15 s – 60 s |
 
 ---
@@ -554,8 +558,9 @@ Measured on a 6 GB-VRAM GPU with Ollama (models swap as needed):
 | Problem | Solution |
 |---------|----------|
 | `qt.qpa.plugin: could not load xcb` | Run `start.py` — it auto-extracts `libxcb-cursor0` |
-| `Ollama not running` | Run `ollama serve` in a separate terminal |
-| Model on CPU instead of GPU | Check VRAM with `ollama ps`; close other apps; ensure ROCm/CUDA is installed |
+| `Could not connect to OpenVINO Model Server` | Run `python start.py`; check `ovms.log` and `curl localhost:8000/v1/config` |
+| Native `ovms` not found | Set `OVMS_DIR` to the folder containing `ovms.exe`, or install Docker |
+| Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers; (Docker/Linux) pass `/dev/dri` |
 | `No JSON array in router response` | Rare LLM format issue; retry the task |
 | Agent clicks wrong place | Lower screen scaling or check `DISPLAY` env var points to your active session |
 | Wayland session (Linux) | Log out, select "GNOME on Xorg" at login screen, log back in |
@@ -571,8 +576,7 @@ development setup, code style, and architecture constraints.
 
 Built on the shoulders of excellent open-source work:
 [OpenVINO™](https://github.com/openvinotoolkit/openvino) ·
-[Ollama](https://ollama.com) ·
-[vLLM](https://github.com/vllm-project/vllm) ·
+[OpenVINO™ Model Server](https://github.com/openvinotoolkit/model_server) ·
 [UI-TARS](https://github.com/bytedance/UI-TARS) ·
 [Qwen](https://github.com/QwenLM) ·
 [RapidOCR](https://github.com/RapidAI/RapidOCR) ·

@@ -196,8 +196,8 @@ removed after each fade (stacked `QGraphicsOpacityEffect`s slow painting).
   inline in the timeline at the moment they fire.
 * Stop is visible whenever the agent is running; Settings explains the kill
   switch and firewall in plain language.
-* Buttons fail safe: Run without Ollama → "Agent offline" dialog with the fix
-  (`ollama serve`).
+* Buttons fail safe: Run without the model server → "Agent offline" dialog with
+  the fix (`python start.py`).
 
 ## 9. Future work
 

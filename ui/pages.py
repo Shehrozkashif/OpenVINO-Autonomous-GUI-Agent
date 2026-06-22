@@ -126,9 +126,8 @@ class HomePage(QWidget):
         self.headline.setProperty("role", "display")
         hcol.addWidget(self.headline)
         try:
-            from config import LLM_MODEL, VLM_VLLM
-            vlm_short = VLM_VLLM.split("/")[-1]
-            sub = f"{LLM_MODEL}  ·  {vlm_short}  ·  fully local inference"
+            from config import LLM_MODEL, VLM_MODEL
+            sub = f"{LLM_MODEL}  ·  {VLM_MODEL}  ·  OpenVINO Model Server"
         except Exception:
             sub = "local inference"
         subtitle = QLabel(sub)
@@ -776,12 +775,11 @@ class SettingsPage(QWidget):
         form = QFormLayout()
         form.setHorizontalSpacing(S.XL)
         try:
-            from config import (LLM_BASE_URL, LLM_MODEL, VLM_BASE_URL,
-                                VLM_VLLM)
+            from config import LLM_MODEL, VLM_MODEL, OVMS_BASE_URL, TARGET_DEVICE
             rows = [
                 ("Language model", f"{LLM_MODEL} — routing · planning · reflection"),
-                ("Vision model", f"{VLM_VLLM.split('/')[-1]} via vLLM ({VLM_BASE_URL})"),
-                ("Vision fallback", f"UI-TARS GGUF via Ollama ({LLM_BASE_URL})"),
+                ("Vision model", f"{VLM_MODEL} — grounding · visual verification"),
+                ("Served by", f"OpenVINO Model Server ({OVMS_BASE_URL}) · device {TARGET_DEVICE}"),
             ]
         except Exception:
             rows = [("Configuration", "config.py could not be read")]
@@ -890,8 +888,8 @@ class SettingsPage(QWidget):
 
         def worker():
             try:
-                from core.pipeline.ollama_client import OllamaClient
-                health = OllamaClient().check_health()
+                from core.pipeline.ovms_client import OVMSClient
+                health = OVMSClient().check_health()
                 text = "   ".join(f"{k}: {v}" for k, v in health.items())
             except Exception as e:
                 text = f"unreachable: {e}"

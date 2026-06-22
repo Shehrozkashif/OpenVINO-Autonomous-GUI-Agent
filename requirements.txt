@@ -17,8 +17,15 @@ pydantic>=2.4.0
 sentence-transformers>=2.2.0
 numpy>=1.24.0
 
-# ── Ollama Python SDK (optional helper) ───────────────────────────────────────
-ollama>=0.3.0
+# ── Inference backend: OpenVINO™ Model Server (OVMS) ──────────────────────────
+# The server itself is external — installed as a native binary (ovms.exe) or run
+# via the openvino/model_server Docker image; start.py launches it. The Python
+# client only needs httpx (above).
+#
+# One-time UI-TARS → OpenVINO INT4 conversion (run by start.py on first launch)
+# needs the optimum-intel toolchain. Install with:
+#   pip install "optimum-intel[openvino]" nncf
+# (left out of the default install to keep the runtime footprint small.)
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 loguru>=0.7.0

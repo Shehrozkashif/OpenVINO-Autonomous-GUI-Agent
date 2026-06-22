@@ -8,7 +8,7 @@ through the same signal path used at runtime:
     orchestrator.log(str) → WorkerSignals.log_update → AgentEventBus.feed()
         → MissionPage timeline / IntelligencePanel / status chip
 
-verifying the UI is wired to the backend without needing Ollama running.
+verifying the UI is wired to the backend without needing OVMS running.
 """
 import os
 
@@ -264,7 +264,7 @@ def test_window_end_to_end_wiring(app):
 
 
 def test_run_task_requires_orchestrator(app, monkeypatch):
-    """_run_task must fail safe (dialog, no crash) when Ollama is down."""
+    """_run_task must fail safe (dialog, no crash) when OVMS is down."""
     from PyQt6.QtWidgets import QMessageBox
     from ui.main_window import DesktopGUIAgent
 

@@ -89,7 +89,7 @@ class GPUInfo:
     index: int
     name: str
     vram_mb: int
-    backend: str   # "amd" | "nvidia"
+    backend: str   # "amd" | "nvidia" | "intel"
 
     @property
     def vram_gb(self) -> float:
@@ -156,6 +156,56 @@ def detect_gpus() -> List[GPUInfo]:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
+    if gpus:
+        return gpus
+
+    # ── Intel (iGPU / Arc) — used by OpenVINO Model Server with --target_device GPU
+    gpus.extend(_detect_intel_gpus())
+
+    return gpus
+
+
+def _detect_intel_gpus() -> List[GPUInfo]:
+    """Best-effort Intel GPU detection for the startup banner.
+
+    OVMS selects the device itself via --target_device GPU, so this is purely
+    informational and never required for inference to work.
+    """
+    gpus: List[GPUInfo] = []
+    if _OS == "Windows":
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_VideoController | "
+                 "Where-Object { $_.Name -match 'Intel' } | "
+                 "ForEach-Object { \"$($_.Name)|$($_.AdapterRAM)\" }"],
+                capture_output=True, text=True, timeout=8,
+            )
+            if r.returncode == 0:
+                for i, line in enumerate(ln.strip() for ln in r.stdout.splitlines() if ln.strip()):
+                    name, _, ram = line.partition("|")
+                    try:
+                        # AdapterRAM is bytes (and unreliable/0 for shared-memory iGPUs)
+                        vram_mb = max(int(ram), 0) // (1024 * 1024)
+                    except ValueError:
+                        vram_mb = 0
+                    gpus.append(GPUInfo(index=i, name=name.strip() or f"Intel GPU {i}",
+                                        vram_mb=vram_mb, backend="intel"))
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            r = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                idx = 0
+                for line in r.stdout.splitlines():
+                    if "VGA" in line and "Intel" in line:
+                        name = line.split(":", 2)[-1].strip()
+                        gpus.append(GPUInfo(index=idx, name=name or "Intel GPU",
+                                            vram_mb=0, backend="intel"))
+                        idx += 1
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     return gpus
 
 

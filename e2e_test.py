@@ -11,7 +11,7 @@ logger.remove()
 logger.add(sys.stdout, format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}", level="DEBUG", colorize=True)
 
 # ── imports ──────────────────────────────────────────────────────────────────
-from core.pipeline.ollama_client import OllamaClient
+from core.pipeline.ovms_client import OVMSClient
 from agents.router.router_agent import RouterAgent
 from agents.planning.planning_agent import PlanningAgent
 from agents.grounding.grounding_agent import UIGroundingAgent
@@ -33,7 +33,7 @@ def section(title):
 # 1. Backend health
 # ═══════════════════════════════════════════════════════════════
 section("1. Backend Health")
-client = OllamaClient()
+client = OVMSClient()
 health = client.check_health()
 all_ok = all(v == "OK" for v in health.values())
 for k, v in health.items():
@@ -41,7 +41,7 @@ for k, v in health.items():
 results["backend"] = PASS if all_ok else FAIL
 print(f"\n  → {results['backend']}")
 if not all_ok:
-    print("  Pull model first: ollama pull qwen3:8b")
+    print("  Prepare models and start the server first: python start.py")
     sys.exit(1)
 
 # ═══════════════════════════════════════════════════════════════

@@ -292,7 +292,7 @@ class UIGroundingAgent:
     Stage 1 — OCR:  fast, free, pixel-perfect for text-labeled elements.
     Stage 2 — VLM:  UI-TARS-1.5-7B direct coordinate prediction for everything else.
 
-    Accepts any client that implements InferenceClient (OllamaClient, OVMSClient, etc.).
+    Accepts any client that implements InferenceClient (OVMSClient, etc.).
     """
 
     _DISPLAY_W = 960   # must match capture_snapshot() thumbnail size so OCR cache entries are shared

@@ -7,7 +7,7 @@ Primary path: OCR the after-screenshot, pass visible text to the LLM
   - A reasoning LLM handles conditional success logic accurately.
   - No image encoding needed — fast, cheap, high quality.
 
-Fallback path: VLM (qwen2.5vl / UI-TARS) is used only when OCR returns fewer
+Fallback path: the VLM (UI-TARS) is used only when OCR returns fewer
 than 3 meaningful words (icon-heavy screens, blank desktops).
 """
 import base64

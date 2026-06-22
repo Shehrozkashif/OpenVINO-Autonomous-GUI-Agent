@@ -5,20 +5,41 @@ Desktop GUI Agent — single entry point.
     python start.py
 
 Does everything automatically:
-  1. Detect GPUs (AMD ROCm / NVIDIA CUDA)
-  2. Start Ollama with the correct GPU env var (if not already running)
-  3. Start vLLM  with the correct GPU env var (if installed and not running)
-  4. Pull any missing Ollama models
-  5. Wait for both services to be ready
+  1. Platform setup (Linux Qt libs / Windows UIA)
+  2. Detect GPU (Intel / AMD / NVIDIA)
+  3. Prepare both models in the OpenVINO Model Server (OVMS) repository:
+       • LLM  qwen3-8b-int4-ov        (pulled pre-converted from Hugging Face)
+       • VLM  ui-tars-1.5-7b-int4-ov  (converted from UI-TARS on first run)
+  4. Start OVMS serving both models on one OpenAI-compatible endpoint (port 8000)
+       — native ovms/ovms.exe if available, otherwise the Docker image
+  5. Wait for the server to be ready
   6. Launch the agent UI
 """
+import json
 import os
-import sys
 import platform
+import shutil
 import subprocess
+import sys
 import time
 
+from config import (LLM_MODEL, LLM_SOURCE, VLM_MODEL, VLM_SOURCE,
+                    OVMS_BASE_URL, OVMS_REST_PORT, TARGET_DEVICE,
+                    MODEL_REPOSITORY_PATH)
+
 _OS = platform.system()
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.join(_HERE, MODEL_REPOSITORY_PATH)
+_CONFIG_JSON = os.path.join(_REPO, "config.json")
+
+# Pinned OVMS ref used to fetch the model-export helper when it isn't already present.
+_OVMS_REF = "releases/2025/3"
+_EXPORT_TOOL_URL = (
+    f"https://raw.githubusercontent.com/openvinotoolkit/model_server/"
+    f"{_OVMS_REF}/demos/common/export_models/export_model.py"
+)
+_DOCKER_IMAGE = "openvino/model_server:latest-gpu"
+
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 def _green(s):  return f"\033[92m{s}\033[0m"
@@ -26,6 +47,7 @@ def _yellow(s): return f"\033[93m{s}\033[0m"
 def _red(s):    return f"\033[91m{s}\033[0m"
 def _bold(s):   return f"\033[1m{s}\033[0m"
 def _cyan(s):   return f"\033[96m{s}\033[0m"
+
 
 def banner():
     print(_bold("\n╔══════════════════════════════════════════════╗"))
@@ -70,239 +92,216 @@ def check_gpus():
     print(_bold("\nGPU Detection:"))
     gpus = detect_gpus()
     if not gpus:
-        print(_yellow("  No GPU detected — running in CPU-only mode (slow)"))
+        print(_yellow("  No GPU detected — OVMS will fall back to CPU (slow)"))
         return "cpu", []
 
     backend = gpus[0].backend
     total = sum(g.vram_gb for g in gpus)
     for g in gpus:
-        print(_green(f"  [{backend.upper()}] GPU{g.index}: {g.name}  {g.vram_gb}GB VRAM"))
-    print(_green(f"  Total: {len(gpus)} {backend.upper()} GPU(s), {total:.1f}GB VRAM"))
+        vram = f"  {g.vram_gb}GB VRAM" if g.vram_mb else ""
+        print(_green(f"  [{backend.upper()}] GPU{g.index}: {g.name}{vram}"))
+    if total:
+        print(_green(f"  Total: {len(gpus)} {backend.upper()} GPU(s), {total:.1f}GB VRAM"))
     return backend, gpus
 
 
-# ── 3. Ollama ─────────────────────────────────────────────────────────────────
+# ── 3. Locate OVMS (native binary or Docker) ─────────────────────────────────
 
-def check_ollama() -> bool:
+def find_ovms_binary() -> str:
+    """Return the path to a native ovms executable, or '' if none is found.
+
+    Honours the OVMS_DIR / OVMS_PATH env vars (the OVMS Windows package extracts
+    to a folder containing ovms.exe), then falls back to PATH.
+    """
+    exe = "ovms.exe" if _OS == "Windows" else "ovms"
+    for env in ("OVMS_PATH", "OVMS_DIR"):
+        base = os.environ.get(env)
+        if base:
+            cand = base if os.path.isfile(base) else os.path.join(base, exe)
+            if os.path.isfile(cand):
+                return cand
+            cand = os.path.join(base, "ovms", exe)  # common extracted layout
+            if os.path.isfile(cand):
+                return cand
+    found = shutil.which("ovms") or shutil.which(exe)
+    return found or ""
+
+
+def docker_available() -> bool:
+    if not shutil.which("docker"):
+        return False
     try:
-        import httpx
-        r = httpx.get("http://localhost:11434/api/tags", timeout=3.0)
-        return r.status_code == 200
+        r = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
+        return r.returncode == 0
     except Exception:
         return False
 
 
-def start_ollama(gpu_type: str, gpu_devices: str):
-    """
-    Launch `ollama serve` in the background with the correct GPU env var.
-    Waits up to 15 s for it to become responsive.
-    """
-    print(_yellow("  [SETUP] Starting Ollama..."))
-    env = os.environ.copy()
+# ── 4. Model preparation (export into the OVMS repository) ────────────────────
 
-    if gpu_type == "amd" and gpu_devices:
-        env["ROCR_VISIBLE_DEVICES"] = gpu_devices
-        print(_cyan(f"  ROCR_VISIBLE_DEVICES={gpu_devices}"))
-    elif gpu_type == "nvidia" and gpu_devices:
-        env["CUDA_VISIBLE_DEVICES"] = gpu_devices
-        print(_cyan(f"  CUDA_VISIBLE_DEVICES={gpu_devices}"))
-
+def _ensure_export_tool() -> str:
+    """Return a path to export_model.py, downloading it once if necessary."""
+    tools_dir = os.path.join(_HERE, "tools", "ovms")
+    os.makedirs(tools_dir, exist_ok=True)
+    dest = os.path.join(tools_dir, "export_model.py")
+    if os.path.isfile(dest):
+        return dest
+    print(_yellow("  [SETUP] Fetching OVMS export_model.py (one-time)..."))
     try:
-        subprocess.Popen(
-            ["ollama", "serve"],
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        print(_red("  [FAIL] 'ollama' not found — install from https://ollama.com"))
+        import urllib.request
+        urllib.request.urlretrieve(_EXPORT_TOOL_URL, dest)
+        print(_green("  [OK] export_model.py downloaded"))
+        return dest
+    except Exception as e:
+        print(_red(f"  [FAIL] Could not download export_model.py: {e}"))
+        print(_yellow(f"        Download it manually from {_EXPORT_TOOL_URL}"))
+        print(_yellow(f"        and place it at {dest}"))
+        return ""
+
+
+def _model_already_exported(model_name: str) -> bool:
+    """True if model_name is present in the OVMS repo config.json."""
+    if not os.path.isfile(_CONFIG_JSON):
         return False
-
-    for i in range(15):
-        time.sleep(1)
-        if check_ollama():
-            print(_green(f"  [OK] Ollama ready ({i + 1}s)"))
-            return True
-        sys.stdout.write(f"\r  Waiting for Ollama... {i + 1}s")
-        sys.stdout.flush()
-    print()
-    print(_red("  [FAIL] Ollama did not start in 15 s — run 'ollama serve' manually"))
-    return False
-
-
-# ── 4. vLLM ──────────────────────────────────────────────────────────────────
-
-def _vllm_installed() -> bool:
     try:
-        import importlib.util
-        return importlib.util.find_spec("vllm") is not None
+        with open(_CONFIG_JSON) as f:
+            cfg = json.load(f)
     except Exception:
         return False
+    names = [e.get("name") for e in cfg.get("mediapipe_config_list", [])]
+    names += [e.get("config", {}).get("name") for e in cfg.get("model_config_list", [])]
+    return model_name in names
 
 
-def check_vllm() -> bool:
-    try:
-        import httpx
-        from config import VLM_BASE_URL
-        r = httpx.get(f"{VLM_BASE_URL}/v1/models", timeout=2.0)
-        return r.status_code == 200
-    except Exception:
-        return False
+def _export_model(export_tool: str, source_model: str, model_name: str,
+                  device: str) -> bool:
+    """Run export_model.py to convert/pull a model into the OVMS repository.
 
-
-def start_vllm(gpu_type: str, gpu_devices: str) -> bool:
+    The `text_generation` subcommand handles both plain LLMs and vision-language
+    models — it runs optimum-cli for non-prebuilt sources (e.g. UI-TARS), writes
+    a graph.pbtxt, and appends the servable to config.json.
     """
-    Launch vLLM in the background and wait up to 5 minutes for it to be ready.
-    First run downloads the model (~16 GB) — that can take longer; we wait up to
-    10 minutes in that case.  Returns True if vLLM becomes responsive in time.
-    """
-    from config import (VLM_VLLM, VLM_BASE_URL, VLM_DTYPE,
-                        VLM_GPU_MEMORY_UTIL, VLM_MAX_MODEL_LEN,
-                        TENSOR_PARALLEL_SIZE)
-
-    port = VLM_BASE_URL.split(":")[-1]
-    cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-        "--model", VLM_VLLM,
-        "--port", port,
-        "--dtype", VLM_DTYPE,
-        "--max-model-len", str(VLM_MAX_MODEL_LEN),
-        "--gpu-memory-utilization", str(VLM_GPU_MEMORY_UTIL),
-    ]
-    if TENSOR_PARALLEL_SIZE > 1:
-        cmd += ["--tensor-parallel-size", str(TENSOR_PARALLEL_SIZE)]
-
-    env = os.environ.copy()
-    if gpu_type == "amd" and gpu_devices:
-        env["HIP_VISIBLE_DEVICES"] = gpu_devices
-        print(_cyan(f"  HIP_VISIBLE_DEVICES={gpu_devices}"))
-    elif gpu_type == "nvidia" and gpu_devices:
-        env["CUDA_VISIBLE_DEVICES"] = gpu_devices
-        print(_cyan(f"  CUDA_VISIBLE_DEVICES={gpu_devices}"))
-
-    # Write a log file so the user can tail it if needed
-    here = os.path.dirname(os.path.abspath(__file__))
-    log_path = os.path.join(here, "vllm.log")
-    log_file = open(log_path, "w")
-
-    print(_yellow(f"  [SETUP] Starting vLLM ({VLM_VLLM})..."))
-    print(_yellow(f"  Log: {log_path}  (tail -f vllm.log to watch progress)"))
-
-    try:
-        subprocess.Popen(cmd, env=env, stdout=log_file, stderr=log_file)
-    except FileNotFoundError:
-        print(_red("  [FAIL] vllm not found — pip install vllm"))
-        return False
-
-    # Poll until ready — allow up to 10 min (model may download on first run)
-    max_wait = 600
-    poll = 5
-    for i in range(0, max_wait, poll):
-        time.sleep(poll)
-        if check_vllm():
-            print(_green(f"\n  [OK] vLLM ready ({i + poll}s)"))
-            return True
-        elapsed = i + poll
-        sys.stdout.write(
-            f"\r  Waiting for vLLM... {elapsed}s / {max_wait}s  "
-            f"(first run downloads ~16 GB)"
-        )
-        sys.stdout.flush()
-
-    print()
-    print(_yellow(f"  [WARN] vLLM not ready after {max_wait}s"))
-    print(_yellow("  The agent will start using the Ollama VLM fallback."))
-    print(_yellow(f"  Check {log_path} for errors."))
-    return False
-
-
-# ── 5. Model checks ───────────────────────────────────────────────────────────
-from config import LLM_MODEL, VLM_OLLAMA
-
-UITARS_GGUF_NAME = "ui-tars-1.5-7b-q4_k_m.gguf"
-
-
-def get_pulled_models() -> list:
-    try:
-        import httpx
-        r = httpx.get("http://localhost:11434/api/tags", timeout=5.0)
-        return [m["name"] for m in r.json().get("models", [])]
-    except Exception:
-        return []
-
-
-def ensure_vlm_model(pulled: list) -> bool:
-    """Register ui-tars-1.5-7b-gui with Ollama from a local GGUF file."""
-    if any("ui-tars-1.5-7b-gui" in m for m in pulled):
+    if _model_already_exported(model_name):
+        print(_green(f"  [OK] {model_name:<24} already in repository"))
         return True
-    here = os.path.dirname(os.path.abspath(__file__))
-    gguf_path = os.path.join(here, UITARS_GGUF_NAME)
-    if not os.path.exists(gguf_path):
-        print(_yellow("  [INFO] UI-TARS GGUF not found — to use it via Ollama:"))
-        print(_yellow("    huggingface-cli download Mungert/UI-TARS-1.5-7B \\"))
-        print(_yellow("        --include '*.gguf' --local-dir . --local-dir-use-symlinks False"))
-        print(_yellow(f"    mv *Q4_K_M*.gguf {UITARS_GGUF_NAME}"))
+
+    print(_yellow(f"  [..] {model_name:<24} preparing from {source_model} (first run is slow)..."))
+    cmd = [
+        sys.executable, export_tool, "text_generation",
+        "--source_model", source_model,
+        "--model_name", model_name,
+        "--weight-format", "int4",
+        "--config_file_path", _CONFIG_JSON,
+        "--model_repository_path", _REPO,
+        "--target_device", device,
+    ]
+    ret = subprocess.run(cmd, cwd=_HERE).returncode
+    if ret == 0 and _model_already_exported(model_name):
+        print(_green(f"  [OK] {model_name} ready"))
+        return True
+    print(_red(f"  [FAIL] Could not export {model_name}"))
+    return False
+
+
+def ensure_models(device: str) -> bool:
+    """Make sure both servables exist in the OVMS repository / config.json."""
+    os.makedirs(_REPO, exist_ok=True)
+    export_tool = _ensure_export_tool()
+    if not export_tool:
         return False
-    print(_yellow("  [SETUP] Registering ui-tars-1.5-7b-gui with Ollama..."))
-    mf_path = "/tmp/ui-tars-1.5-7b-gui.Modelfile" if _OS != "Windows" else \
-              os.path.join(os.environ.get("TEMP", "C:\\Temp"), "ui-tars-1.5-7b-gui.Modelfile")
-    with open(mf_path, "w") as f:
-        f.write(f"FROM {gguf_path}\nPARAMETER num_ctx 4096\nPARAMETER num_predict 256\n")
-    ret = subprocess.run(["ollama", "create", "ui-tars-1.5-7b-gui", "-f", mf_path]).returncode
-    if ret == 0:
-        print(_green("  [OK] ui-tars-1.5-7b-gui registered"))
-    else:
-        print(_red("  [FAIL] ollama create failed"))
-    return ret == 0
+
+    ok = _export_model(export_tool, LLM_SOURCE, LLM_MODEL, device)
+    ok = _export_model(export_tool, VLM_SOURCE, VLM_MODEL, device) and ok
+    if not ok:
+        print(_yellow("  Model export needs the OVMS export toolchain. Install with:"))
+        print(_yellow('    pip install "optimum-intel[openvino]" nncf'))
+        print(_yellow(f"  (also: pip install -r requirements from {os.path.dirname(export_tool)})"))
+    return ok
 
 
-def check_models() -> bool:
-    pulled = get_pulled_models()
-    all_ok = True
+# ── 5. Start / check OVMS ─────────────────────────────────────────────────────
 
-    llm_base = LLM_MODEL.split(":")[0]
-    if any(llm_base in m for m in pulled):
-        print(_green(f"  [OK] {LLM_MODEL:<30} LLM — planning, routing, reflection"))
-    else:
-        print(_yellow(f"  [..] {LLM_MODEL:<30} not found — downloading (~9 GB)..."))
-        ret = subprocess.run(["ollama", "pull", LLM_MODEL]).returncode
-        if ret == 0:
-            print(_green(f"  [OK] {LLM_MODEL} downloaded"))
-        else:
-            print(_red(f"  [FAIL] Could not pull {LLM_MODEL}"))
-            all_ok = False
+def check_ovms() -> bool:
+    try:
+        import httpx
+        r = httpx.get(f"{OVMS_BASE_URL}/v1/config", timeout=3.0)
+        return r.status_code == 200
+    except Exception:
+        return False
 
-    # vLLM is already handling UI-TARS if it's running — skip Ollama VLM in that case
-    if check_vllm():
-        print(_green("  [OK] VLM served by vLLM (UI-TARS)"))
-        return all_ok
 
-    uitars_ok = any("ui-tars-1.5-7b-gui" in m for m in pulled)
-    vlm_fb_base = VLM_OLLAMA.split(":")[0]
-    fallback_ok = any(vlm_fb_base in m for m in pulled)
+def _both_servables_ready() -> bool:
+    try:
+        import httpx
+        r = httpx.get(f"{OVMS_BASE_URL}/v1/config", timeout=3.0)
+        if r.status_code != 200:
+            return False
+        body = r.text
+        return LLM_MODEL in body and VLM_MODEL in body
+    except Exception:
+        return False
 
-    if uitars_ok:
-        print(_green("  [OK] ui-tars-1.5-7b-gui               VLM primary (Ollama/GGUF)"))
-    else:
-        uitars_ok = ensure_vlm_model(pulled)
 
-    if not uitars_ok:
-        if fallback_ok:
-            print(_green(f"  [OK] {VLM_OLLAMA:<30} VLM fallback (Ollama)"))
-        else:
-            print(_yellow(f"  [..] {VLM_OLLAMA:<30} not found — downloading..."))
-            ret = subprocess.run(["ollama", "pull", VLM_OLLAMA]).returncode
-            if ret == 0:
-                print(_green(f"  [OK] {VLM_OLLAMA} downloaded"))
-                fallback_ok = True
-            else:
-                print(_red(f"  [FAIL] Could not pull {VLM_OLLAMA}"))
+def start_ovms_native(binary: str, device: str) -> bool:
+    print(_yellow(f"  [SETUP] Starting OVMS (native: {binary})..."))
+    cmd = [
+        binary,
+        "--config_path", _CONFIG_JSON,
+        "--rest_port", str(OVMS_REST_PORT),
+        "--target_device", device,
+    ]
+    log_path = os.path.join(_HERE, "ovms.log")
+    log_file = open(log_path, "w")
+    print(_yellow(f"  Log: {log_path}"))
+    try:
+        subprocess.Popen(cmd, cwd=_HERE, stdout=log_file, stderr=log_file)
+    except FileNotFoundError:
+        print(_red(f"  [FAIL] Could not launch {binary}"))
+        return False
+    return _wait_for_ovms(log_path)
 
-        if not fallback_ok:
-            print(_red("  [FAIL] No VLM available — grounding will not work."))
-            all_ok = False
 
-    return all_ok
+def start_ovms_docker(device: str) -> bool:
+    print(_yellow(f"  [SETUP] Starting OVMS (Docker: {_DOCKER_IMAGE})..."))
+    repo_mount = _REPO.replace("\\", "/")
+    cmd = ["docker", "run", "-d", "--rm",
+           "-p", f"{OVMS_REST_PORT}:{OVMS_REST_PORT}",
+           "-v", f"{repo_mount}:/models:rw"]
+    if _OS != "Windows":
+        # GPU passthrough for Linux Docker (Intel/AMD render nodes)
+        if os.path.exists("/dev/dri"):
+            cmd += ["--device", "/dev/dri"]
+    cmd += [_DOCKER_IMAGE,
+            "--config_path", "/models/config.json",
+            "--rest_port", str(OVMS_REST_PORT),
+            "--target_device", device]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        print(_red("  [FAIL] docker not found"))
+        return False
+    if r.returncode != 0:
+        print(_red(f"  [FAIL] docker run failed: {r.stderr.strip()[:300]}"))
+        return False
+    return _wait_for_ovms()
+
+
+def _wait_for_ovms(log_path: str = "") -> bool:
+    """Poll until both servables report ready (model load can take minutes)."""
+    max_wait, poll = 600, 5
+    for elapsed in range(poll, max_wait + poll, poll):
+        time.sleep(poll)
+        if _both_servables_ready():
+            print(_green(f"\n  [OK] OVMS ready — both models loaded ({elapsed}s)"))
+            return True
+        sys.stdout.write(f"\r  Waiting for OVMS... {elapsed}s / {max_wait}s "
+                         "(first run loads models into device memory)")
+        sys.stdout.flush()
+    print()
+    print(_red(f"  [FAIL] OVMS not ready after {max_wait}s"))
+    if log_path:
+        print(_yellow(f"  Check {log_path} for errors."))
+    return False
 
 
 # ── 6. Main ───────────────────────────────────────────────────────────────────
@@ -318,7 +317,6 @@ def main():
         print(_green("  [OK] Linux environment configured"))
     elif _OS == "Windows":
         print(_green("  [OK] Windows"))
-        # Check for Windows UIAutomation (Stage 0 grounding — big accuracy boost)
         try:
             import uiautomation  # noqa: F401
             print(_green("  [OK] uiautomation — Stage 0 UIA grounding active"))
@@ -335,47 +333,51 @@ def main():
         print(_green("  [OK] macOS — no extra setup needed"))
 
     # ── GPU detection ─────────────────────────────────────────────
-    gpu_type, gpus = check_gpus()
+    check_gpus()
+    device = TARGET_DEVICE
+    print(_cyan(f"  OVMS target device: {device}"))
 
-    from config import OLLAMA_GPU_DEVICES, VLLM_GPU_DEVICES
-
-    # ── Ollama ────────────────────────────────────────────────────
-    print(_bold("\nOllama (LLM):"))
-    if check_ollama():
-        print(_green("  [OK] Ollama already running on localhost:11434"))
+    # ── OVMS already running? ─────────────────────────────────────
+    print(_bold("\nOpenVINO Model Server:"))
+    if check_ovms():
+        print(_green(f"  [OK] OVMS already running on {OVMS_BASE_URL}"))
     else:
-        if not start_ollama(gpu_type, OLLAMA_GPU_DEVICES):
+        # ── Prepare models ────────────────────────────────────────
+        print(_bold("\nModels:"))
+        if not ensure_models(device):
+            print(_red("\n  Could not prepare models. Check the messages above."))
             sys.exit(1)
 
-    # ── vLLM ──────────────────────────────────────────────────────
-    print(_bold("\nvLLM (VLM — UI-TARS):"))
-    if check_vllm():
-        print(_green("  [OK] vLLM already running — UI-TARS active"))
-    elif not gpus:
-        print(_yellow("  No GPU found — skipping vLLM, using Ollama VLM fallback"))
-    elif not _vllm_installed():
-        print(_yellow("  vLLM not installed — using Ollama VLM fallback"))
-        print(_yellow("  To enable: pip install vllm"))
-    else:
-        start_vllm(gpu_type, VLLM_GPU_DEVICES)
+        # ── Launch OVMS (native preferred, Docker fallback) ───────
+        print(_bold("\nStarting server:"))
+        binary = find_ovms_binary()
+        started = False
+        if binary:
+            started = start_ovms_native(binary, device)
+        elif docker_available():
+            print(_yellow("  No native ovms found — using Docker."))
+            started = start_ovms_docker(device)
+        else:
+            print(_red("  [FAIL] Neither a native OVMS binary nor Docker is available."))
+            print(_yellow("  Install one of:"))
+            print(_yellow("    • OVMS binary — https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html"))
+            print(_yellow("      then set OVMS_DIR to its folder (containing ovms.exe), or add it to PATH"))
+            print(_yellow("    • Docker     — https://docs.docker.com/get-docker/"))
+            sys.exit(1)
 
-    # ── Models ────────────────────────────────────────────────────
-    print(_bold("\nModels:"))
-    if not check_models():
-        print(_red("\n  Some required models are missing. Check the messages above."))
-        sys.exit(1)
+        if not started:
+            sys.exit(1)
 
     # ── Summary ───────────────────────────────────────────────────
     print(_bold("\nStatus:"))
-    print(_green("  [OK] Ollama") + f"  → localhost:11434  ({LLM_MODEL})")
-    vlm_status = "vLLM (UI-TARS)" if check_vllm() else f"Ollama fallback ({VLM_OLLAMA})"
-    print(_green("  [OK] VLM   ") + f"  → {vlm_status}")
+    print(_green("  [OK] OVMS") + f"  → {OVMS_BASE_URL}/v3/chat/completions  (device {device})")
+    print(_green("  [OK] LLM ") + f"  → {LLM_MODEL}")
+    print(_green("  [OK] VLM ") + f"  → {VLM_MODEL}")
 
     # ── Launch agent ──────────────────────────────────────────────
     print(_bold("\nStarting Desktop GUI Agent...\n"))
     time.sleep(0.3)
-    here = os.path.dirname(os.path.abspath(__file__))
-    ret = subprocess.run([sys.executable, os.path.join(here, "main.py")] + sys.argv[1:])
+    ret = subprocess.run([sys.executable, os.path.join(_HERE, "main.py")] + sys.argv[1:])
     sys.exit(ret.returncode)
 
 

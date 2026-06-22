@@ -286,8 +286,8 @@ class DesktopGUIAgent(QMainWindow):
         if self.orchestrator is None:
             QMessageBox.critical(
                 self, "Agent offline",
-                "Orchestrator not initialized — is Ollama running?\n\n"
-                "Start it with:  ollama serve")
+                "Orchestrator not initialized — is OpenVINO Model Server running?\n\n"
+                "Start it with:  python start.py")
             return
 
         self._running = True

@@ -16,9 +16,9 @@ Run:
     python tests/live_usecases_test.py
 
 Requirements:
-    - Ollama running: ollama serve
-    - qwen3:8b  pulled (LLM)
-    - UI-TARS GGUF pulled (VLM fallback)
+    - OpenVINO Model Server running: python start.py
+    - qwen3-8b-int4-ov         served (LLM)
+    - ui-tars-1.5-7b-int4-ov   served (VLM)
     - Real Windows display, desktop visible, no fullscreen app
 """
 import os
@@ -337,7 +337,7 @@ def main():
         tester = LiveUseCaseTester()
     except Exception as e:
         print(f"\n[FATAL] Could not build orchestrator: {e}")
-        print("  Make sure 'ollama serve' is running.")
+        print("  Make sure OpenVINO Model Server is running (python start.py).")
         sys.exit(1)
 
     print(f"  Desktop  : {tester.desktop}")

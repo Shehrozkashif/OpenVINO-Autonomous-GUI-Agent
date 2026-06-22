@@ -30,24 +30,26 @@ python -m venv venv && venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Pull the models (only needed for live/e2e testing)
+### 4. Prepare the models (only needed for live/e2e testing)
 
-Model ids live in `config.py` — the single source of truth.
+Model ids live in `config.py` — the single source of truth. `start.py` pulls the
+LLM and converts UI-TARS into the OpenVINO Model Server repository, then launches
+OVMS serving both on port 8000:
 
 ```bash
-ollama pull qwen3:8b
-ollama pull hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S
+pip install "optimum-intel[openvino]" nncf   # first run only (UI-TARS conversion)
+python start.py                              # prepares models + starts OVMS + UI
 ```
 
 ### 5. Run tests
 
 ```bash
 pytest                    # unit tests — fast, no backend or desktop required
-python e2e_test.py        # end-to-end — requires Ollama running + a live desktop
+python e2e_test.py        # end-to-end — requires OVMS running + a live desktop
 ```
 
-The unit suite must pass on a machine with no Ollama and no GPU; anything that
-needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
+The unit suite must pass on a machine with no model server and no GPU; anything
+that needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
 `tests/unit/`.
 
 ---
@@ -72,7 +74,7 @@ needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
 |------|--------|
 | All OS input goes through `tools/desktop_control/controller.py` | Single place for platform differences (XTest vs pynput) and the kill switch |
 | Grounding coordinates are always physical screen pixels | Capture returns physical pixels; the controller expects physical pixels |
-| Agents depend on the `InferenceClient` Protocol, never on `OllamaClient` directly | Keeps future backends (OVMS, direct OpenVINO) drop-in compatible |
+| Agents depend on the `InferenceClient` Protocol, never on `OVMSClient` directly | Keeps the inference backend (OVMS today, anything else tomorrow) drop-in replaceable |
 | `type` steps must pass the action firewall (`core/safety/action_firewall.py`) | Deterministic protection against destructive shell commands |
 | Tasks completed via degraded paths must not be stored in success memory | Broken plans would otherwise poison future routing hints |
 
@@ -92,6 +94,6 @@ needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
 
 Open a GitHub issue with:
 - OS and Python version
-- VLM backend in use (vLLM or Ollama — shown at startup)
+- Target device in use (`TARGET_DEVICE` in `config.py` — GPU / CPU / NPU)
 - The instruction that failed
 - The full log output from the Agent Log panel

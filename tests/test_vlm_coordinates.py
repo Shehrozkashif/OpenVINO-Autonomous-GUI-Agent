@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from agents.grounding.grounding_agent import OCREngine, UIGroundingAgent
 from core.capture.screenshot import ScreenCapture, _screen_size
-from core.pipeline.ollama_client import OllamaClient
+from core.pipeline.ovms_client import OVMSClient
 
 
 # ── Expected regions ──────────────────────────────────────────────────────────
@@ -72,14 +72,14 @@ def run_vlm_coord_test():
 
     # ── Setup ──────────────────────────────────────────────────────────────────
     capturer = ScreenCapture()
-    client   = OllamaClient()
+    client   = OVMSClient()
     ocr      = OCREngine()
     grounder = UIGroundingAgent(client, capturer, ocr=ocr)
     sw, sh   = _screen_size()
 
     print(f"\nScreen: {sw}×{sh}")
     print(f"VLM model: {client.vlm_model}")
-    print(f"VLM backend: {'vLLM' if client.vlm_base_url != client.llm_base_url else 'Ollama'}")
+    print(f"VLM backend: OpenVINO Model Server ({client.base_url})")
 
     # ── Capture once and reuse ─────────────────────────────────────────────────
     print("\nCapturing screenshot…")
