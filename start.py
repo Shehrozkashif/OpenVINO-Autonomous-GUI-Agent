@@ -275,12 +275,33 @@ def _both_servables_ready() -> bool:
 
 def start_ovms_native(binary: str, device: str) -> bool:
     print(_yellow(f"  [SETUP] Starting OVMS (native: {binary})..."))
-    cmd = [
-        binary,
+    ovms_args = [
         "--config_path", _CONFIG_JSON,
         "--rest_port", str(OVMS_REST_PORT),
         "--target_device", device,
     ]
+    # ovms.exe needs the env from setupvars (its DLLs + bundled Python on PATH).
+    # Running setupvars in OUR shell would hijack the venv's Python (PYTHONHOME),
+    # so we run it only inside the ovms subprocess via a one-shot cmd wrapper.
+    ovms_dir = os.path.dirname(binary)
+    if _OS == "Windows":
+        setupvars = os.path.join(ovms_dir, "setupvars.bat")
+        inner = subprocess.list2cmdline([binary] + ovms_args)
+        if os.path.isfile(setupvars):
+            print(_green(f"  [OK] Sourcing {setupvars} for the OVMS process"))
+            full = f'call "{setupvars}" && {inner}'
+        else:
+            print(_yellow(f"  [WARN] setupvars.bat not found next to {binary}; "
+                          "starting ovms.exe directly (may fail to find its DLLs)"))
+            full = inner
+        cmd = ["cmd", "/c", full]
+    else:
+        setupvars = os.path.join(ovms_dir, "setupvars.sh")
+        if os.path.isfile(setupvars):
+            inner = subprocess.list2cmdline([binary] + ovms_args)
+            cmd = ["bash", "-c", f'. "{setupvars}" && exec {inner}']
+        else:
+            cmd = [binary] + ovms_args
     log_path = os.path.join(_HERE, "ovms.log")
     log_file = open(log_path, "w")
     print(_yellow(f"  Log: {log_path}"))
