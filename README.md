@@ -510,17 +510,20 @@ python export_model.py text_generation \
   --weight-format int4 --config_file_path models/config.json \
   --model_repository_path models --target_device GPU
 
-# 2. Serve both from one OVMS instance
+# 2. Serve both from one OVMS instance.
+#    NOTE: the device is baked into each servable at export time (step 1's
+#    --target_device); do NOT pass --target_device alongside --config_path
+#    ("Model parameters in CLI are exclusive with the config file").
 #    native (Linux):
-ovms --config_path models/config.json --rest_port 8000 --target_device GPU
+ovms --config_path models/config.json --rest_port 8000
 #    native (Windows) — source setupvars in the SAME shell that runs ovms.exe
 #    (do this in a separate terminal from your venv to avoid breaking Python):
 .\ovms\setupvars.bat
-.\ovms\ovms.exe --config_path models\config.json --rest_port 8000 --target_device GPU
+.\ovms\ovms.exe --config_path models\config.json --rest_port 8000
 #    or Docker (Linux only for GPU; --device /dev/dri is not available on Windows):
 docker run --rm -p 8000:8000 -v $PWD/models:/models:rw --device /dev/dri \
   openvino/model_server:latest-gpu \
-  --config_path /models/config.json --rest_port 8000 --target_device GPU
+  --config_path /models/config.json --rest_port 8000
 
 # 3. Launch the agent against the running server
 python main.py

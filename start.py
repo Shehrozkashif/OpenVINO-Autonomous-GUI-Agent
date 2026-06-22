@@ -275,10 +275,13 @@ def _both_servables_ready() -> bool:
 
 def start_ovms_native(binary: str, device: str) -> bool:
     print(_yellow(f"  [SETUP] Starting OVMS (native: {binary})..."))
+    # NOTE: --target_device is a per-model parameter and is mutually exclusive
+    # with --config_path ("Model parameters in CLI are exclusive with the config
+    # file"). The device was baked into each servable's graph.pbtxt at export
+    # time, so it must NOT be repeated here.
     ovms_args = [
         "--config_path", _CONFIG_JSON,
         "--rest_port", str(OVMS_REST_PORT),
-        "--target_device", device,
     ]
     # ovms.exe needs the env from setupvars (its DLLs + bundled Python on PATH).
     # Running setupvars in OUR shell would hijack the venv's Python (PYTHONHOME),
@@ -328,10 +331,11 @@ def start_ovms_docker(device: str) -> bool:
         # GPU passthrough for Linux Docker (Intel/AMD render nodes)
         if os.path.exists("/dev/dri"):
             cmd += ["--device", "/dev/dri"]
+    # --target_device is per-model and exclusive with --config_path; the device
+    # is already baked into each servable's graph.pbtxt at export time.
     cmd += [_DOCKER_IMAGE,
             "--config_path", "/models/config.json",
-            "--rest_port", str(OVMS_REST_PORT),
-            "--target_device", device]
+            "--rest_port", str(OVMS_REST_PORT)]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:
