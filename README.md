@@ -322,17 +322,35 @@ venv\Scripts\activate
 # 3. Install Python dependencies
 pip install -r requirements.txt
 
-# 4. Install OpenVINO™ Model Server (native Windows binary)
-# Download the OVMS Windows package, extract it, then point start.py at it:
-#   setx OVMS_DIR "C:\path\to\ovms"     (folder containing ovms.exe)
-# See https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html
+# 4. Install OpenVINO™ Model Server (native Windows binary — recommended for Arc GPU)
+#    Prerequisite: Microsoft Visual C++ Redistributable (x64)
+#    https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+#    Download + unpack the python_on build (GenAI LLM/VLM servables need Python).
+#    Use curl.exe / tar.exe explicitly (PowerShell aliases `curl` to Invoke-WebRequest):
+curl.exe -L https://github.com/openvinotoolkit/model_server/releases/download/v2026.2/ovms_windows_2026.2.0_python_on.zip -o ovms.zip
+tar.exe -xf ovms.zip      # extracts an .\ovms\ folder containing ovms.exe + setupvars.bat
+
+#    Point start.py at the folder that contains ovms.exe (restart the shell after setx):
+setx OVMS_DIR "$PWD\ovms"
 
 # 5. (first run only) install the conversion toolchain for UI-TARS
 pip install "optimum-intel[openvino]" nncf
 ```
 
+> **Do NOT run `setupvars.bat` / `setupvars.ps1` in the terminal you use for the
+> agent.** The `python_on` package sets `PYTHONHOME`/`PYTHONPATH` to OVMS's
+> bundled Python, which hijacks your venv (you'll get `ModuleNotFoundError: No
+> module named 'config'`). `start.py` sources `setupvars.bat` **inside the
+> `ovms.exe` subprocess only**, so just run `python start.py` from a clean
+> shell — no manual `setupvars` needed.
+
 > **Note:** On Windows, `pynput` uses `win32 SendInput` for keyboard injection —
 > no extra drivers or admin rights needed.
+
+> **Native vs Docker on Windows:** prefer the native binary above. Docker Desktop
+> on Windows cannot pass the Intel Arc™ GPU into a Linux container, so OVMS in
+> Docker only runs on CPU there. Native `ovms.exe` uses the GPU directly.
 
 ---
 
@@ -493,9 +511,13 @@ python export_model.py text_generation \
   --model_repository_path models --target_device GPU
 
 # 2. Serve both from one OVMS instance
-#    native:
+#    native (Linux):
 ovms --config_path models/config.json --rest_port 8000 --target_device GPU
-#    or Docker:
+#    native (Windows) — source setupvars in the SAME shell that runs ovms.exe
+#    (do this in a separate terminal from your venv to avoid breaking Python):
+.\ovms\setupvars.bat
+.\ovms\ovms.exe --config_path models\config.json --rest_port 8000 --target_device GPU
+#    or Docker (Linux only for GPU; --device /dev/dri is not available on Windows):
 docker run --rm -p 8000:8000 -v $PWD/models:/models:rw --device /dev/dri \
   openvino/model_server:latest-gpu \
   --config_path /models/config.json --rest_port 8000 --target_device GPU
@@ -560,6 +582,8 @@ Measured on an Intel® Arc™ 140V (16 GB) with OVMS (both INT4 models resident)
 | `qt.qpa.plugin: could not load xcb` | Run `start.py` — it auto-extracts `libxcb-cursor0` |
 | `Could not connect to OpenVINO Model Server` | Run `python start.py`; check `ovms.log` and `curl localhost:8000/v1/config` |
 | Native `ovms` not found | Set `OVMS_DIR` to the folder containing `ovms.exe`, or install Docker |
+| `ModuleNotFoundError: No module named 'config'` (Windows) | You ran OVMS's `setupvars` in your agent shell — it hijacks the venv's Python. Open a fresh terminal, activate the venv, and run `python start.py` (it handles `setupvars` for ovms.exe itself) |
+| OVMS in Docker only uses CPU (Windows) | Expected — Docker on Windows can't pass the Intel GPU to a Linux container. Install the native `ovms.exe` (set `OVMS_DIR`) for GPU |
 | Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers; (Docker/Linux) pass `/dev/dri` |
 | `No JSON array in router response` | Rare LLM format issue; retry the task |
 | Agent clicks wrong place | Lower screen scaling or check `DISPLAY` env var points to your active session |
