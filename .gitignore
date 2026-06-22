@@ -41,3 +41,6 @@ env/
 
 # Docker
 *.pid
+
+# Generated OVMS launcher (Windows)
+_run_ovms.bat
