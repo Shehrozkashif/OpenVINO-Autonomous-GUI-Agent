@@ -160,31 +160,33 @@ def _ensure_export_tool() -> str:
 
 
 def _ensure_hf_cli():
-    """Make the legacy `huggingface-cli` command resolve.
+    """Guarantee a WORKING `huggingface-cli` for export_model.py.
 
-    export_model.py downloads pre-converted OpenVINO models with
-    `huggingface-cli download ...`, but huggingface_hub >= 1.0 removed that
-    command in favour of `hf`. If only `hf` is present, drop a thin shim so the
-    legacy invocation keeps working.
+    export_model.py downloads pre-converted OpenVINO models via
+    `huggingface-cli download ...`. huggingface_hub >= 1.0 replaced that command
+    with `hf` and ships a `huggingface-cli` stub that just errors out — so we
+    cannot rely on it being absent. Drop a shim that forwards to `hf` into a
+    dedicated dir and PREPEND it to PATH so it wins over the broken stub.
     """
-    if shutil.which("huggingface-cli"):
-        return
     if not shutil.which("hf"):
-        return  # nothing to shim onto — optimum-intel install provides one of them
-    scripts_dir = os.path.dirname(sys.executable)
+        return  # no `hf` to forward to — leave export_model.py to its own CLI
+    shim_dir = os.path.join(_HERE, "tools", "ovms", "_shims")
+    os.makedirs(shim_dir, exist_ok=True)
     try:
         if _OS == "Windows":
-            shim = os.path.join(scripts_dir, "huggingface-cli.bat")
-            with open(shim, "w") as f:
+            with open(os.path.join(shim_dir, "huggingface-cli.bat"), "w") as f:
                 f.write("@echo off\r\nhf %*\r\n")
         else:
-            shim = os.path.join(scripts_dir, "huggingface-cli")
+            shim = os.path.join(shim_dir, "huggingface-cli")
             with open(shim, "w") as f:
                 f.write('#!/bin/sh\nexec hf "$@"\n')
             os.chmod(shim, 0o755)
-        print(_green("  [OK] huggingface-cli → hf shim created"))
     except Exception as e:
         print(_yellow(f"  [WARN] Could not create huggingface-cli shim: {e}"))
+        return
+    if shim_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = shim_dir + os.pathsep + os.environ.get("PATH", "")
+    print(_green("  [OK] huggingface-cli → hf shim active"))
 
 
 def _model_already_exported(model_name: str) -> bool:
