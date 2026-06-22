@@ -159,6 +159,34 @@ def _ensure_export_tool() -> str:
         return ""
 
 
+def _ensure_hf_cli():
+    """Make the legacy `huggingface-cli` command resolve.
+
+    export_model.py downloads pre-converted OpenVINO models with
+    `huggingface-cli download ...`, but huggingface_hub >= 1.0 removed that
+    command in favour of `hf`. If only `hf` is present, drop a thin shim so the
+    legacy invocation keeps working.
+    """
+    if shutil.which("huggingface-cli"):
+        return
+    if not shutil.which("hf"):
+        return  # nothing to shim onto — optimum-intel install provides one of them
+    scripts_dir = os.path.dirname(sys.executable)
+    try:
+        if _OS == "Windows":
+            shim = os.path.join(scripts_dir, "huggingface-cli.bat")
+            with open(shim, "w") as f:
+                f.write("@echo off\r\nhf %*\r\n")
+        else:
+            shim = os.path.join(scripts_dir, "huggingface-cli")
+            with open(shim, "w") as f:
+                f.write('#!/bin/sh\nexec hf "$@"\n')
+            os.chmod(shim, 0o755)
+        print(_green("  [OK] huggingface-cli → hf shim created"))
+    except Exception as e:
+        print(_yellow(f"  [WARN] Could not create huggingface-cli shim: {e}"))
+
+
 def _model_already_exported(model_name: str) -> bool:
     """True if model_name is present in the OVMS repo config.json."""
     if not os.path.isfile(_CONFIG_JSON):
@@ -206,6 +234,7 @@ def _export_model(export_tool: str, source_model: str, model_name: str,
 def ensure_models(device: str) -> bool:
     """Make sure both servables exist in the OVMS repository / config.json."""
     os.makedirs(_REPO, exist_ok=True)
+    _ensure_hf_cli()
     export_tool = _ensure_export_tool()
     if not export_tool:
         return False
