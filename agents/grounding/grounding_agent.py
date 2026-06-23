@@ -561,31 +561,54 @@ class UIGroundingAgent:
                 min(int(py / dh * screen_h), screen_h - 1),
             )
 
-        # UI-TARS native action format (0-1000 scale, independent of display size):
+        # UI-TARS native action format:
         #   click(start_box='[[x1, y1, x2, y2]]')
-        # Bracket count varies in practice ('[[', '[[[', …) — tolerate 0-4.
+        # Bracket style varies wildly: '[[', '[[[', '(', '[(', etc.
+        # Scale interpretation: the prompt asks for 0-1000 but the OVMS-served
+        # INT4 UI-TARS often emits coordinates in the screenshot's pixel space
+        # instead.  Heuristic: if any coordinate exceeds 1000, treat ALL values
+        # as display-space pixels; otherwise use the 0-1000 convention.
+        _OPEN = r"[\[\(]{0,4}"
+        _CLOSE = r"[\]\)]{0,4}"
+
+        def _scale_box_coord(val: float, screen_dim: int, display_dim: int) -> int:
+            """Convert a VLM coordinate to screen pixels.
+
+            If val > 1000 it must be a display-space pixel, not 0-1000.
+            If display_dim is available and val fits within it, treat as pixel.
+            Otherwise fall back to 0-1000 normalised interpretation.
+            """
+            if val > 1000:
+                return _px_to_screen(val, 0)[0] if screen_dim == screen_w else _px_to_screen(0, val)[1]
+            if display_dim > 1 and val <= display_dim:
+                return min(int(val / display_dim * screen_dim), screen_dim - 1)
+            return int(val / 1000 * screen_dim)
+
         m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _OPEN +
             r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
-            r"\]{0,4}'?\s*\)",
+            + _CLOSE + r"'?\s*\)",
             text,
         )
         if m:
             x1, y1, x2, y2 = (float(m.group(i)) for i in range(1, 5))
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-            return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.90)
+            sx = _scale_box_coord(cx, screen_w, dw)
+            sy = _scale_box_coord(cy, screen_h, dh)
+            return (sx, sy, 0.90)
 
-        # 2-value form: model emits [[cx, cy]] instead of [[x1,y1,x2,y2]].
-        # Treat as center point on the 0-1000 scale.
+        # 2-value form: model emits [[cx, cy]] or (cx, cy) instead of a full bbox.
         m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _OPEN +
             r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
-            r"\s*[\]\)']+",
+            r"\s*[\]\)\s']+",
             text,
         )
         if m:
             cx, cy = float(m.group(1)), float(m.group(2))
-            return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.80)
+            sx = _scale_box_coord(cx, screen_w, dw)
+            sy = _scale_box_coord(cy, screen_h, dh)
+            return (sx, sy, 0.80)
 
         # JSON block — x/y may be:
         #   0-1 normalised floats  (model followed instructions)

@@ -37,6 +37,12 @@ OVMS_REST_PORT = 8000
 #   "AUTO" → let OpenVINO pick the best available device
 TARGET_DEVICE = "GPU"
 
+# KV-cache budget PER MODEL (GB).  Both models share the same GPU memory, so the
+# total KV-cache allocation is 2 × this value.  On a 16 GB GPU with two INT4 7–8 B
+# models (~5 GB weights each), 2 GB per model is a safe default.  Increase on GPUs
+# with more VRAM (e.g. 4–6 on a 24 GB card) for longer context windows.
+KV_CACHE_SIZE_GB = 2
+
 # Local directory OVMS uses as its model repository (holds the IR models and the
 # generated config.json). Relative to the project root.
 MODEL_REPOSITORY_PATH = "models"

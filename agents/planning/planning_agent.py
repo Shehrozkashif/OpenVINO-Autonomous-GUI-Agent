@@ -205,7 +205,7 @@ Turn each sub-task into the SHORTEST correct sequence of atomic actions.
 
 ━━━ ACTION REFERENCE ━━━
 click / right_click / double_click  →  target = exact visible text label (1-4 words MAX, never null)
-                                       GOOD targets: "Calculator" "Code" "File" "Save" "OK" "shehrozbaloch"
+                                       GOOD targets: "Calculator" "Code" "File" "Save" "OK" "Username"
                                        BAD targets:  "GNOME Calculator icon" "the VS Code app" "click here"
 type                                →  value  = exact string to type (never null)
 key_press                           →  key    = single key name:

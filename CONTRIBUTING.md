@@ -37,9 +37,15 @@ LLM and converts UI-TARS into the OpenVINO Model Server repository, then launche
 OVMS serving both on port 8000:
 
 ```bash
-pip install "optimum-intel[openvino]" nncf   # first run only (UI-TARS conversion)
+# The conversion toolchain (optimum-intel, nncf) is included in requirements.txt.
+# On Windows: install the native ovms.exe and set OVMS_DIR (see README.md).
+# On Linux:   docker pull openvino/model_server:latest-gpu
 python start.py                              # prepares models + starts OVMS + UI
 ```
+
+> **First run takes 30–60 minutes** for the UI-TARS INT4 conversion. Subsequent
+> runs skip this step. If conversion produces files with broken permissions on
+> Windows, delete the model folder from an elevated terminal and re-run `start.py`.
 
 ### 5. Run tests
 

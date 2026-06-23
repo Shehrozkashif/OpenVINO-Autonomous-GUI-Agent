@@ -25,7 +25,7 @@ import time
 
 from config import (LLM_MODEL, LLM_SOURCE, VLM_MODEL, VLM_SOURCE,
                     OVMS_BASE_URL, OVMS_REST_PORT, TARGET_DEVICE,
-                    MODEL_REPOSITORY_PATH)
+                    MODEL_REPOSITORY_PATH, KV_CACHE_SIZE_GB)
 
 _OS = platform.system()
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -224,6 +224,7 @@ def _export_model(export_tool: str, source_model: str, model_name: str,
         "--config_file_path", _CONFIG_JSON,
         "--model_repository_path", _REPO,
         "--target_device", device,
+        "--cache_size", str(KV_CACHE_SIZE_GB),
     ]
     ret = subprocess.run(cmd, cwd=_HERE).returncode
     if ret == 0 and _model_already_exported(model_name):
@@ -244,9 +245,12 @@ def ensure_models(device: str) -> bool:
     ok = _export_model(export_tool, LLM_SOURCE, LLM_MODEL, device)
     ok = _export_model(export_tool, VLM_SOURCE, VLM_MODEL, device) and ok
     if not ok:
-        print(_yellow("  Model export needs the OVMS export toolchain. Install with:"))
-        print(_yellow('    pip install "optimum-intel[openvino]" nncf'))
-        print(_yellow(f"  (also: pip install -r requirements from {os.path.dirname(export_tool)})"))
+        print(_yellow("  Model export failed. Check the output above for the specific error."))
+        print(_yellow("  Common causes:"))
+        print(_yellow("    - First-run UI-TARS conversion needs ~16 GB RAM and internet access"))
+        print(_yellow("    - Missing toolchain: pip install -r requirements.txt"))
+        print(_yellow("  On Windows: if model files have 'Access denied', delete the model folder"))
+        print(_yellow("  from an elevated terminal and re-run this script."))
     return ok
 
 
@@ -321,23 +325,64 @@ def start_ovms_native(binary: str, device: str) -> bool:
     return _wait_for_ovms(log_path)
 
 
+def _ensure_docker_cpu_graphs() -> str:
+    """Create CPU-mode graph.pbtxt overlays for Docker on Windows.
+
+    Docker Desktop on Windows cannot pass the Intel GPU into a Linux container,
+    so models exported with ``device: "GPU"`` fail to load.  This writes thin
+    overlay files that switch the device to ``"CPU"`` and returns the overlay
+    base directory (to be mounted with ``-v`` over the per-model graph.pbtxt).
+    """
+    overlay_dir = os.path.join(_REPO, ".docker-cpu-overlay")
+    for model_name in (LLM_MODEL, VLM_MODEL):
+        src = os.path.join(_REPO, model_name, "graph.pbtxt")
+        dst_dir = os.path.join(overlay_dir, model_name)
+        dst = os.path.join(dst_dir, "graph.pbtxt")
+        os.makedirs(dst_dir, exist_ok=True)
+        if not os.path.isfile(src):
+            continue
+        with open(src) as f:
+            content = f.read()
+        cpu_content = content.replace('device: "GPU"', 'device: "CPU"')
+        if not os.path.isfile(dst) or open(dst).read() != cpu_content:
+            with open(dst, "w") as f:
+                f.write(cpu_content)
+    return overlay_dir
+
+
 def start_ovms_docker(device: str) -> bool:
     print(_yellow(f"  [SETUP] Starting OVMS (Docker: {_DOCKER_IMAGE})..."))
     repo_mount = _REPO.replace("\\", "/")
     cmd = ["docker", "run", "-d", "--rm",
            "-p", f"{OVMS_REST_PORT}:{OVMS_REST_PORT}",
            "-v", f"{repo_mount}:/models:rw"]
-    if _OS != "Windows":
+
+    if _OS == "Windows":
+        # Docker Desktop on Windows runs Linux VMs without GPU passthrough for
+        # Intel iGPU/Arc.  Override graph.pbtxt files to use CPU.
+        print(_yellow("  [NOTE] Docker on Windows — GPU not available in container, using CPU"))
+        overlay = _ensure_docker_cpu_graphs()
+        for model_name in (LLM_MODEL, VLM_MODEL):
+            overlay_graph = os.path.join(overlay, model_name, "graph.pbtxt").replace("\\", "/")
+            cmd += ["-v", f"{overlay_graph}:/models/{model_name}/graph.pbtxt:ro"]
+    else:
         # GPU passthrough for Linux Docker (Intel/AMD render nodes)
         if os.path.exists("/dev/dri"):
             cmd += ["--device", "/dev/dri"]
+
     # --target_device is per-model and exclusive with --config_path; the device
     # is already baked into each servable's graph.pbtxt at export time.
     cmd += [_DOCKER_IMAGE,
             "--config_path", "/models/config.json",
             "--rest_port", str(OVMS_REST_PORT)]
+
+    # Prevent MSYS/Git-Bash from mangling /models paths on Windows.
+    env = os.environ.copy()
+    if _OS == "Windows":
+        env["MSYS_NO_PATHCONV"] = "1"
+
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, env=env)
     except FileNotFoundError:
         print(_red("  [FAIL] docker not found"))
         return False

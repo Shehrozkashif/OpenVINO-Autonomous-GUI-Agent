@@ -63,7 +63,7 @@ Agent: [ROUTER]   2 sub-tasks: open Firefox → navigate to URL
 | 🧠 | **Learns from experience** | Successful task plans and known failure patterns are stored in SQLite and reused |
 | ⚡ | **Burst execution** | Recognised multi-step patterns (context menus, rename dialogs) run with zero LLM calls |
 | 🖥 | **Cross-platform** | Windows 10/11 and Linux (X11), with per-platform input and capture backends |
-| 💾 | **Fits 6 GB VRAM** | Quantised 7–8 B models with automatic model swapping — no datacenter GPU required |
+| 💾 | **Fits 16 GB VRAM** | Two INT4 quantised 7–8 B models run simultaneously on a 16 GB Intel GPU — no datacenter hardware required |
 
 ---
 
@@ -232,7 +232,8 @@ Model ids live in [`config.py`](config.py) — the single source of truth.
 Both models are served by a **single OpenVINO™ Model Server instance** on one
 OpenAI-compatible endpoint (`http://localhost:8000/v3/chat/completions`) and
 selected per request by the `model` field. On a 16 GB Intel® GPU both INT4
-models (~4.5 GB each) stay resident — no model swapping.
+models (~5 GB weights each) plus KV-cache (2 GB each by default) stay resident —
+no model swapping. Adjust `KV_CACHE_SIZE_GB` in [`config.py`](config.py) for your GPU.
 
 > **OpenVINO™ backend** — inference runs entirely through OpenVINO™ Model Server
 > (OVMS) on Intel® CPU / iGPU / Arc™ GPU / NPU. The `InferenceClient` protocol in
@@ -244,18 +245,45 @@ models (~4.5 GB each) stay resident — no model swapping.
 
 ## Quick Start
 
+### Windows (Intel Arc / Core Ultra — recommended)
+
+```powershell
+# 1. Clone and set up
+git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
+cd intel-openvino-desktop-agent
+python -m venv venv
+venv\Scripts\activate
+
+# 2. Install ALL dependencies (includes the model conversion toolchain)
+pip install -r requirements.txt
+
+# 3. Install OVMS native binary (one-time)
+#    Prerequisite: Visual C++ Redistributable x64 — https://aka.ms/vs/17/release/vc_redist.x64.exe
+curl.exe -L https://github.com/openvinotoolkit/model_server/releases/download/v2026.2/ovms_windows_2026.2.0_python_on.zip -o ovms.zip
+tar.exe -xf ovms.zip          # creates .\ovms\ with ovms.exe + setupvars.bat
+setx OVMS_DIR "%CD%\ovms"     # tell start.py where to find ovms.exe (restart shell after this)
+
+# 4. Run — first launch downloads/converts models (30–60 min), then starts the GUI
+python start.py
+```
+
+### Linux
+
 ```bash
 git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
 cd intel-openvino-desktop-agent
-python -m venv venv && source venv/bin/activate    # Windows: venv\Scripts\activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+
+# Install OVMS — Docker is easiest on Linux:
+docker pull openvino/model_server:latest-gpu
+
 python start.py
 ```
 
 `start.py` does the rest: detects your GPU, prepares both OpenVINO models in the
-OVMS model repository (converting UI-TARS on first run), starts OpenVINO™ Model
-Server (native binary if present, otherwise the Docker image), waits for both
-models to load, and opens the agent GUI.
+OVMS model repository (converting UI-TARS on first run — **this takes 30–60 minutes**),
+starts OpenVINO™ Model Server, waits for both models to load, and opens the agent GUI.
 
 ```bash
 # Pre-fill the instruction box
@@ -274,13 +302,59 @@ python start.py --prompt "Search for OpenVINO documentation" --auto-run
 | OS | Ubuntu 22.04 / Windows 10 | Ubuntu 24.04 / Windows 11 |
 | Python | 3.10 | 3.12 |
 | RAM | 16 GB | 32 GB |
-| VRAM | 6 GB (models swap) | 24 GB (both models resident) |
+| GPU VRAM | 16 GB Intel Arc / iGPU (both models resident) | 24 GB+ (larger KV-cache for longer contexts) |
 | Disk | 20 GB free | 30 GB free |
 | Display | X11 (Linux) | X11 or Windows desktop |
+
+> Both INT4 models (~5 GB weights each) plus KV-cache must fit in GPU memory.
+> On a 16 GB GPU the default `KV_CACHE_SIZE_GB = 2` per model works well.
+> Increase it in [`config.py`](config.py) if you have a larger GPU.
 
 ---
 
 ## Installation
+
+### Windows (recommended for Intel Arc / Core Ultra)
+
+```powershell
+# 1. Clone the repository
+git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
+cd intel-openvino-desktop-agent
+
+# 2. Create and activate a virtual environment
+python -m venv venv
+venv\Scripts\activate
+
+# 3. Install Python dependencies (includes model conversion toolchain)
+pip install -r requirements.txt
+
+# 4. Install OpenVINO™ Model Server — NATIVE BINARY (ovms.exe)
+#    Prerequisite: Microsoft Visual C++ Redistributable (x64)
+#    https://aka.ms/vs/17/release/vc_redist.x64.exe
+#
+#    Download the python_on build (GenAI LLM/VLM servables need the bundled Python).
+#    Use curl.exe / tar.exe explicitly (PowerShell aliases `curl` to Invoke-WebRequest):
+curl.exe -L https://github.com/openvinotoolkit/model_server/releases/download/v2026.2/ovms_windows_2026.2.0_python_on.zip -o ovms.zip
+tar.exe -xf ovms.zip      # extracts .\ovms\ containing ovms.exe + setupvars.bat
+
+#    Point start.py at the folder (restart the shell after setx):
+setx OVMS_DIR "%CD%\ovms"
+
+# 5. Run
+python start.py
+```
+
+> **Why native `ovms.exe` on Windows?** Docker Desktop on Windows runs Linux
+> containers in a VM — it cannot pass the Intel Arc / iGPU into the container.
+> `start.py` handles this automatically (falls back to CPU-mode Docker if no
+> native binary is found), but inference is ~5–10× slower on CPU.  The native
+> `ovms.exe` accesses the GPU directly and is strongly recommended for Windows.
+
+> **Do NOT run `setupvars.bat` / `setupvars.ps1` in your agent terminal.** The
+> `python_on` package sets `PYTHONHOME`/`PYTHONPATH` to OVMS's bundled Python,
+> which hijacks your venv (`ModuleNotFoundError: No module named 'config'`).
+> `start.py` sources `setupvars.bat` **inside the `ovms.exe` subprocess only** —
+> just run `python start.py` from a clean shell.
 
 ### Linux
 
@@ -293,64 +367,34 @@ cd intel-openvino-desktop-agent
 python3 -m venv venv
 source venv/bin/activate
 
-# 3. Install Python dependencies
+# 3. Install Python dependencies (includes model conversion toolchain)
 pip install -r requirements.txt
 
-# 4. Install OpenVINO™ Model Server  (native binary or Docker)
-#    Docker (simplest on Linux):
+# 4. Install OpenVINO™ Model Server
+#    Docker (simplest — supports GPU passthrough on Linux):
 docker pull openvino/model_server:latest-gpu
-#    Native binary: see https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html
+#    Or native binary: see https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html
 
-# 5. (first run only) install the conversion toolchain for UI-TARS
-pip install "optimum-intel[openvino]" nncf
+# 5. Run
+python start.py
 ```
 
 > **No sudo required.** `start.py` extracts the missing Qt system library
 > (`libxcb-cursor0`) to `~/.local_xcb` automatically on first run.
 
-### Windows
+### OVMS Method Comparison
 
-```powershell
-# 1. Clone the repository
-git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
-cd intel-openvino-desktop-agent
+| Method | Platform | GPU Support | Speed | Status |
+|--------|----------|-------------|-------|--------|
+| **Native `ovms.exe`** | Windows | Direct GPU (Intel Arc, iGPU, NPU) | Fast (~1–3 s/query) | **Recommended on Windows** |
+| **Docker** `openvino/model_server:latest-gpu` | Linux | GPU via `/dev/dri` passthrough | Fast (~1–3 s/query) | **Recommended on Linux** |
+| **Docker** on Windows | Windows | CPU only (auto-detected) | Slow (~10–15 s/query) | **Works — fallback option** |
+| Native `ovms` binary | Linux | Direct GPU access | Fast | Supported but Docker is simpler |
 
-# 2. Create and activate a virtual environment
-python -m venv venv
-venv\Scripts\activate
-
-# 3. Install Python dependencies
-pip install -r requirements.txt
-
-# 4. Install OpenVINO™ Model Server (native Windows binary — recommended for Arc GPU)
-#    Prerequisite: Microsoft Visual C++ Redistributable (x64)
-#    https://aka.ms/vs/17/release/vc_redist.x64.exe
-
-#    Download + unpack the python_on build (GenAI LLM/VLM servables need Python).
-#    Use curl.exe / tar.exe explicitly (PowerShell aliases `curl` to Invoke-WebRequest):
-curl.exe -L https://github.com/openvinotoolkit/model_server/releases/download/v2026.2/ovms_windows_2026.2.0_python_on.zip -o ovms.zip
-tar.exe -xf ovms.zip      # extracts an .\ovms\ folder containing ovms.exe + setupvars.bat
-
-#    Point start.py at the folder that contains ovms.exe (restart the shell after setx):
-setx OVMS_DIR "$PWD\ovms"
-
-# 5. (first run only) install the conversion toolchain for UI-TARS
-pip install "optimum-intel[openvino]" nncf
-```
-
-> **Do NOT run `setupvars.bat` / `setupvars.ps1` in the terminal you use for the
-> agent.** The `python_on` package sets `PYTHONHOME`/`PYTHONPATH` to OVMS's
-> bundled Python, which hijacks your venv (you'll get `ModuleNotFoundError: No
-> module named 'config'`). `start.py` sources `setupvars.bat` **inside the
-> `ovms.exe` subprocess only**, so just run `python start.py` from a clean
-> shell — no manual `setupvars` needed.
-
-> **Note:** On Windows, `pynput` uses `win32 SendInput` for keyboard injection —
-> no extra drivers or admin rights needed.
-
-> **Native vs Docker on Windows:** prefer the native binary above. Docker Desktop
-> on Windows cannot pass the Intel Arc™ GPU into a Linux container, so OVMS in
-> Docker only runs on CPU there. Native `ovms.exe` uses the GPU directly.
+> **Docker on Windows note:** `start.py` automatically detects that Docker on
+> Windows cannot access the Intel GPU and creates CPU-mode overlay files for the
+> model graphs. Both models load and produce correct results, but inference is
+> ~5–10× slower than GPU. Use the native `ovms.exe` for production use on Windows.
 
 ---
 
@@ -497,30 +541,33 @@ automates). The export helper is the one bundled with OVMS —
 [`demos/common/export_models/export_model.py`](https://github.com/openvinotoolkit/model_server/tree/main/demos/common/export_models).
 
 ```bash
-pip install "optimum-intel[openvino]" nncf
+pip install -r requirements.txt   # includes optimum-intel[openvino] and nncf
 
 # 1. Pull / convert both models into the OVMS repository (writes models/config.json)
-python export_model.py text_generation \
+#    --cache_size 2 = 2 GB KV-cache per model (safe for 16 GB GPUs with two models)
+python tools/ovms/export_model.py text_generation \
   --source_model OpenVINO/Qwen3-8B-int4-ov  --model_name qwen3-8b-int4-ov \
   --weight-format int4 --config_file_path models/config.json \
-  --model_repository_path models --target_device GPU
+  --model_repository_path models --target_device GPU --cache_size 2
 
-python export_model.py text_generation \
+python tools/ovms/export_model.py text_generation \
   --source_model ByteDance-Seed/UI-TARS-1.5-7B --model_name ui-tars-1.5-7b-int4-ov \
   --weight-format int4 --config_file_path models/config.json \
-  --model_repository_path models --target_device GPU
+  --model_repository_path models --target_device GPU --cache_size 2
 
 # 2. Serve both from one OVMS instance.
 #    NOTE: the device is baked into each servable at export time (step 1's
 #    --target_device); do NOT pass --target_device alongside --config_path
 #    ("Model parameters in CLI are exclusive with the config file").
+#
 #    native (Linux):
 ovms --config_path models/config.json --rest_port 8000
-#    native (Windows) — source setupvars in the SAME shell that runs ovms.exe
-#    (do this in a separate terminal from your venv to avoid breaking Python):
-.\ovms\setupvars.bat
-.\ovms\ovms.exe --config_path models\config.json --rest_port 8000
-#    or Docker (Linux only for GPU; --device /dev/dri is not available on Windows):
+#
+#    native (Windows) — launch via a wrapper .bat so setupvars runs in the ovms
+#    subprocess only (do NOT source setupvars in your agent terminal):
+.\ovms\setupvars.bat && .\ovms\ovms.exe --config_path models\config.json --rest_port 8000
+#
+#    Docker (Linux — supports GPU; NOT recommended on Windows):
 docker run --rm -p 8000:8000 -v $PWD/models:/models:rw --device /dev/dri \
   openvino/model_server:latest-gpu \
   --config_path /models/config.json --rest_port 8000
@@ -586,11 +633,14 @@ Measured on an Intel® Arc™ 140V (16 GB) with OVMS (both INT4 models resident)
 | `Could not connect to OpenVINO Model Server` | Run `python start.py`; check `ovms.log` and `curl localhost:8000/v1/config` |
 | Native `ovms` not found | Set `OVMS_DIR` to the folder containing `ovms.exe`, or install Docker |
 | `ModuleNotFoundError: No module named 'config'` (Windows) | You ran OVMS's `setupvars` in your agent shell — it hijacks the venv's Python. Open a fresh terminal, activate the venv, and run `python start.py` (it handles `setupvars` for ovms.exe itself) |
-| OVMS in Docker only uses CPU (Windows) | Expected — Docker on Windows can't pass the Intel GPU to a Linux container. Install the native `ovms.exe` (set `OVMS_DIR`) for GPU |
+| OVMS in Docker is slow on Windows | Expected — Docker on Windows uses CPU only (no GPU passthrough). `start.py` handles this automatically by switching to CPU-mode graphs. Install native `ovms.exe` (set `OVMS_DIR`) for GPU-accelerated inference |
+| `Requested KV-cache size is larger than available memory` | Both models' KV-caches exceed your GPU's VRAM. Lower `KV_CACHE_SIZE_GB` in `config.py` (default: 2 GB per model). On a 16 GB GPU the total must be: 2 × `KV_CACHE_SIZE_GB` + ~10 GB model weights < 16 GB |
+| Model files have `Access is denied` / broken permissions (Windows) | The `optimum-cli` conversion can create files with restrictive NTFS ACLs. Delete the model folder from an **elevated** (Run as Administrator) terminal: `rd /s /q models\ui-tars-1.5-7b-int4-ov`, then re-run `python start.py` to re-export |
 | Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers; (Docker/Linux) pass `/dev/dri` |
 | `No JSON array in router response` | Rare LLM format issue; retry the task |
 | Agent clicks wrong place | Lower screen scaling or check `DISPLAY` env var points to your active session |
 | Wayland session (Linux) | Log out, select "GNOME on Xorg" at login screen, log back in |
+| First run takes very long | Expected — UI-TARS conversion (INT4 quantization of a 7B model) takes 30–60 minutes. The LLM (Qwen3) is pre-converted and downloads in minutes. Subsequent runs skip this step |
 
 ---
 
