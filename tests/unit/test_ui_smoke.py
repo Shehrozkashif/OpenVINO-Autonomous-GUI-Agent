@@ -266,6 +266,7 @@ def test_window_end_to_end_wiring(app):
 def test_run_task_requires_orchestrator(app, monkeypatch):
     """_run_task must fail safe (dialog, no crash) when OVMS is down."""
     from PyQt6.QtWidgets import QMessageBox
+
     from ui.main_window import DesktopGUIAgent
 
     win = DesktopGUIAgent(orchestrator=None)

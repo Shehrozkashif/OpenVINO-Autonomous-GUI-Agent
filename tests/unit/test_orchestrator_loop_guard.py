@@ -19,14 +19,14 @@ Tests verify:
   5. The returned value is always True (declares goal achieved, not failure).
 """
 import sys
+
 sys.path.insert(0, ".")
 
 from unittest.mock import MagicMock
 
-from core.orchestrator import TaskOrchestrator, OrchestratorConfig, DEDUP_LIMIT_BY_ACTION_TYPE
-from core.protocols.a2a import ActionStep, SubTask
 from agents.reflection.reflection_agent import ReflectionResult
-
+from core.orchestrator import DEDUP_LIMIT_BY_ACTION_TYPE, OrchestratorConfig, TaskOrchestrator
+from core.protocols.a2a import ActionStep, SubTask
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

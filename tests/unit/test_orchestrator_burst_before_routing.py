@@ -10,14 +10,14 @@ Verifies:
   5. _execute_subtask uses subtask.burst directly when it is set (no second detect_burst call).
 """
 import sys
+
 sys.path.insert(0, ".")
 
 from unittest.mock import MagicMock, patch
 
-from core.orchestrator import TaskOrchestrator, OrchestratorConfig
-from core.protocols.a2a import ActionBurst, ActionStep, SubTask
 from core.executor.burst_executor import detect_burst_from_instruction
-
+from core.orchestrator import OrchestratorConfig, TaskOrchestrator
+from core.protocols.a2a import ActionBurst, ActionStep, SubTask
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

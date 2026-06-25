@@ -12,16 +12,34 @@ import time
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (
-    QDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QDialog,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
 from ui.events import AgentEventBus, AgentState
 from ui.icons import icon_pixmap
-from ui.theme import C, S, STATE_STYLE
+from ui.theme import STATE_STYLE, C, S
 from ui.widgets import (
-    CommandInput, EmptyState, GlassCard, MetricTile, PulseOrb, ScreenPreview,
-    SectionHeader, Timeline, relative_time,
+    CommandInput,
+    EmptyState,
+    GlassCard,
+    MetricTile,
+    PulseOrb,
+    ScreenPreview,
+    SectionHeader,
+    Timeline,
+    relative_time,
 )
 
 _SUGGESTIONS = [
@@ -775,7 +793,7 @@ class SettingsPage(QWidget):
         form = QFormLayout()
         form.setHorizontalSpacing(S.XL)
         try:
-            from config import LLM_MODEL, VLM_MODEL, OVMS_BASE_URL, TARGET_DEVICE
+            from config import LLM_MODEL, OVMS_BASE_URL, TARGET_DEVICE, VLM_MODEL
             rows = [
                 ("Language model", f"{LLM_MODEL} — routing · planning · reflection"),
                 ("Vision model", f"{VLM_MODEL} — grounding · visual verification"),

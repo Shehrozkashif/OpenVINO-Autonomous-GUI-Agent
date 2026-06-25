@@ -7,16 +7,17 @@ import sys
 import time
 
 from loguru import logger
+
 logger.remove()
 logger.add(sys.stdout, format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}", level="DEBUG", colorize=True)
 
 # ── imports ──────────────────────────────────────────────────────────────────
-from core.pipeline.ovms_client import OVMSClient
-from agents.router.router_agent import RouterAgent
-from agents.planning.planning_agent import PlanningAgent
-from agents.grounding.grounding_agent import UIGroundingAgent
 from agents.action.action_agent import ActionExecutionAgent
+from agents.grounding.grounding_agent import UIGroundingAgent
+from agents.planning.planning_agent import PlanningAgent
+from agents.router.router_agent import RouterAgent
 from core.capture.screenshot import ScreenCapture
+from core.pipeline.ovms_client import OVMSClient
 from tools.desktop_control.controller import DesktopController
 
 PASS = "✅ PASS"
@@ -76,6 +77,7 @@ print(f"\n  → {results['screen_capture']}")
 # ═══════════════════════════════════════════════════════════════
 section("4. OCR Grounding (no VLM, should be <5s)")
 from agents.grounding.grounding_agent import OCREngine
+
 ocr = OCREngine()
 img_small = img.copy()
 img_small.thumbnail((960, 540))

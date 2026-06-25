@@ -15,8 +15,10 @@ import platform
 import time
 
 from loguru import logger
-from pynput.mouse import Button, Controller as MouseController
-from pynput.keyboard import Key as _PKey, Controller as _PKB
+from pynput.keyboard import Controller as _PKB
+from pynput.keyboard import Key as _PKey
+from pynput.mouse import Button
+from pynput.mouse import Controller as MouseController
 
 _mouse = MouseController()
 _OS = platform.system()
@@ -31,7 +33,8 @@ _XTEST_OK = False
 
 if _OS == "Linux":
     try:
-        from Xlib import display as _Xdisplay, X as _X
+        from Xlib import X as _X
+        from Xlib import display as _Xdisplay
         from Xlib.ext import xtest as _xtest
         _xdisplay = _Xdisplay.Display(os.environ.get("DISPLAY", ":0"))
         # Verify it actually works before committing
@@ -343,6 +346,7 @@ class DesktopController:
     def screenshot_base64(self) -> str:
         import base64
         import io
+
         from core.capture.screenshot import ScreenCapture
         img = ScreenCapture().capture()
         buf = io.BytesIO()
@@ -398,7 +402,8 @@ class KillSwitch:
 
     def start(self) -> None:
         try:
-            from pynput import keyboard as _kb, mouse as _ms
+            from pynput import keyboard as _kb
+            from pynput import mouse as _ms
         except Exception as e:
             logger.warning(f"[KILL-SWITCH] pynput unavailable — kill switch disabled ({e})")
             return

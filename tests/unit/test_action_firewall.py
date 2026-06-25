@@ -4,16 +4,16 @@ Unit tests for the destructive-action firewall (Fix C7) and the instruction-leve
 burst-deferral safety check (Fix C1).
 """
 import sys
+
 sys.path.insert(0, ".")
 
 import pytest
 
-from core.safety.action_firewall import evaluate, decide, Decision, Severity
 from core.executor.burst_executor import (
-    detect_burst_from_instruction,
     _instruction_has_extra_clauses,
+    detect_burst_from_instruction,
 )
-
+from core.safety.action_firewall import Decision, Severity, decide, evaluate
 
 # ── Firewall classification ───────────────────────────────────────────────────
 

@@ -12,22 +12,44 @@ import math
 import time
 
 from PyQt6.QtCore import (
-    QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSize, Qt, QTimer,
-    QVariantAnimation, pyqtSignal,
+    QEasingCurve,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBrush, QColor, QConicalGradient, QFont, QLinearGradient, QPainter,
-    QPainterPath, QPen, QPixmap, QRadialGradient,
+    QBrush,
+    QColor,
+    QConicalGradient,
+    QFont,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QRadialGradient,
 )
 from PyQt6.QtWidgets import (
-    QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout,
-    QLabel, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
     QWidget,
 )
 
 from ui.icons import draw_icon, icon_pixmap
 from ui.theme import C, S
-
 
 # ── PulseOrb — the agent's visual presence ───────────────────────────────────
 

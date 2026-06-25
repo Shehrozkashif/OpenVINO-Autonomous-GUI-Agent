@@ -11,13 +11,13 @@ Tests also verify that the OCR-based check uses foreground-only snapshot regions
 (not raw OCR) so the agent's own log window cannot cause false positives.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 from unittest.mock import MagicMock, patch
 
-from core.orchestrator import TaskOrchestrator, OrchestratorConfig
+from core.orchestrator import OrchestratorConfig, TaskOrchestrator
 from core.protocols.a2a import SubTask
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

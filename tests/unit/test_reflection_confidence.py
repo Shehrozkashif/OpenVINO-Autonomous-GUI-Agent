@@ -14,16 +14,17 @@ Three properties are verified:
                     clamping no longer caps it at 0.60 before the threshold comparison.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 import pytest
+
 from agents.reflection.reflection_agent import (
-    ReflectionAgent,
-    ReflectionResult,
     _LLM_REFLECTION_PROMPT,
     _VLM_REFLECTION_PROMPT,
+    ReflectionAgent,
+    ReflectionResult,
 )
-
 
 # ── 1. Prompt-stance tests (static string checks) ────────────────────────────
 

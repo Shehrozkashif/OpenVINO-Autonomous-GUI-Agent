@@ -10,15 +10,15 @@ control back to the planner instead.
 Contrast: an idempotent step (click) may still be retried on an uncertain result.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 from unittest.mock import MagicMock
 
-from core.orchestrator import TaskOrchestrator, OrchestratorConfig
-from core.protocols.a2a import ActionStep, SubTask
 from agents.grounding.grounding_agent import GroundingResult
 from agents.reflection.reflection_agent import ReflectionResult
-
+from core.orchestrator import OrchestratorConfig, TaskOrchestrator
+from core.protocols.a2a import ActionStep, SubTask
 
 _UNCERTAIN = ReflectionResult(
     success=False, confidence=0.40, observation="unclear",

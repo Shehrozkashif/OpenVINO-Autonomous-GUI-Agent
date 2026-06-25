@@ -25,7 +25,6 @@ from core.capture.screen_snapshot import (
     capture_snapshot,
 )
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _region(text, fg=True, title="MyApp") -> OCRRegion:

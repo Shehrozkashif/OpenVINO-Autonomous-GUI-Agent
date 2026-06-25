@@ -7,6 +7,7 @@ icon state). When it is uncertain about a *visual* action, the reflector takes a
 second look with the VLM on the real screenshot and reconciles the two verdicts.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 from unittest.mock import MagicMock

@@ -7,15 +7,16 @@ but OCR reflection read the silent new prompt as "no change → failed" and
 aborted a subtask whose goal was already achieved.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 import os
 import time
-
-import pytest
 from unittest.mock import MagicMock, patch
 
-from core.orchestrator import TaskOrchestrator, OrchestratorConfig
+import pytest
+
+from core.orchestrator import OrchestratorConfig, TaskOrchestrator
 from core.protocols.a2a import ActionStep, SubTask
 
 

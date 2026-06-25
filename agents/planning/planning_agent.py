@@ -11,9 +11,9 @@ import re
 from typing import List, Optional
 
 from loguru import logger
-from utils.platform_utils import detect_firefox, get_desktop_path
 
 from core.protocols.a2a import ActionStep, InferenceClient, SubTask
+from utils.platform_utils import detect_firefox, get_desktop_path
 
 
 class PlanningParseError(Exception):

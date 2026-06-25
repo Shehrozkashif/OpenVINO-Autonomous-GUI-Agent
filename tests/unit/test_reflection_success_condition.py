@@ -11,12 +11,10 @@ _execute_subtask with a controlled reflection result, and asserts the outcome.
 import sys
 from unittest.mock import MagicMock
 
-
 sys.path.insert(0, ".")
 
-from core.protocols.a2a import ActionStep, SubTask
 from agents.reflection.reflection_agent import ReflectionResult
-
+from core.protocols.a2a import ActionStep, SubTask
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -58,7 +56,7 @@ def _make_orchestrator(reflection_results: list, step_override: ActionStep = Non
     This prevents the planner's second call (which returns None/"goal achieved")
     from masking a step failure — isolating Fix 0.1's logic cleanly.
     """
-    from core.orchestrator import TaskOrchestrator, OrchestratorConfig
+    from core.orchestrator import OrchestratorConfig, TaskOrchestrator
 
     reflector = MagicMock()
     reflector.min_confidence = 0.75

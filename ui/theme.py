@@ -8,7 +8,6 @@ QGraphicsBlurEffect is CPU-rendered and would fight the VLM for resources).
 """
 from PyQt6.QtGui import QColor
 
-
 # ── Color tokens ──────────────────────────────────────────────────────────────
 
 class C:

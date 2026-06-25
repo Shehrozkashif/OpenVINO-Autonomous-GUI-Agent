@@ -7,14 +7,15 @@ Tests Router → Planner → Grounder with a real instruction.
 import sys
 
 from loguru import logger
+
 logger.remove()
 logger.add(sys.stdout, format="{level}: {message}", level="INFO")
 
-from core.pipeline.ovms_client import OVMSClient
-from agents.router.router_agent import RouterAgent
-from agents.planning.planning_agent import PlanningAgent
 from agents.grounding.grounding_agent import UIGroundingAgent
+from agents.planning.planning_agent import PlanningAgent
+from agents.router.router_agent import RouterAgent
 from core.capture.screenshot import ScreenCapture
+from core.pipeline.ovms_client import OVMSClient
 
 
 def test_pipeline():

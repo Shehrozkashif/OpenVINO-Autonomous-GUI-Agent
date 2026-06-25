@@ -17,15 +17,16 @@ Three test classes:
    planning loop runs; if no pattern matches the planning loop runs directly.
 """
 import sys
+
 sys.path.insert(0, ".")
 
-import pytest
 from unittest.mock import MagicMock, patch
 
-from core.executor.burst_executor import BurstExecutor, detect_burst, _INTER_STEP_DELAY_S
-from core.protocols.a2a import ActionBurst, ActionStep, BurstResult, SubTask
-from agents.reflection.reflection_agent import ReflectionResult
+import pytest
 
+from agents.reflection.reflection_agent import ReflectionResult
+from core.executor.burst_executor import _INTER_STEP_DELAY_S, BurstExecutor, detect_burst
+from core.protocols.a2a import ActionBurst, ActionStep, BurstResult, SubTask
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -538,8 +539,8 @@ class TestOrchestratorBurstIntegration:
     """
 
     def _make_orch(self, planner_side_effect=None):
-        from core.orchestrator import TaskOrchestrator, OrchestratorConfig
         from agents.reflection.reflection_agent import ReflectionResult
+        from core.orchestrator import OrchestratorConfig, TaskOrchestrator
 
         reflector = MagicMock()
         reflector.min_confidence = 0.75

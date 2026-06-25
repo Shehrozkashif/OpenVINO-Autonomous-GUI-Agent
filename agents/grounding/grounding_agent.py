@@ -26,7 +26,8 @@ from loguru import logger
 from PIL import Image
 
 from core.capture.screenshot import ScreenCapture, _screen_size
-from core.grounding.windows_uia import find_element as _uia_find, is_available as _uia_ok
+from core.grounding.windows_uia import find_element as _uia_find
+from core.grounding.windows_uia import is_available as _uia_ok
 from core.protocols.a2a import InferenceClient
 
 _IS_WINDOWS = platform.system() == "Windows"

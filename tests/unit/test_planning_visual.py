@@ -11,10 +11,12 @@ Unit tests for the visual planning recovery path and the planner parse-error fix
    execute directly without grounding.
 """
 import sys
+
 sys.path.insert(0, ".")
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 from agents.planning.planning_agent import (
     PlanningAgent,
@@ -24,7 +26,6 @@ from agents.planning.planning_agent import (
 from agents.reflection.reflection_agent import ReflectionResult
 from core.orchestrator import OrchestratorConfig, TaskOrchestrator
 from core.protocols.a2a import ActionStep, SubTask
-
 
 _W, _H = 1000, 1000   # identity scaling — 0-1000 coords map 1:1 to pixels
 

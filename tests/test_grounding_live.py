@@ -7,11 +7,12 @@ Run: python tests/test_grounding_live.py
 """
 import sys
 import time
+
 sys.path.insert(0, ".")
 
+from agents.grounding.grounding_agent import OCREngine, UIGroundingAgent
 from core.capture.screenshot import ScreenCapture
 from core.pipeline.ovms_client import OVMSClient
-from agents.grounding.grounding_agent import UIGroundingAgent, OCREngine
 from tools.desktop_control.controller import DesktopController
 
 

@@ -16,7 +16,7 @@ import httpx
 from loguru import logger
 from pydantic import BaseModel
 
-from config import LLM_MODEL, VLM_MODEL, OVMS_BASE_URL
+from config import LLM_MODEL, OVMS_BASE_URL, VLM_MODEL
 
 
 class InferenceResponse(BaseModel):

@@ -1,6 +1,8 @@
 # tests/unit/test_controller.py
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
+
 from tools.desktop_control.controller import DesktopController
 
 

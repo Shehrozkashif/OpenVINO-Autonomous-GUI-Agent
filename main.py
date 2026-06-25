@@ -44,6 +44,7 @@ def _warmup_models(client: OVMSClient, task_memory: Optional[TaskMemory] = None)
         try:
             import base64
             import io
+
             from PIL import Image
             tiny = Image.new("RGB", (64, 64), color=(128, 128, 128))
             buf = io.BytesIO()

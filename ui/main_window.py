@@ -17,22 +17,35 @@ import time
 from collections import deque
 
 from PyQt6.QtCore import QObject, QSettings, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QIcon, QLinearGradient, QPainter, \
-    QPixmap, QRadialGradient
+from PyQt6.QtGui import QBrush, QColor, QIcon, QLinearGradient, QPainter, QPixmap, QRadialGradient
 from PyQt6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QStackedWidget,
+    QSystemTrayIcon,
+    QVBoxLayout,
+    QWidget,
 )
 
-from ui.events import AgentEventBus, AgentState, BUSY_STATES, LoguruBridge
+from ui.events import BUSY_STATES, AgentEventBus, AgentState, LoguruBridge
 from ui.hud import MissionHUD
 from ui.icons import icon_pixmap
 from ui.pages import (
-    HomePage, MemoryPage, MissionPage, ScreenHistoryPage, SessionsPage,
-    SettingsPage, WorkflowsPage,
+    HomePage,
+    MemoryPage,
+    MissionPage,
+    ScreenHistoryPage,
+    SessionsPage,
+    SettingsPage,
+    WorkflowsPage,
 )
 from ui.panels import IntelligencePanel
-from ui.theme import C, S, STATE_STYLE, build_stylesheet
+from ui.theme import STATE_STYLE, C, S, build_stylesheet
 from ui.widgets import CommandDock, NavRail, StatusChip
 
 

@@ -23,9 +23,17 @@ import subprocess
 import sys
 import time
 
-from config import (LLM_MODEL, LLM_SOURCE, VLM_MODEL, VLM_SOURCE,
-                    OVMS_BASE_URL, OVMS_REST_PORT, TARGET_DEVICE,
-                    MODEL_REPOSITORY_PATH, KV_CACHE_SIZE_GB)
+from config import (
+    KV_CACHE_SIZE_GB,
+    LLM_MODEL,
+    LLM_SOURCE,
+    MODEL_REPOSITORY_PATH,
+    OVMS_BASE_URL,
+    OVMS_REST_PORT,
+    TARGET_DEVICE,
+    VLM_MODEL,
+    VLM_SOURCE,
+)
 
 _OS = platform.system()
 _HERE = os.path.dirname(os.path.abspath(__file__))

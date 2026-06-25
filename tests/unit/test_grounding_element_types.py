@@ -25,7 +25,6 @@ from agents.grounding.grounding_agent import (
 )
 from core.protocols.a2a import ActionStep
 
-
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 def _word(text, fg=True, etype="foreground_interactive", x=0, y=0, w=60, h=20, conf=0.95):

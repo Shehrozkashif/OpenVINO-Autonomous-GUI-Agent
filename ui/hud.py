@@ -19,12 +19,17 @@ import time
 from PyQt6.QtCore import QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
 
-from ui.events import AgentEventBus, AgentState, BUSY_STATES
+from ui.events import BUSY_STATES, AgentEventBus, AgentState
 from ui.icons import icon_pixmap
-from ui.theme import C, STATE_STYLE
+from ui.theme import STATE_STYLE, C
 from ui.widgets import PulseOrb
 
 _MASK_MARGIN = 8  # px safety margin around the HUD in the capture mask

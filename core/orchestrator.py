@@ -828,7 +828,8 @@ class TaskOrchestrator:
             return False  # tests themselves run inside a terminal
         try:
             from core.capture.screen_snapshot import (
-                _get_foreground_hwnd_and_title, _get_foreground_process,
+                _get_foreground_hwnd_and_title,
+                _get_foreground_process,
             )
             hwnd, _ = _get_foreground_hwnd_and_title()
             proc = _get_foreground_process(hwnd)
@@ -1106,7 +1107,7 @@ class TaskOrchestrator:
         when no handler is wired; MEDIUM commands are allowed but logged.
         """
         try:
-            from core.safety.action_firewall import evaluate, decide, Decision, Severity
+            from core.safety.action_firewall import Decision, Severity, decide, evaluate
         except Exception:
             return True  # never let a safety-module import error break execution
         verdict = evaluate(text)

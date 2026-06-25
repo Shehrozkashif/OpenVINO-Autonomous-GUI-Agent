@@ -4,6 +4,7 @@ Regression tests for UIGroundingAgent._parse_coords — formats UI-TARS emits
 in practice, including malformed bracket counts seen in live runs.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 from agents.grounding.grounding_agent import UIGroundingAgent

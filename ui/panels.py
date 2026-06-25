@@ -8,13 +8,19 @@ here is driven by AgentEventBus signals; nothing polls.
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
 )
 
-from ui.events import AgentEventBus, AgentState, BUSY_STATES
+from ui.events import BUSY_STATES, AgentEventBus, AgentState
 from ui.icons import icon_pixmap
-from ui.theme import C, S, STATE_STYLE
+from ui.theme import STATE_STYLE, C, S
 from ui.widgets import ConfidenceBar, GlassCard, PulseOrb, fade_in
 
 

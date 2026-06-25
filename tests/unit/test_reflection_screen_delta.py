@@ -16,15 +16,16 @@ Three properties are verified:
                     NOT to type/key_press/hotkey/scroll.
 """
 import sys
+
 sys.path.insert(0, ".")
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 from PIL import Image
 
 from agents.reflection.reflection_agent import ReflectionAgent
 from core.protocols.a2a import ActionStep
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

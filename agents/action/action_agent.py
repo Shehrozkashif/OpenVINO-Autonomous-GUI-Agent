@@ -10,7 +10,6 @@ from loguru import logger
 from core.protocols.a2a import ActionStep
 from tools.desktop_control.controller import DesktopController
 
-
 _TERMINAL_WORDS = frozenset(
     ("terminal", "command", "shell", "bash", "sh", "prompt", "console", "run")
 )
@@ -104,7 +103,7 @@ class ActionExecutionAgent:
                 value = step.value
                 sensitive = False
                 try:
-                    from utils.credentials import substitute, has_tokens
+                    from utils.credentials import has_tokens, substitute
                     if has_tokens(value):
                         value = substitute(value)
                         sensitive = True

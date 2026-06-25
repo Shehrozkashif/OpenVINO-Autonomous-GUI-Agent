@@ -16,13 +16,13 @@ Tests inspect the actual messages[] passed to client.query_llm so they catch
 regressions in both the prompt text and the call path.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 from unittest.mock import MagicMock
 
 from agents.planning.planning_agent import PlanningAgent
 from core.protocols.a2a import SubTask
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

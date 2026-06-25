@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 
 from core.pipeline.ovms_client import InferenceResponse
 
-
 # ── Agent communication enums / models ───────────────────────────────────────
 
 class AgentRole(str, Enum):
