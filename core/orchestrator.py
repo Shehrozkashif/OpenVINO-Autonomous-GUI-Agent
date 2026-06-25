@@ -364,6 +364,69 @@ class TaskOrchestrator:
         )
         return False
 
+    def _setup_launch_goal(
+        self, subtask: SubTask, task_context: Optional[List[str]],
+    ) -> tuple:
+        """Detect whether this subtask is a genuine app-launch goal, and on
+        Windows record a window-count baseline when the target app is already
+        running.
+
+        Process-based early-exit only fires for genuine app-launch subtasks, not
+        for subtasks that USE the app ("with Notepad already open, save the
+        file") — "notepad running" does not mean "file saved". When the app is
+        ALREADY running, "process exists" is a vacuous launch signal (true
+        before we did anything) and focusing the existing window is actively
+        dangerous (it may be busy running another program), so a baseline is
+        recorded and only a NEW window proves the launch.
+
+        Returns (is_launch_goal, goal_proc, baseline_windows, task_context); the
+        returned task_context may carry an appended pre-check note.
+        """
+        desc = subtask.description.lower()
+        is_launch_goal = (
+            not ("already open" in desc or "already running" in desc)
+            and (
+                any(w in desc for w in ("launch",))
+                or ("open" in desc
+                    and any(k in desc for k in self._PROCESS_MAP_WINDOWS))
+            )
+        )
+
+        goal_proc: Optional[str] = None
+        baseline_windows: Optional[int] = None
+        if _OS == "Windows" and is_launch_goal:
+            goal_proc = next(
+                (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS
+                 if k in desc),
+                None,
+            )
+            if goal_proc and self._is_process_running(goal_proc):
+                baseline_windows = self._count_process_windows(goal_proc)
+                self._launch_window_baseline[goal_proc] = baseline_windows
+                task_context = (task_context or []) + [
+                    f"[NOTE] {goal_proc.split('.')[0]} is ALREADY running with "
+                    f"{baseline_windows} window(s). The existing window may be "
+                    f"busy running another program — do NOT click its taskbar "
+                    f"button and do NOT focus the existing window. Open a NEW "
+                    f"window instead: key_press winleft → type the app name → "
+                    f"key_press enter."
+                ]
+                self.log(
+                    f"  [PRE-CHECK] {goal_proc} already running "
+                    f"({baseline_windows} window(s)) — a NEW window is required"
+                )
+        return is_launch_goal, goal_proc, baseline_windows, task_context
+
+    def _goal_confirmed(
+        self, goal_proc: Optional[str], baseline_windows: Optional[int],
+    ) -> bool:
+        """Launch-goal achieved? A NEW window is required when the app pre-existed."""
+        if not goal_proc:
+            return False
+        if baseline_windows is not None:
+            return self._count_process_windows(goal_proc) > baseline_windows
+        return self._launch_confirmed(goal_proc)
+
     def _execute_subtask(self, subtask: SubTask, task_context: List[str] = None) -> bool:
         """
         Dynamic loop — plans ONE step at a time using live screen state.
@@ -381,64 +444,16 @@ class TaskOrchestrator:
         if self._try_burst(subtask):
             return True
 
-        # Process-based early-exit only fires for genuine app-launch subtasks, not for
-        # subtasks that USE the app ("with Notepad already open, save the file").
-        # "notepad running" does not mean "file saved" — avoid false goal achievement.
-        _desc_lower_sub = subtask.description.lower()
-        _is_launch_goal = (
-            not ("already open" in _desc_lower_sub or "already running" in _desc_lower_sub)
-            and (
-                any(w in _desc_lower_sub for w in ("launch",))
-                or (
-                    "open" in _desc_lower_sub
-                    and any(k in _desc_lower_sub for k in self._PROCESS_MAP_WINDOWS)
-                )
-            )
+        _is_launch_goal, _goal_proc, _baseline_windows, task_context = (
+            self._setup_launch_goal(subtask, task_context)
         )
-
-        # Resolve the goal process once. If the app is ALREADY running, record a
-        # window-count baseline: "process exists" is then a vacuous launch signal
-        # (it was true before we did anything), and focusing the existing window
-        # is actively dangerous — that session may be busy running another
-        # program. Only a NEW window proves the launch in that case.
-        _goal_proc: Optional[str] = None
-        _baseline_windows: Optional[int] = None
-        if _OS == "Windows" and _is_launch_goal:
-            _goal_proc = next(
-                (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS
-                 if k in _desc_lower_sub),
-                None,
-            )
-            if _goal_proc and self._is_process_running(_goal_proc):
-                _baseline_windows = self._count_process_windows(_goal_proc)
-                self._launch_window_baseline[_goal_proc] = _baseline_windows
-                task_context = (task_context or []) + [
-                    f"[NOTE] {_goal_proc.split('.')[0]} is ALREADY running with "
-                    f"{_baseline_windows} window(s). The existing window may be "
-                    f"busy running another program — do NOT click its taskbar "
-                    f"button and do NOT focus the existing window. Open a NEW "
-                    f"window instead: key_press winleft → type the app name → "
-                    f"key_press enter."
-                ]
-                self.log(
-                    f"  [PRE-CHECK] {_goal_proc} already running "
-                    f"({_baseline_windows} window(s)) — a NEW window is required"
-                )
-
-        def _goal_confirmed() -> bool:
-            """Launch-goal achieved? New window required when the app pre-existed."""
-            if not _goal_proc:
-                return False
-            if _baseline_windows is not None:
-                return self._count_process_windows(_goal_proc) > _baseline_windows
-            return self._launch_confirmed(_goal_proc)
 
         # Terminal-command subtasks get DETERMINISTIC verification: a successful
         # shell command prints nothing (new empty prompt), which OCR-based
         # reflection systematically mis-reads as "no change → failed". Check the
         # real world instead: file created/deleted on disk, or error text in
         # the terminal output.
-        _is_cmd_subtask = "run:" in _desc_lower_sub
+        _is_cmd_subtask = "run:" in subtask.description.lower()
         _typed_ok = False   # a type step succeeded in this subtask
 
         _subtask_start = time.time()
@@ -635,7 +650,7 @@ class TaskOrchestrator:
                             step.action_type in ("click", "double_click")
                             or _is_launch_enter
                         ):
-                            if _goal_confirmed():
+                            if self._goal_confirmed(_goal_proc, _baseline_windows):
                                 self.log(
                                     f"  [GOAL-CHECK-EARLY] "
                                     f"'{_goal_proc.split('.')[0]}' confirmed "
@@ -703,7 +718,7 @@ class TaskOrchestrator:
                 # goal is achieved — return True immediately so the planner never gets a
                 # chance to generate spurious continuation steps (e.g. pressing Enter
                 # again inside a Calculator that is already open).
-                if _OS == "Windows" and _is_launch_goal and _goal_confirmed():
+                if _OS == "Windows" and _is_launch_goal and self._goal_confirmed(_goal_proc, _baseline_windows):
                     _label = _goal_proc.split(".")[0]
                     self.log(f"  [GOAL-CHECK] '{_label}' confirmed — goal achieved")
                     return True
@@ -766,7 +781,7 @@ class TaskOrchestrator:
                 # This handles the common case where key_press enter launches an app
                 # but the reflector times out before the app's UI is fully visible
                 # (reflection confidence 0.50 → step marked failed, yet app IS open).
-                if _OS == "Windows" and _is_launch_goal and _goal_confirmed():
+                if _OS == "Windows" and _is_launch_goal and self._goal_confirmed(_goal_proc, _baseline_windows):
                     _label = _goal_proc.split(".")[0]
                     self.log(
                         f"  [GOAL-CHECK] '{_label}' confirmed "
