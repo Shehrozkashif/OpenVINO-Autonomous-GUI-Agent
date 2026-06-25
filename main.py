@@ -1,7 +1,6 @@
 # main.py
 """Desktop GUI Agent — application entry point."""
 import sys
-from typing import Optional
 
 from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMessageBox

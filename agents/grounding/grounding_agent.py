@@ -17,7 +17,7 @@ import platform
 import re
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import imagehash
 import numpy as np

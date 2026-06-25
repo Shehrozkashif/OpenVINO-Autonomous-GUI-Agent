@@ -18,7 +18,6 @@ Why UIA beats OCR for grounding:
 import difflib
 import platform
 import threading
-from typing import Optional, Tuple
 
 from loguru import logger
 

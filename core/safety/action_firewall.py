@@ -33,10 +33,9 @@ Integration contract
 based on whether a confirmation callback is available (see `Decision`).
 """
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
-from collections.abc import Callable
 
 
 class Severity(str, Enum):

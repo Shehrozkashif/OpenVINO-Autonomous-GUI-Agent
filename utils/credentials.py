@@ -19,7 +19,6 @@ sensitive so the value is redacted from logs).
 import json
 import re
 from pathlib import Path
-from typing import Optional
 
 _CRED_DIR  = Path.home() / ".config" / "gui-agent"
 _CRED_FILE = _CRED_DIR / "credentials.json"

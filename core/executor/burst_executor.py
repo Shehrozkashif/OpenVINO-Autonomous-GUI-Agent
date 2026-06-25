@@ -40,7 +40,6 @@ versions without brittle shortcut assumptions.
 """
 import re
 import time
-from typing import Optional
 
 from loguru import logger
 

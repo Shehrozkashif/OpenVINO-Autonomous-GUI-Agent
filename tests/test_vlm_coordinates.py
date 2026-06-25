@@ -18,7 +18,6 @@ import io
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 sys.path.insert(0, ".")
 

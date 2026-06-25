@@ -15,7 +15,6 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from loguru import logger
 from PIL import Image

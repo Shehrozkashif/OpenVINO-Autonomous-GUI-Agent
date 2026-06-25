@@ -12,7 +12,6 @@
 import base64
 import io
 import platform
-from typing import Optional
 
 import imagehash
 from PIL import Image

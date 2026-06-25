@@ -2,7 +2,7 @@
 """Shared data models and the InferenceClient Protocol."""
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, List, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 

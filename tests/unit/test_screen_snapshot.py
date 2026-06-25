@@ -13,7 +13,6 @@ Covers:
 """
 import time
 import unittest
-from typing import List
 from unittest.mock import MagicMock, patch
 
 from agents.grounding.grounding_agent import OCREngine, OCRWord

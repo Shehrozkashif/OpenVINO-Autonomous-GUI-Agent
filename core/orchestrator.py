@@ -20,9 +20,9 @@ import re
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 

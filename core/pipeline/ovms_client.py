@@ -9,7 +9,6 @@ Both are reached at  POST {OVMS_BASE_URL}/v3/chat/completions  and selected by t
 "model" field in the request body. start.py prepares the models and launches OVMS.
 """
 import time
-from typing import List
 
 import httpx
 from loguru import logger
