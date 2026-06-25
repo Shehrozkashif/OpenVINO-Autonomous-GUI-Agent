@@ -269,11 +269,98 @@ class RouterAgent:
                                        response_schema=_SUBTASK_SCHEMA)
             subtasks = self._parse_subtasks(resp.content)
 
+        # Completeness backstop. The prompt rule helps but an 8B router
+        # intermittently drops a trailing requested action. Detection is
+        # deterministic and general (a list of action verbs); the FIX is handed
+        # back to the LLM (re-prompt) so filenames/steps stay model-chosen, not
+        # hardcoded.
+        subtasks = self._ensure_complete(instruction, user_content, subtasks)
+
         logger.info(f"[ROUTER] Decomposed into {len(subtasks)} sub-tasks:")
         for st in subtasks:
             logger.info(f"  [{st.id}] {st.description} (depends on: {st.depends_on})")
 
         return task_id, subtasks
+
+    # ── Completeness backstop (deterministic detection, LLM correction) ─────────
+
+    # Trailing/finalizing actions a user commonly appends ("...and save it",
+    # "...then close it"). General, not per-task: detection only — the fix is the
+    # model's job. Each entry: canonical name → regex matching the user's verb.
+    _FINALIZING_ACTIONS = {
+        "save":     r"\bsave\b",
+        "close":    r"\bclose\b",
+        "send":     r"\b(?:send|e-?mail)\b",
+        "print":    r"\bprint\b",
+        "download": r"\bdownload\b",
+        "delete":   r"\b(?:delete|remove)\b",
+        "rename":   r"\brename\b",
+    }
+
+    @classmethod
+    def _missing_actions(cls, instruction: str, subtasks: list[SubTask]) -> list[str]:
+        """Return finalizing actions the user requested but no sub-task covers.
+
+        Deterministic and general — it flags an OMISSION, it does not invent the
+        missing step (that is the model's job on re-prompt).
+        """
+        instr = instruction.lower()
+        covered = " ".join((st.description or "").lower() for st in subtasks)
+        missing = []
+        for name, pat in cls._FINALIZING_ACTIONS.items():
+            if re.search(pat, instr) and not re.search(pat, covered):
+                missing.append(name)
+        return missing
+
+    def _ensure_complete(
+        self, instruction: str, user_content: str, subtasks: list[SubTask]
+    ) -> list[SubTask]:
+        """Re-prompt the router ONCE if it dropped an explicitly requested action.
+
+        Keeps the model in charge of the fix (filenames, exact steps) — code only
+        detects the gap. Accepts the retry only if it actually closes the gap;
+        otherwise keeps the original so we never make things worse.
+        """
+        missing = self._missing_actions(instruction, subtasks)
+        if not missing or not subtasks:
+            return subtasks
+
+        logger.warning(
+            f"[ROUTER] Decomposition dropped requested action(s) {missing} — "
+            f"re-prompting once to complete it"
+        )
+        prior = json.dumps([
+            {"id": st.id, "description": st.description, "depends_on": st.depends_on}
+            for st in subtasks
+        ])
+        correction = (
+            f"Your sub-task list dropped these actions the user explicitly asked "
+            f"for: {', '.join(missing)}. Re-output the COMPLETE ordered JSON array, "
+            f"keeping every existing sub-task and adding one sub-task for each "
+            f"missing action as the final step(s), with a concrete filename/target "
+            f"where relevant. JSON array only."
+        )
+        messages = [
+            {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": prior},
+            {"role": "user", "content": correction},
+        ]
+        try:
+            resp = self.client.query_llm(
+                messages, max_tokens=768, temperature=0.1,
+                response_schema=_SUBTASK_SCHEMA,
+            )
+            fixed = self._parse_subtasks(resp.content)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"[ROUTER] Re-prompt parse failed ({e}) — keeping original")
+            return subtasks
+
+        # Only take the retry if it genuinely covers more of what was missing.
+        if len(self._missing_actions(instruction, fixed)) < len(missing) and fixed:
+            return fixed
+        logger.warning("[ROUTER] Re-prompt did not close the gap — keeping original")
+        return subtasks
 
     def _parse_subtasks(self, text: str) -> list[SubTask]:
         if "</think>" in text:
