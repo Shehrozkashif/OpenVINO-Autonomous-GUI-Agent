@@ -462,6 +462,15 @@ class TaskOrchestrator:
         _save_target = self._subtask_save_target(subtask)
 
         _subtask_start = time.time()
+
+        # The Save-As key sequence is fixed and well-defined, but the 8B planner
+        # is unreliable at threading the dialog (it loops on ctrl+s and never
+        # types the path). Run it deterministically first and confirm on disk;
+        # only the key sequence is fixed — the path is model-chosen. On any
+        # failure, fall through to the normal planning loop.
+        if _save_target and self._try_save_as(_save_target, _subtask_start):
+            return True
+
         for step_idx in range(self.config.max_steps_per_subtask):
             if self._stop_event.is_set():
                 return False
@@ -1176,6 +1185,83 @@ class TaskOrchestrator:
             return os.path.getmtime(path) >= started_at - 2
         except OSError:
             return False
+
+    def _save_dialog_visible(self) -> bool:
+        """True when a Windows Save/Save-As dialog is on screen.
+
+        Detected by its stable static labels (immune to the dynamic content OCR
+        struggles with). Used to confirm ctrl+s opened a dialog BEFORE typing the
+        path — so we never type a path into the document body of an already-named
+        file that ctrl+s saved silently.
+        """
+        try:
+            img = self.capturer.capture()
+            img.thumbnail((960, 540))
+            text = " ".join(
+                w.text for w in self._ocr.extract(img) if w.conf >= 0.6
+            ).lower()
+            return "file name" in text and ("save" in text or "cancel" in text)
+        except Exception:
+            return False
+
+    def _try_save_as(self, target: str, started_at: float) -> bool:
+        """Deterministically perform Windows "Save As <target>" and verify on disk.
+
+        The plan→reflect loop is unreliable here: editors give no OCR-readable
+        save signal, so the 8B planner loops on ctrl+s and never completes the
+        dialog. The key sequence IS fixed and well-defined, so run it directly and
+        confirm on disk (the only reliable signal). The path comes from the
+        sub-task (model-chosen) — only the sequence is fixed. Returns False on any
+        deviation so the caller falls back to the planning loop.
+        """
+        import time
+
+        def _step(action_type, key=None, value=None, desc=""):
+            return ActionStep(
+                id=0, subtask_id=0, action_type=action_type, target=None,
+                value=value, key=key, description=desc, verification="",
+            )
+
+        # Already saved (e.g. an earlier step did it) — nothing to do.
+        if self._file_saved_fresh(target, started_at):
+            return True
+
+        self.log(f"  [SAVE-AS] Saving deterministically to '{target}'")
+
+        # 1. Open the Save dialog from the editor.
+        if not self._execute_step(_step("hotkey", key="ctrl+s", desc="Open Save dialog")):
+            return False
+        self._wait_for_settle(0.8, 3.0)
+
+        # 2. Confirm a dialog actually opened before typing — otherwise ctrl+s may
+        #    have saved silently (already-named file) and typing would corrupt the
+        #    document body.
+        if not self._save_dialog_visible():
+            if self._file_saved_fresh(target, started_at):
+                self.log(f"  [SAVE-AS] '{target}' saved (no dialog needed)")
+                return True
+            self.log("  [SAVE-AS] Save dialog not detected — deferring to planning loop")
+            return False
+
+        # 3. Replace the default filename with the full target path.
+        self._execute_step(_step("hotkey", key="ctrl+a", desc="Select filename field"))
+        if not self._execute_step(_step("type", value=target, desc="Type save path")):
+            return False
+
+        # 4. Confirm. Poll the disk; a "Replace existing file?" prompt (file already
+        #    exists) needs one extra Enter, sent only while the file is still absent
+        #    so we never inject a stray newline into a saved document.
+        self._execute_step(_step("key_press", key="enter", desc="Confirm save"))
+        for i in range(8):
+            time.sleep(0.4)
+            if self._file_saved_fresh(target, started_at):
+                self.log(f"  [SAVE-AS] '{target}' written to disk — confirmed")
+                return True
+            if i == 2:
+                self._execute_step(
+                    _step("key_press", key="enter", desc="Confirm overwrite"))
+        self.log(f"  [SAVE-AS] '{target}' not on disk after save sequence — falling back")
+        return False
 
     # ── Destructive-action firewall ─────────────────────────────────────────────
 

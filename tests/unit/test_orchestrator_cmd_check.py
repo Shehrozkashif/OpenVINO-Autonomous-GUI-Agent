@@ -266,3 +266,60 @@ class TestSaveSubtaskIntegration:
         assert f.exists()
         # Confirmed shortly after the save — no long ctrl+s loop.
         assert orch.planner.plan_next_step.call_count <= 3
+
+
+class TestDeterministicSaveAs:
+
+    def test_try_save_as_writes_and_confirms(self, tmp_path):
+        """ctrl+s → (dialog) → ctrl+a → type path → enter, confirmed on disk."""
+        f = tmp_path / "haiku.txt"
+        orch = _make_orch()
+        orch._save_dialog_visible = MagicMock(return_value=True)
+        orch._wait_for_settle = MagicMock()
+
+        def _exec(step):
+            if step.key == "enter":
+                f.write_text("a haiku")
+            return True
+        orch._execute_step = MagicMock(side_effect=_exec)
+
+        with patch("core.orchestrator.time.sleep"):
+            ok = orch._try_save_as(str(f), time.time())
+
+        assert ok is True
+        assert f.exists()
+        keys = [c.args[0].key for c in orch._execute_step.call_args_list]
+        assert "ctrl+s" in keys and "ctrl+a" in keys and "enter" in keys
+
+    def test_try_save_as_defers_when_no_dialog(self, tmp_path):
+        """If ctrl+s opens no dialog, never type the path into the document —
+        fall back to the planning loop and don't write the file.
+        """
+        f = tmp_path / "haiku.txt"   # never created
+        orch = _make_orch()
+        orch._save_dialog_visible = MagicMock(return_value=False)
+        orch._wait_for_settle = MagicMock()
+        orch._execute_step = MagicMock(return_value=True)
+
+        with patch("core.orchestrator.time.sleep"):
+            ok = orch._try_save_as(str(f), time.time())
+
+        assert ok is False
+        typed = [c.args[0] for c in orch._execute_step.call_args_list
+                 if c.args[0].action_type == "type"]
+        assert typed == [], "must not type a path when no Save dialog is visible"
+
+    def test_save_subtask_uses_deterministic_path(self, tmp_path):
+        """A save subtask runs _try_save_as up front and completes without ever
+        entering the planning loop.
+        """
+        f = tmp_path / "haiku.txt"
+        orch = _make_orch()
+        orch._try_save_as = MagicMock(side_effect=lambda *_: (f.write_text("x"), True)[1])
+
+        with patch("core.orchestrator.time.sleep"):
+            result = orch._execute_subtask(_sub(f"save the document as {f}"))
+
+        assert result is True
+        orch._try_save_as.assert_called_once()
+        orch.planner.plan_next_step.assert_not_called()
