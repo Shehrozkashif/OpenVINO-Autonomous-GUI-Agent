@@ -1,8 +1,18 @@
 # tests/unit/test_reflection_success_condition.py
-"""Unit tests for Fix 0.1 — the broken success condition in _execute_subtask.
+"""Unit tests for the success condition in _execute_subtask.
 
-Regression guard: ensures that a low-confidence failure from the reflector
-can never be silently converted into step_success=True.
+Two invariants are guarded here:
+
+  1. A CONFIDENT failure (conf >= threshold) is never converted into success
+     (the original Fix 0.1 bug, where every step silently passed).
+
+  2. An UNCERTAIN verdict (conf < threshold) is handled by action class:
+       - idempotent  (click / scroll): retried — a dead click is caught
+         reliably by the screen-delta check, so retrying is safe and cheap.
+       - non-idempotent (type / Enter / Ctrl-V): ACCEPTED and handed to the
+         next planning step, because the action already fired and re-doing it
+         corrupts state (double-typing, double-submit). Correctness is
+         backstopped by _verify_command_effect / _verify_launch / loop-guard.
 
 Each test constructs a minimal orchestrator with mocked collaborators, runs
 _execute_subtask with a controlled reflection result, and asserts the outcome.
@@ -131,24 +141,37 @@ class TestFix01_SuccessCondition:
             "A low-confidence failure on a click step must NOT produce subtask success"
         )
 
-    def test_failure_low_conf_does_not_pass_type(self):
-        """Type step. Reflector says success=False, conf=0.60.
-        Old code: 0.60 < 0.95 (type fail_threshold) → treated as success.
-        New code: success=False → step fails → retried → subtask fails.
+    def test_uncertain_type_accepts_without_retyping(self):
+        """Type step, reflector UNCERTAIN (success=False, conf=0.60).
+
+        A type action has already physically fired and an uncertain verdict is
+        usually just "couldn't OCR-read the field", not real evidence of
+        failure. Re-typing produces 'hellohello' corruption and loops, so the
+        verdict is ACCEPTED and the next planning step verifies against the live
+        screen. Critically, the action must NOT be re-executed: verify() — and
+        therefore the action — is called exactly once.
         """
         step = _make_step(action_type="type", target=None)
         step.value = "hello"
         reflections = [_make_reflection(success=False, confidence=0.60)] * 3
         orch = _make_orchestrator(reflections, step_override=step)
         result = orch._execute_subtask(_make_subtask("type hello"))
-        assert result is False, (
-            "A low-confidence failure on a type step must NOT produce subtask success"
+        assert result is True, (
+            "An uncertain type is accepted (next step re-checks live) — subtask "
+            "should not fail outright"
+        )
+        assert orch.reflector.verify.call_count == 1, (
+            "An uncertain type must be accepted on the first verdict, never "
+            "re-typed (no double-typing)"
         )
 
-    def test_failure_low_conf_does_not_pass_enter_key(self):
-        """key_press enter (launcher key). fail_threshold=0.95.
-        Old code: conf=0.60 < 0.95 → success.
-        New code: success=False → step fails.
+    def test_uncertain_enter_accepts_without_resubmitting(self):
+        """key_press Enter, reflector UNCERTAIN (success=False, conf=0.60).
+
+        Enter is non-idempotent (it submits/launches). On an uncertain verdict
+        it is accepted rather than retried, so the agent never double-submits.
+        Launch/command correctness is still backstopped by _verify_launch and
+        the on-disk command check at the subtask level.
         """
         step = _make_step(action_type="key_press", target=None)
         step.key = "enter"
@@ -156,7 +179,11 @@ class TestFix01_SuccessCondition:
         reflections = [_make_reflection(success=False, confidence=0.60)] * 3
         orch = _make_orchestrator(reflections, step_override=step)
         result = orch._execute_subtask(_make_subtask("press enter"))
-        assert result is False
+        assert result is True
+        assert orch.reflector.verify.call_count == 1, (
+            "An uncertain Enter must be accepted on the first verdict, never "
+            "re-submitted"
+        )
 
     def test_failure_high_conf_fails(self):
         """Reflector says success=False, conf=0.80 (above min_confidence=0.75).

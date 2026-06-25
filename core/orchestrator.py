@@ -490,10 +490,16 @@ class TaskOrchestrator:
                 self.config.visual_replan_after > 0
                 and consecutive_failures >= self.config.visual_replan_after
             )
-            if _visual_mode and self._foreground_is_terminal():
+            # A "run: <cmd>" subtask is fixed by a CORRECTED COMMAND, never by the
+            # VLM clicking/typing into the console. Escalating it to visual mode
+            # re-types the command (corrupting the prompt line) and burns a 30-60s
+            # model swap. Block it deterministically on _is_cmd_subtask — do not
+            # rely on foreground-process detection, which can misfire right after
+            # an Enter press and let the destructive re-type through.
+            if _visual_mode and (_is_cmd_subtask or self._foreground_is_terminal()):
                 self.log(
-                    "  [VISUAL-REPLAN] Skipped — foreground is a terminal "
-                    "(clicks can't fix command errors)"
+                    "  [VISUAL-REPLAN] Skipped — terminal command subtask "
+                    "(clicks/re-typing can't fix command errors)"
                 )
                 _visual_mode = False
             try:
@@ -538,7 +544,18 @@ class TaskOrchestrator:
 
             self.log(f"  Step {step_idx + 1}: [{step.action_type}] {step.description}")
 
-            skip_reflection = step.action_type in ("wait", "extract")
+            # Terminal-command subtasks verify the typed command DETERMINISTICALLY
+            # at the Enter press (file-on-disk / shell-error check in
+            # _verify_command_effect). OCR-reading a dark console to confirm a type
+            # step systematically misfires ("FAILED" on correct typing) and used to
+            # trigger a destructive re-type. Defer to the authoritative Enter check.
+            _cmd_type_step = _is_cmd_subtask and step.action_type == "type"
+            skip_reflection = step.action_type in ("wait", "extract") or _cmd_type_step
+            if _cmd_type_step:
+                self.log(
+                    "  [CMD-TYPE] Command typed — deferring verification to the "
+                    "Enter/disk check (skipping unreliable OCR reflection)"
+                )
             step_success = False
             last_error = ""
 
@@ -621,13 +638,11 @@ class TaskOrchestrator:
                         time.sleep(0.1)
                         break
 
-                    # Step reported as failed by the reflector.
-                    # fail_threshold determines how to interpret uncertain failures:
-                    # below the threshold = outcome is inconclusive → retry;
-                    # at or above = reflector is confident it failed → retry or stop.
-                    # NOTE: reflection.confidence < fail_threshold no longer implies
-                    # success. It means "uncertain — try again." Only reflection.success
-                    # can set step_success = True.
+                    # Step reported as not-confirmed by the reflector.
+                    # fail_threshold splits "no clear evidence of failure" from
+                    # "confidently failed":
+                    #   below threshold = UNCERTAIN  → see policy split below
+                    #   at/above        = CLEAR FAIL → retry (if safe) or stop
                     _key = (step.key or "").lower()
                     _is_launcher_key = step.action_type == "key_press" and _key in ("super", "enter")
                     fail_threshold = (
@@ -637,17 +652,40 @@ class TaskOrchestrator:
                     )
 
                     if reflection.confidence < fail_threshold:
-                        # Reflector is uncertain about the failure — retry the action.
+                        # UNCERTAIN — no CLEAR evidence the step failed. How we treat
+                        # this depends on whether re-doing the action is safe:
+                        if _non_idempotent:
+                            # type / Enter / Ctrl-V already physically fired and we
+                            # have NO reliable signal they failed (the reflector just
+                            # couldn't *read* the result — a dark console, an OCR
+                            # miss, a field it can't see). Re-doing them is exactly
+                            # what caused the double-typing, double-submits, retry
+                            # loops and slow runs. Accept and move on: the NEXT
+                            # planning step reads the LIVE screen and corrects course
+                            # if anything is actually wrong. Backstops remain —
+                            # _verify_command_effect checks commands on disk,
+                            # _verify_launch checks app launches, and the loop-guard
+                            # stops genuine repeats.
+                            self.log(
+                                f"  Uncertain (conf={reflection.confidence:.2f} < "
+                                f"{fail_threshold:.2f}) — action already performed; "
+                                f"accepting and letting the next step verify live"
+                            )
+                            step_success = True
+                            break
+                        # Idempotent action (click / scroll): safe to repeat, and a
+                        # dead click is caught RELIABLY by the screen-delta (phash)
+                        # check as a high-confidence failure — so retrying here costs
+                        # nothing and recovers genuinely-missed clicks.
                         last_error = (
                             f"uncertain outcome (conf={reflection.confidence:.2f}, "
                             f"threshold={fail_threshold:.2f})"
                         )
                         self.log(f"  Uncertain result — retrying ({last_error})")
                         # Fast-path: if the goal process is already running after an
-                        # uncertain click or launch-Enter, skip remaining retries.
+                        # uncertain click, skip the remaining retries.
                         if _OS == "Windows" and _is_launch_goal and (
                             step.action_type in ("click", "double_click")
-                            or _is_launch_enter
                         ):
                             if self._goal_confirmed(_goal_proc, _baseline_windows):
                                 self.log(
@@ -657,15 +695,6 @@ class TaskOrchestrator:
                                 )
                                 step_success = True
                                 break
-                        # Fix C5: do not re-execute a non-idempotent action that
-                        # already fired. Stop here and let the planner re-evaluate
-                        # the live screen rather than typing/submitting again.
-                        if _non_idempotent:
-                            self.log(
-                                "  Non-idempotent step already executed — not "
-                                "re-running; handing back to planner to re-evaluate"
-                            )
-                            break
                     else:
                         # Reflector is confident the step failed.
                         last_error = (
