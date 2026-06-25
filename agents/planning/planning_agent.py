@@ -485,7 +485,7 @@ is bottom-right of the screenshot."""
 
 def _parse_visual_action(
     text: str, subtask_id: int, screen_w: int, screen_h: int
-) -> Optional[ActionStep]:
+) -> ActionStep | None:
     """Parse a UI-TARS action line into an ActionStep.
 
     Click-family steps carry explicit screen-pixel coordinates in `value`
@@ -571,10 +571,10 @@ class PlanningAgent:
         self,
         subtask: SubTask,
         image_base64: str,
-        completed: List[str] = None,
+        completed: list[str] = None,
         screen_w: int = 1920,
         screen_h: int = 1080,
-    ) -> Optional[ActionStep]:
+    ) -> ActionStep | None:
         """
         Visual recovery planning: send the actual screenshot to the VLM (UI-TARS)
         and get the next action directly, with pixel coordinates.
@@ -611,11 +611,11 @@ class PlanningAgent:
         self,
         subtask: SubTask,
         screen_context: str = None,
-        completed: List[str] = None,
-        task_context: List[str] = None,
-        failure_hints: List[str] = None,
+        completed: list[str] = None,
+        task_context: list[str] = None,
+        failure_hints: list[str] = None,
         snapshot=None,   # Optional[ScreenSnapshot] — when provided overrides screen_context
-    ) -> Optional[ActionStep]:
+    ) -> ActionStep | None:
         """
         Dynamic planning: return the ONE next action step toward the subtask goal.
         Returns None when the goal is already achieved (planner returns empty array).
@@ -737,7 +737,7 @@ class PlanningAgent:
         logger.info(f"[PLANNING] Next: [{step.action_type}] {step.description}")
         return step
 
-    def _parse_steps(self, text: str, subtask_id: int) -> List[ActionStep]:
+    def _parse_steps(self, text: str, subtask_id: int) -> list[ActionStep]:
         if "</think>" in text:
             text = text.split("</think>")[-1]
         else:

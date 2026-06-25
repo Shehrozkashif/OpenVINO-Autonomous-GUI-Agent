@@ -53,7 +53,7 @@ def _save(data: dict):
     _CRED_FILE.write_text(json.dumps(data, indent=2))
 
 
-def _best_key(store: dict, site: str) -> Optional[str]:
+def _best_key(store: dict, site: str) -> str | None:
     """Fuzzy-match site name against stored keys (case-insensitive substring)."""
     site_lower = site.lower()
     # Exact match first
@@ -66,7 +66,7 @@ def _best_key(store: dict, site: str) -> Optional[str]:
     return None
 
 
-def get(site: str, field: str) -> Optional[str]:
+def get(site: str, field: str) -> str | None:
     """Return stored username or password for a site. Returns None if not found."""
     store = _load()
     key = _best_key(store, site)

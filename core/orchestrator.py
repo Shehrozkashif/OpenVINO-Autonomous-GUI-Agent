@@ -22,7 +22,8 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
+from collections.abc import Callable
 
 from loguru import logger
 
@@ -63,7 +64,7 @@ class OrchestratorConfig:
 
 # Per-action-type limit on consecutive identical successful steps.
 # Stricter for high-signal actions (type, right_click); lenient for nav keys.
-DEDUP_LIMIT_BY_ACTION_TYPE: Dict[str, int] = {
+DEDUP_LIMIT_BY_ACTION_TYPE: dict[str, int] = {
     "type":        1,   # same text typed twice → almost certainly a loop
     "click":       2,   # allow up to 2 repeats (e.g. re-focusing a window)
     "key_press":   3,   # allow up to 3 repeats (e.g. multiple Escape/arrow presses)
@@ -81,10 +82,10 @@ class TaskOrchestrator:
         reflector: ReflectionAgent,
         capturer: ScreenCapture,
         task_memory: TaskMemory,
-        config: Optional[OrchestratorConfig] = None,
-        on_step_log: Optional[Callable[[str], None]] = None,
+        config: OrchestratorConfig | None = None,
+        on_step_log: Callable[[str], None] | None = None,
         ocr: Optional["OCREngine"] = None,
-        on_confirm: Optional[Callable[[str, str], bool]] = None,
+        on_confirm: Callable[[str, str], bool] | None = None,
     ):
         self.router    = router
         self.planner   = planner
@@ -116,11 +117,11 @@ class TaskOrchestrator:
             from agents.grounding.grounding_agent import OCREngine
             self._ocr = OCREngine()
         self._screen_w, self._screen_h = _screen_size()
-        self._extracted_data: Dict[str, str] = {}
+        self._extracted_data: dict[str, str] = {}
         # Per-task window-count baselines for apps that were ALREADY running
         # when their launch subtask started. exe_name → window count. Used to
         # require a NEW window (focusing an existing one must not pass).
-        self._launch_window_baseline: Dict[str, int] = {}
+        self._launch_window_baseline: dict[str, int] = {}
 
     def stop(self):
         self._stop_event.set()
@@ -254,7 +255,7 @@ class TaskOrchestrator:
         self.log(f"[ROUTER] {len(subtasks)} sub-task(s)")
 
         completed_subtask_ids = []
-        completed_subtask_descs: List[str] = []   # for inter-subtask context
+        completed_subtask_descs: list[str] = []   # for inter-subtask context
         failed = False
 
         for subtask in self._topological_sort(subtasks):
@@ -365,7 +366,7 @@ class TaskOrchestrator:
         return False
 
     def _setup_launch_goal(
-        self, subtask: SubTask, task_context: Optional[List[str]],
+        self, subtask: SubTask, task_context: list[str] | None,
     ) -> tuple:
         """Detect whether this subtask is a genuine app-launch goal, and on
         Windows record a window-count baseline when the target app is already
@@ -392,8 +393,8 @@ class TaskOrchestrator:
             )
         )
 
-        goal_proc: Optional[str] = None
-        baseline_windows: Optional[int] = None
+        goal_proc: str | None = None
+        baseline_windows: int | None = None
         if _OS == "Windows" and is_launch_goal:
             goal_proc = next(
                 (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS
@@ -418,7 +419,7 @@ class TaskOrchestrator:
         return is_launch_goal, goal_proc, baseline_windows, task_context
 
     def _goal_confirmed(
-        self, goal_proc: Optional[str], baseline_windows: Optional[int],
+        self, goal_proc: str | None, baseline_windows: int | None,
     ) -> bool:
         """Launch-goal achieved? A NEW window is required when the app pre-existed."""
         if not goal_proc:
@@ -427,14 +428,14 @@ class TaskOrchestrator:
             return self._count_process_windows(goal_proc) > baseline_windows
         return self._launch_confirmed(goal_proc)
 
-    def _execute_subtask(self, subtask: SubTask, task_context: List[str] = None) -> bool:
+    def _execute_subtask(self, subtask: SubTask, task_context: list[str] = None) -> bool:
         """
         Dynamic loop — plans ONE step at a time using live screen state.
 
         task_context: summaries of subtasks completed before this one in the same task.
         Each step planner sees: goal + inter-subtask context + within-subtask history + screen.
         """
-        completed: List[str] = []
+        completed: list[str] = []
         consecutive_failures = 0
         _cached_ocr: str = ""   # reuse reflection's OCR for next planning step
         _last_step_sig: tuple = ()    # (action_type, target, value, key)
@@ -839,7 +840,7 @@ class TaskOrchestrator:
 
     # ── Visual planning (UI-TARS recovery path) ────────────────────────────────
 
-    def _plan_visual(self, subtask: SubTask, completed: List[str]):
+    def _plan_visual(self, subtask: SubTask, completed: list[str]):
         """Capture the screen and ask the VLM for the next action directly."""
         import base64
         import io
@@ -857,7 +858,7 @@ class TaskOrchestrator:
     # ── Step execution ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _explicit_coords(value: Optional[str]) -> Optional[tuple]:
+    def _explicit_coords(value: str | None) -> tuple | None:
         """Parse an explicit "x,y" pixel pair from a step's value field.
 
         Visual-planner click steps (and burst steps) carry direct screen
@@ -1099,7 +1100,7 @@ class TaskOrchestrator:
 
     # ── Destructive-action firewall ─────────────────────────────────────────────
 
-    def _firewall_allows(self, text: Optional[str]) -> bool:
+    def _firewall_allows(self, text: str | None) -> bool:
         """Return True if `text` is safe to type, or was confirmed/allowed.
 
         Uses a deterministic regex classifier (immune to prompt injection) plus an
@@ -1124,7 +1125,7 @@ class TaskOrchestrator:
 
     # ── Data extraction ────────────────────────────────────────────────────────
 
-    def _extract_data(self, step: ActionStep) -> Optional[str]:
+    def _extract_data(self, step: ActionStep) -> str | None:
         """
         Use OCR + LLM to extract a specific value from the current screen.
         step.target describes what to extract  (e.g. "the error message",
@@ -1301,7 +1302,7 @@ class TaskOrchestrator:
     def _APP_SIGNALS(self) -> dict:
         return self._APP_SIGNALS_WINDOWS if _OS == "Windows" else self._APP_SIGNALS_LINUX
 
-    def _derive_launch_signals(self, description: str) -> List[str]:
+    def _derive_launch_signals(self, description: str) -> list[str]:
         """
         Fallback for apps absent from the curated _APP_SIGNALS table: derive OCR
         signal words directly from the app name in "open <AppName>" — e.g.
@@ -1549,7 +1550,7 @@ class TaskOrchestrator:
 
     # ── Topological sort ──────────────────────────────────────────────────────
 
-    def _topological_sort(self, subtasks: List[SubTask]) -> List[SubTask]:
+    def _topological_sort(self, subtasks: list[SubTask]) -> list[SubTask]:
         by_id = {s.id: s for s in subtasks}
         in_degree = {s.id: len(s.depends_on) for s in subtasks}
         dependents = {s.id: [] for s in subtasks}

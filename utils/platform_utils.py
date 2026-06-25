@@ -96,9 +96,9 @@ class GPUInfo:
         return round(self.vram_mb / 1024, 1)
 
 
-def detect_gpus() -> List[GPUInfo]:
+def detect_gpus() -> list[GPUInfo]:
     """Detect all available GPUs. Tries AMD ROCm first, then NVIDIA CUDA."""
-    gpus: List[GPUInfo] = []
+    gpus: list[GPUInfo] = []
 
     # ── AMD ROCm ──────────────────────────────────────────────────────────────
     try:
@@ -165,13 +165,13 @@ def detect_gpus() -> List[GPUInfo]:
     return gpus
 
 
-def _detect_intel_gpus() -> List[GPUInfo]:
+def _detect_intel_gpus() -> list[GPUInfo]:
     """Best-effort Intel GPU detection for the startup banner.
 
     OVMS selects the device itself via --target_device GPU, so this is purely
     informational and never required for inference to work.
     """
-    gpus: List[GPUInfo] = []
+    gpus: list[GPUInfo] = []
     if _OS == "Windows":
         try:
             r = subprocess.run(
@@ -209,7 +209,7 @@ def _detect_intel_gpus() -> List[GPUInfo]:
     return gpus
 
 
-def gpu_summary(gpus: List[GPUInfo]) -> str:
+def gpu_summary(gpus: list[GPUInfo]) -> str:
     """One-line summary of detected GPUs."""
     if not gpus:
         return "No GPUs detected (CPU-only mode)"

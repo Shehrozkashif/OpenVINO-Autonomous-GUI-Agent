@@ -154,7 +154,7 @@ class TestCaptureSnapshot(unittest.TestCase):
         capturer.capture.return_value = img
         return capturer
 
-    def _make_ocr(self, words: List[OCRWord]):
+    def _make_ocr(self, words: list[OCRWord]):
         ocr = MagicMock(spec=OCREngine)
         ocr.is_available.return_value = True
         ocr.extract.return_value = words

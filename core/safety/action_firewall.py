@@ -36,7 +36,8 @@ based on whether a confirmation callback is available (see `Decision`).
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, List, Optional
+from typing import List, Optional
+from collections.abc import Callable
 
 
 class Severity(str, Enum):
@@ -48,7 +49,7 @@ class Severity(str, Enum):
 @dataclass
 class Verdict:
     severity: Severity
-    matched: List[str]          # human-readable reasons
+    matched: list[str]          # human-readable reasons
     text: str
 
     @property
@@ -105,7 +106,7 @@ _MEDIUM_PATTERNS = [
 ]
 
 
-def evaluate(text: Optional[str]) -> Verdict:
+def evaluate(text: str | None) -> Verdict:
     """Classify a candidate command/text string by destructive severity."""
     if not text or not text.strip():
         return Verdict(Severity.NONE, [], text or "")
@@ -125,7 +126,7 @@ class Decision(str, Enum):
 
 def decide(
     verdict: Verdict,
-    confirm_cb: Optional[Callable[[str, str], bool]] = None,
+    confirm_cb: Callable[[str, str], bool] | None = None,
 ) -> Decision:
     """
     Turn a Verdict into an ALLOW/BLOCK decision.

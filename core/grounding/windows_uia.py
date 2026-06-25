@@ -25,7 +25,7 @@ from loguru import logger
 
 _IS_WINDOWS = platform.system() == "Windows"
 _uia = None          # lazy-loaded uiautomation module reference
-_available: Optional[bool] = None
+_available: bool | None = None
 
 
 # ── Module availability ───────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ def find_element(
     target: str,
     fuzzy_threshold: float = 0.65,
     timeout_s: float = 1.5,
-) -> Optional[Tuple[int, int, float]]:
+) -> tuple[int, int, float] | None:
     """
     Search the Windows UIA tree for a UI element matching `target`.
     Returns (screen_x, screen_y, confidence) or None if not found.
@@ -241,7 +241,7 @@ def _walk_and_match(
     query: str,
     threshold: float,
     max_depth: int,
-) -> Optional[Tuple[int, int, float]]:
+) -> tuple[int, int, float] | None:
     """
     DFS walk of a UIA subtree.  Returns the best (x, y, confidence) match or None.
     Stops immediately on an exact name match.

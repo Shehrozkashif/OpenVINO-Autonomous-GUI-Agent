@@ -15,7 +15,7 @@ _OS = platform.system()
 
 # ── Availability check (done once at import) ──────────────────────────────────
 
-def _probe_linux_clipboard() -> Optional[str]:
+def _probe_linux_clipboard() -> str | None:
     """Return the first working clipboard tool name, or None."""
     for tool, args_write, args_read in [
         ("xclip",
@@ -35,7 +35,7 @@ def _probe_linux_clipboard() -> Optional[str]:
     return None
 
 
-_LINUX_TOOL: Optional[str] = _probe_linux_clipboard() if _OS == "Linux" else None
+_LINUX_TOOL: str | None = _probe_linux_clipboard() if _OS == "Linux" else None
 
 
 # ── Write ─────────────────────────────────────────────────────────────────────

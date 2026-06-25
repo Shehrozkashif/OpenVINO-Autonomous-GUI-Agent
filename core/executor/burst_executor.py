@@ -226,7 +226,7 @@ class BurstExecutor:
 
 # ── Burst detection ───────────────────────────────────────────────────────────
 
-def detect_burst(subtask: SubTask) -> Optional[ActionBurst]:
+def detect_burst(subtask: SubTask) -> ActionBurst | None:
     """
     Analyse a SubTask description and return an ActionBurst if one of the
     known fast-sequence patterns is recognised, else None.
@@ -343,7 +343,7 @@ def detect_burst(subtask: SubTask) -> Optional[ActionBurst]:
 
 # ── Public instruction-level helper ──────────────────────────────────────────
 
-def detect_burst_from_instruction(instruction: str) -> Optional[ActionBurst]:
+def detect_burst_from_instruction(instruction: str) -> ActionBurst | None:
     """
     Match the full raw user instruction (before LLM routing) against burst patterns.
 

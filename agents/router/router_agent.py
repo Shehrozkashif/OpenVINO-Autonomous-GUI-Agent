@@ -220,9 +220,9 @@ class RouterAgent:
     def decompose(
         self,
         instruction: str,
-        screen_context: Optional[str] = None,
-        memory_hint: Optional[str] = None,
-    ) -> Tuple[str, List[SubTask]]:
+        screen_context: str | None = None,
+        memory_hint: str | None = None,
+    ) -> tuple[str, list[SubTask]]:
         task_id = str(uuid.uuid4())[:8]
         logger.info(f"[ROUTER] Task {task_id}: '{instruction}'")
 
@@ -260,7 +260,7 @@ class RouterAgent:
 
         return task_id, subtasks
 
-    def _parse_subtasks(self, text: str) -> List[SubTask]:
+    def _parse_subtasks(self, text: str) -> list[SubTask]:
         if "</think>" in text:
             text = text.split("</think>")[-1]
         else:

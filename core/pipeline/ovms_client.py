@@ -154,7 +154,7 @@ class OVMSClient:
 
     def query_llm(
         self,
-        messages: List[dict],
+        messages: list[dict],
         max_tokens: int = 1024,
         temperature: float = 0.7,
         response_schema: dict = None,

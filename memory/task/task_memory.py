@@ -77,7 +77,7 @@ class TaskMemory:
             """, (instruction, embedding, steps_json, time.time(), duration_s))
         self.conn.commit()
 
-    def find_similar(self, instruction: str, threshold: float = 0.85) -> Optional[dict]:
+    def find_similar(self, instruction: str, threshold: float = 0.85) -> dict | None:
         """Find a semantically similar past task. Returns None if nothing above threshold."""
         query_emb = self.embedder.encode(instruction).astype(np.float32)
         rows = self.conn.execute(
@@ -150,7 +150,7 @@ class TaskMemory:
             )
         self.conn.commit()
 
-    def get_failure_hints(self, description: str, limit: int = 5) -> List[str]:
+    def get_failure_hints(self, description: str, limit: int = 5) -> list[str]:
         """
         Return a list of failure hints relevant to the given step description.
         Matches by checking if any known-failed target appears in the description.

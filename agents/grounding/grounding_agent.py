@@ -107,8 +107,8 @@ class OCREngine:
 
     def __init__(self):
         self._ocr = None
-        self._available: Optional[bool] = None
-        self._cache: Dict[str, tuple] = {}   # phash_str → (words, timestamp)
+        self._available: bool | None = None
+        self._cache: dict[str, tuple] = {}   # phash_str → (words, timestamp)
 
     def is_available(self) -> bool:
         if self._available is None:
@@ -122,7 +122,7 @@ class OCREngine:
                 logger.warning(f"[OCR] RapidOCR not available: {e}")
         return self._available
 
-    def extract(self, image: Image.Image) -> List[OCRWord]:
+    def extract(self, image: Image.Image) -> list[OCRWord]:
         """
         Run OCR and return detected text boxes.
         Transparently caches by perceptual hash — unchanged screens reuse the
@@ -132,7 +132,7 @@ class OCREngine:
             return []
 
         # ── Cache lookup ──────────────────────────────────────────────────────
-        phash_str: Optional[str] = None
+        phash_str: str | None = None
         try:
             phash_str = str(imagehash.phash(image))
             cached = self._cache.get(phash_str)
@@ -154,7 +154,7 @@ class OCREngine:
         if not results:
             return []
 
-        words: List[OCRWord] = []
+        words: list[OCRWord] = []
         for item in results:
             if len(item) < 3:
                 continue
@@ -184,11 +184,11 @@ class OCREngine:
 
     def find_text(
         self,
-        words: List[OCRWord],
+        words: list[OCRWord],
         query: str,
         threshold: float = 0.60,
         foreground_only: bool = False,
-    ) -> Optional[OCRWord]:
+    ) -> OCRWord | None:
         """
         Fuzzy-match query against all OCR words.
         Checks windows of 1-3 consecutive words to handle multi-word labels.
@@ -197,7 +197,7 @@ class OCREngine:
         if not words or not query.strip():
             return None
         q = query.strip().lower()
-        best: Optional[Tuple[float, OCRWord]] = None
+        best: tuple[float, OCRWord] | None = None
 
         for window in range(1, 4):
             for i in range(len(words) - window + 1):
@@ -264,10 +264,10 @@ class ElementCache:
     """Cache coordinates keyed by (target, perceptual screen hash) with TTL."""
 
     def __init__(self, ttl_seconds: int = 300):
-        self._cache: Dict[str, tuple] = {}
+        self._cache: dict[str, tuple] = {}
         self._ttl = ttl_seconds
 
-    def get(self, target: str, screen_hash: str) -> Optional[Tuple[int, int, float, str, str]]:
+    def get(self, target: str, screen_hash: str) -> tuple[int, int, float, str, str] | None:
         if target not in self._cache:
             return None
         x, y, conf, method, element_type, ts, cached_hash = self._cache[target]
@@ -447,7 +447,7 @@ class UIGroundingAgent:
                                latency_ms=(time.time() - start) * 1000,
                                target=target, method="failed")
 
-    def ground_multiple(self, targets: List[str]) -> List[GroundingResult]:
+    def ground_multiple(self, targets: list[str]) -> list[GroundingResult]:
         return [self.ground(t) for t in targets]
 
     # ── grounding stages ──────────────────────────────────────────────────────
@@ -457,11 +457,11 @@ class UIGroundingAgent:
         target: str,
         display: Image.Image,
         img_b64: str,
-        words: List[OCRWord],
+        words: list[OCRWord],
         scale_x: float,
         scale_y: float,
         use_vlm: bool = True,
-    ) -> Optional[Tuple[int, int, float, str, str]]:
+    ) -> tuple[int, int, float, str, str] | None:
         # Stage 0: Windows UIAutomation — fast, pixel-perfect, no model needed
         # UIA elements are always interactive → element_type="foreground_interactive"
         if _IS_WINDOWS and _uia_ok():
@@ -496,7 +496,7 @@ class UIGroundingAgent:
     def _vlm_coords(
         self, target: str, img_b64: str,
         display_w: int = 0, display_h: int = 0,
-    ) -> Optional[Tuple[int, int, float, str, str]]:
+    ) -> tuple[int, int, float, str, str] | None:
         """Ask UI-TARS for normalized (x,y) coordinates and scale to screen pixels.
 
         display_w/display_h: pixel dimensions of the image sent to the VLM.
@@ -528,7 +528,7 @@ class UIGroundingAgent:
     def _parse_coords(
         self, text: str, screen_w: int, screen_h: int,
         display_w: int = 0, display_h: int = 0,
-    ) -> Optional[Tuple[int, int, float]]:
+    ) -> tuple[int, int, float] | None:
         """
         Parse VLM output into screen pixel coordinates (x, y, confidence).
 
@@ -555,7 +555,7 @@ class UIGroundingAgent:
         dw = display_w if display_w > 1 else screen_w
         dh = display_h if display_h > 1 else screen_h
 
-        def _px_to_screen(px: float, py: float) -> Tuple[int, int]:
+        def _px_to_screen(px: float, py: float) -> tuple[int, int]:
             """Scale display-space pixels to screen pixels, clamped to screen bounds."""
             return (
                 min(int(px / dw * screen_w), screen_w - 1),
@@ -679,7 +679,7 @@ class UIGroundingAgent:
         logger.debug(f"[GROUNDING/S2] Unrecognised VLM format: '{text[:100]}'")
         return None
 
-    def _rephrase_targets(self, target: str) -> List[str]:
+    def _rephrase_targets(self, target: str) -> list[str]:
         """
         Ask the LLM for up to 3 alternative text labels for the same UI element.
         Used when OCR + VLM both fail to locate the original target string.

@@ -119,7 +119,7 @@ class ReflectionAgent:
         client: InferenceClient,
         capturer: ScreenCapture,
         min_confidence: float = 0.75,
-        ocr: Optional[OCREngine] = None,
+        ocr: OCREngine | None = None,
         escalate_uncertain: bool = True,
     ):
         self.client = client

@@ -115,7 +115,7 @@ def frame_phash(img: Image.Image) -> "imagehash.ImageHash":
 class ScreenCapture:
     def __init__(self, monitor: int = 1):
         self.monitor = monitor
-        self._last_hash: Optional[imagehash.ImageHash] = None
+        self._last_hash: imagehash.ImageHash | None = None
         # Regions (x1, y1, x2, y2) to black out in every captured frame.
         # Used to mask the agent's own GUI window so its text doesn't pollute OCR.
         # NOTE: the orchestrator overwrites this list every refresh cycle.

@@ -19,7 +19,7 @@ from tools.desktop_control.controller import DesktopController
 from ui.main_window import DesktopGUIAgent
 
 
-def _warmup_models(client: OVMSClient, task_memory: Optional[TaskMemory] = None) -> None:
+def _warmup_models(client: OVMSClient, task_memory: TaskMemory | None = None) -> None:
     """
     Fire cheap dummy requests to the LLM and VLM, and pre-load the
     sentence-transformer embedder, in a background thread. The first real user

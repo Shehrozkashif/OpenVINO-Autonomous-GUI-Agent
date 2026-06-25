@@ -25,7 +25,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 @dataclass
 class OCRRegion:
     text: str
-    bbox: Tuple[int, int, int, int]   # x1, y1, x2, y2 in screen pixels
+    bbox: tuple[int, int, int, int]   # x1, y1, x2, y2 in screen pixels
     confidence: float
     window_id: int                     # hwnd (0 on non-Windows or unknown)
     window_title: str
@@ -38,12 +38,12 @@ class ScreenSnapshot:
     foreground_window_title: str
     foreground_process: str
     screen_hash: str
-    ocr_regions: List[OCRRegion] = field(default_factory=list)
+    ocr_regions: list[OCRRegion] = field(default_factory=list)
     # (name, control_type) pairs from the foreground window's UIA tree —
     # ground-truth clickable elements, Windows only ([] elsewhere).
-    interactive_elements: List[Tuple[str, str]] = field(default_factory=list)
+    interactive_elements: list[tuple[str, str]] = field(default_factory=list)
 
-    def foreground_texts(self) -> List[str]:
+    def foreground_texts(self) -> list[str]:
         """Deduplicated text tokens visible in the foreground window."""
         seen, out = set(), []
         for r in self.ocr_regions:
@@ -95,7 +95,7 @@ class ScreenSnapshot:
 
 # ── Windows helpers ────────────────────────────────────────────────────────────
 
-def _get_foreground_hwnd_and_title() -> Tuple[int, str]:
+def _get_foreground_hwnd_and_title() -> tuple[int, str]:
     if not _IS_WINDOWS:
         return 0, "Desktop"
     try:
@@ -135,7 +135,7 @@ def _get_foreground_process(hwnd: int) -> str:
         return "unknown"
 
 
-def _enum_visible_windows() -> List[Tuple[int, str, Tuple[int, int, int, int]]]:
+def _enum_visible_windows() -> list[tuple[int, str, tuple[int, int, int, int]]]:
     """[(hwnd, title, (left, top, right, bottom))] for all non-minimised windows."""
     if not _IS_WINDOWS:
         return []
@@ -168,7 +168,7 @@ def _enum_visible_windows() -> List[Tuple[int, str, Tuple[int, int, int, int]]]:
         return []
 
 
-def _point_in_rect(px: int, py: int, rect: Tuple[int, int, int, int]) -> bool:
+def _point_in_rect(px: int, py: int, rect: tuple[int, int, int, int]) -> bool:
     x1, y1, x2, y2 = rect
     return x1 <= px < x2 and y1 <= py < y2
 
@@ -207,13 +207,13 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
     thumb.thumbnail((960, 540))
     screen_hash = str(imagehash.phash(thumb))
 
-    words: List[OCRWord] = ocr.extract(thumb) if ocr.is_available() else []
+    words: list[OCRWord] = ocr.extract(thumb) if ocr.is_available() else []
 
     # OCR ran on the 960×540 thumbnail; scale word coords back to full-screen pixels
     scale_x = img.width / thumb.width if thumb.width > 0 else 1.0
     scale_y = img.height / thumb.height if thumb.height > 0 else 1.0
 
-    regions: List[OCRRegion] = []
+    regions: list[OCRRegion] = []
     for w in words:
         # Skip low-quality or special-character tokens (mirrors _get_screen_context)
         if (

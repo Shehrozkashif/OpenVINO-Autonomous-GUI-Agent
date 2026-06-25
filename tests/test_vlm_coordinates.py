@@ -46,8 +46,8 @@ TARGETS = [
 @dataclass
 class CoordResult:
     target: str
-    predicted_x: Optional[int]
-    predicted_y: Optional[int]
+    predicted_x: int | None
+    predicted_y: int | None
     conf: float
     in_region: bool
     raw_response: str
