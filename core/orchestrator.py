@@ -337,6 +337,33 @@ class TaskOrchestrator:
 
     # ── Subtask execution loop ────────────────────────────────────────────────
 
+    def _try_burst(self, subtask: SubTask) -> bool:
+        """Run a recognised zero-LLM burst pattern for this subtask, if any.
+
+        Prefers a pre-attached burst (set by instruction-level detection in
+        execute()) over per-subtask pattern matching; falls back to
+        detect_burst(). Returns True only when a burst ran AND succeeded — in
+        which case the subtask is complete. Otherwise returns False and the
+        caller falls back to the planning loop.
+        """
+        _burst = (
+            subtask.burst
+            if getattr(subtask, "burst", None) is not None
+            else detect_burst(subtask)
+        )
+        if _burst is None:
+            return False
+        self.log(f"  [BURST] {len(_burst.steps)}-step burst pattern detected")
+        _burst_result = self.burst_executor.run(_burst)
+        if _burst_result.success:
+            self.log(f"  [BURST] Succeeded ({len(_burst.steps)} steps, no LLM required)")
+            return True
+        self.log(
+            f"  [BURST] Failed at step {_burst_result.failed_at_step}: "
+            f"{_burst_result.reason} — falling back to planning loop"
+        )
+        return False
+
     def _execute_subtask(self, subtask: SubTask, task_context: List[str] = None) -> bool:
         """
         Dynamic loop — plans ONE step at a time using live screen state.
@@ -350,23 +377,9 @@ class TaskOrchestrator:
         _last_step_sig: tuple = ()    # (action_type, target, value, key)
         _same_step_streak: int = 0   # consecutive successes of the identical step
 
-        # Prefer a pre-attached burst (set by instruction-level detection in execute())
-        # over per-subtask pattern matching; fall back to detect_burst() otherwise.
-        _burst = (
-            subtask.burst
-            if getattr(subtask, "burst", None) is not None
-            else detect_burst(subtask)
-        )
-        if _burst is not None:
-            self.log(f"  [BURST] {len(_burst.steps)}-step burst pattern detected")
-            _burst_result = self.burst_executor.run(_burst)
-            if _burst_result.success:
-                self.log(f"  [BURST] Succeeded ({len(_burst.steps)} steps, no LLM required)")
-                return True
-            self.log(
-                f"  [BURST] Failed at step {_burst_result.failed_at_step}: "
-                f"{_burst_result.reason} — falling back to planning loop"
-            )
+        # Fast path: recognised multi-step patterns run with zero LLM calls.
+        if self._try_burst(subtask):
+            return True
 
         # Process-based early-exit only fires for genuine app-launch subtasks, not for
         # subtasks that USE the app ("with Notepad already open, save the file").
