@@ -62,8 +62,13 @@ that needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
 
 ## Code Style
 
-- Follow **PEP 8**; lint with `ruff check .` (configured in `pyproject.toml`).
-- Use **type hints** on all public function signatures.
+- Follow the **[Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)**;
+  lint with `ruff check .` (rules configured in `pyproject.toml`: pyflakes,
+  import order, modern typing, bugbear, comprehensions, and Google-convention
+  docstrings). It must pass clean before you submit.
+- Use **type hints** on all public function signatures; prefer the modern forms
+  (`list`/`dict`/`tuple` over `typing.List`/`Dict`/`Tuple`, and `X | None` over
+  `Optional[X]`).
 - Agent constructors must accept `InferenceClient` (the Protocol in
   `core/protocols/a2a.py`), not a concrete client class.
 - Heavy or optional dependencies may be imported lazily inside functions
