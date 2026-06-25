@@ -15,7 +15,7 @@ _OS = platform.system()
 
 def _probe_linux_clipboard() -> str | None:
     """Return the first working clipboard tool name, or None."""
-    for tool, args_write, args_read in [
+    for tool, args_write, _args_read in [
         ("xclip",
          ["xclip", "-selection", "clipboard"],
          ["xclip", "-selection", "clipboard", "-out"]),

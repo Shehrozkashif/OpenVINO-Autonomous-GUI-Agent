@@ -151,7 +151,7 @@ def run_vlm_coord_test():
         "label_bg":    (0, 0, 0, 160),
     }
 
-    for r, (target, region, _) in zip(results, TARGETS):
+    for r, (target, region, _) in zip(results, TARGETS, strict=False):
         x0f, y0f, x1f, y1f = region
         rx0, ry0 = int(x0f * sw), int(y0f * sh)
         rx1, ry1 = int(x1f * sw), int(y1f * sh)

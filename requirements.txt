@@ -34,6 +34,7 @@ loguru>=0.7.0
 pyperclip>=1.8.0   # clipboard support on Windows/macOS (Linux uses xclip/xsel)
 keyring>=24.0.0    # OS-encrypted credential storage (falls back to JSON if absent)
 
-# ── Testing ───────────────────────────────────────────────────────────────────
+# ── Testing & Linting ─────────────────────────────────────────────────────────
 pytest>=7.4.0
 pytest-cov>=4.1.0
+ruff>=0.6.0        # lint/format per Google style guide: `ruff check .`
