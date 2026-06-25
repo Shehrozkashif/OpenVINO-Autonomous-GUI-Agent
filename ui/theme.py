@@ -1,6 +1,5 @@
 # ui/theme.py
-"""
-Design tokens + global stylesheet for the agent command center.
+"""Design tokens + global stylesheet for the agent command center.
 
 Single source of truth for color, typography, spacing and radii.
 All glass surfaces are translucent fills + 1px light strokes (no real blur —

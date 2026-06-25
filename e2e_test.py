@@ -1,5 +1,4 @@
-"""
-e2e_test.py — Full pipeline end-to-end test.
+"""e2e_test.py — Full pipeline end-to-end test.
 Tests every stage with clear pass/fail reporting.
 Run: python e2e_test.py
 """

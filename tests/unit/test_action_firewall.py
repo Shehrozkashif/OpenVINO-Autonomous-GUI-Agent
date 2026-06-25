@@ -1,6 +1,5 @@
 # tests/unit/test_action_firewall.py
-"""
-Unit tests for the destructive-action firewall (Fix C7) and the instruction-level
+"""Unit tests for the destructive-action firewall (Fix C7) and the instruction-level
 burst-deferral safety check (Fix C1).
 """
 import sys

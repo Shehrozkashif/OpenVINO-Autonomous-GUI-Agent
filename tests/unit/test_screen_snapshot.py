@@ -1,6 +1,5 @@
 # tests/unit/test_screen_snapshot.py
-"""
-Unit tests for Fix 1.2 — ScreenSnapshot structured world model.
+"""Unit tests for Fix 1.2 — ScreenSnapshot structured world model.
 
 Covers:
   TestOCRRegionAndSnapshot  — dataclass construction, foreground_texts(),

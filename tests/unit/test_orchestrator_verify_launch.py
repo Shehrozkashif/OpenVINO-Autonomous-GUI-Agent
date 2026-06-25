@@ -1,6 +1,5 @@
 # tests/unit/test_orchestrator_verify_launch.py
-"""
-Unit tests for Fix B — _verify_launch must NOT trigger on subtasks that mention
+"""Unit tests for Fix B — _verify_launch must NOT trigger on subtasks that mention
 "open" as part of "open the context menu", "with the context menu open", etc.
 
 It should still trigger correctly for genuine app-launch subtasks ("open Notepad",
@@ -47,8 +46,7 @@ def _make_orch() -> TaskOrchestrator:
 class TestVerifyLaunchTriggerCondition:
 
     def test_right_click_to_open_context_menu_skips_verification(self):
-        """
-        'right click on the desktop to open the context menu' contains 'open'
+        """'right click on the desktop to open the context menu' contains 'open'
         but no known app keyword. _verify_launch must return True immediately
         (skip verification) and never try a process/OCR check.
         """
@@ -59,8 +57,7 @@ class TestVerifyLaunchTriggerCondition:
         assert result is True
 
     def test_context_menu_open_click_new_skips_verification(self):
-        """
-        'with the context menu open, click New' — 'open' in desc, no app keyword.
+        """'with the context menu open, click New' — 'open' in desc, no app keyword.
         Must skip verification.
         """
         orch = _make_orch()
@@ -92,8 +89,7 @@ class TestVerifyLaunchTriggerCondition:
         assert result is True
 
     def test_search_launcher_always_triggers(self):
-        """
-        'search launcher' explicitly → always runs verification path.
+        """'search launcher' explicitly → always runs verification path.
         Mock process check to return True so the call completes.
         """
         orch = _make_orch()
@@ -109,8 +105,7 @@ class TestVerifyLaunchTriggerCondition:
             assert result is True
 
     def test_launch_word_always_triggers_verification(self):
-        """
-        'launch' (not 'open') always triggers regardless of app keyword presence.
+        """'launch' (not 'open') always triggers regardless of app keyword presence.
         Mock process check to fail so we can confirm it ran.
         """
         orch = _make_orch()
@@ -134,8 +129,7 @@ class TestVerifyLaunchTriggerCondition:
 class TestVerifyLaunchAppKeywordCheck:
 
     def test_open_notepad_triggers_verification(self):
-        """
-        'open notepad' has 'open' + 'notepad' (known app) → triggers verification.
+        """'open notepad' has 'open' + 'notepad' (known app) → triggers verification.
         Process check is mocked to fail → _verify_launch returns False.
         This confirms the verification path was entered (not skipped).
         """
@@ -186,8 +180,7 @@ class TestVerifyLaunchAppKeywordCheck:
 class TestVerifyLaunchForegroundOCR:
 
     def test_ocr_fallback_only_reads_foreground_regions(self):
-        """
-        For an app not in the process map (Linux path or unknown), the OCR fallback
+        """For an app not in the process map (Linux path or unknown), the OCR fallback
         must read snapshot.ocr_regions filtered to is_in_foreground=True, not raw OCR.
         """
         orch = _make_orch()
@@ -216,8 +209,7 @@ class TestVerifyLaunchForegroundOCR:
             assert mock_snap.called
 
     def test_ocr_fallback_ignores_background_region_signal(self):
-        """
-        If the matching signal word appears only in a BACKGROUND region, it must
+        """If the matching signal word appears only in a BACKGROUND region, it must
         NOT count as a confirmed launch.
         """
         orch = _make_orch()

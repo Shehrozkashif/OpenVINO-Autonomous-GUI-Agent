@@ -1,6 +1,5 @@
 # utils/clipboard.py
-"""
-Cross-platform clipboard read/write.
+"""Cross-platform clipboard read/write.
 
 On Linux: tries xclip then xsel (no Python deps needed).
 On Windows/macOS: uses pyperclip.
@@ -103,8 +102,7 @@ def available() -> bool:
 # ── Clipboard-paste typing ────────────────────────────────────────────────────
 
 def paste_type(text: str, send_hotkey_fn, sensitive: bool = False) -> bool:
-    """
-    Type text by setting the clipboard and sending ctrl+v.
+    """Type text by setting the clipboard and sending ctrl+v.
     Restores previous clipboard content after 600 ms (async).
 
     send_hotkey_fn: callable that accepts *key_names (e.g. controller._send_hotkey)

@@ -1,6 +1,5 @@
 # agents/planning/planning_agent.py
-"""
-Planning Agent — generates precise step sequences for sub-tasks.
+"""Planning Agent — generates precise step sequences for sub-tasks.
 Uses Chain-of-Thought prompting for complex multi-step tasks.
 """
 
@@ -575,8 +574,7 @@ class PlanningAgent:
         screen_w: int = 1920,
         screen_h: int = 1080,
     ) -> ActionStep | None:
-        """
-        Visual recovery planning: send the actual screenshot to the VLM (UI-TARS)
+        """Visual recovery planning: send the actual screenshot to the VLM (UI-TARS)
         and get the next action directly, with pixel coordinates.
 
         Used by the orchestrator when text-based planning has failed repeatedly —
@@ -616,8 +614,7 @@ class PlanningAgent:
         failure_hints: list[str] = None,
         snapshot=None,   # Optional[ScreenSnapshot] — when provided overrides screen_context
     ) -> ActionStep | None:
-        """
-        Dynamic planning: return the ONE next action step toward the subtask goal.
+        """Dynamic planning: return the ONE next action step toward the subtask goal.
         Returns None when the goal is already achieved (planner returns empty array).
 
         task_context:   descriptions of subtasks already completed in this overall task.

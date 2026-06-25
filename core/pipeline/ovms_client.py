@@ -1,6 +1,5 @@
 # core/pipeline/ovms_client.py
-"""
-OpenVINO™ Model Server (OVMS) inference client.
+"""OpenVINO™ Model Server (OVMS) inference client.
 
 A single OVMS instance serves BOTH models on one OpenAI-compatible endpoint:
     LLM (text reasoning):   qwen3-8b-int4-ov        — planning, routing, reflection
@@ -21,6 +20,7 @@ from config import LLM_MODEL, OVMS_BASE_URL, VLM_MODEL
 
 class InferenceResponse(BaseModel):
     """Unified response type for all inference calls."""
+
     content: str
     model: str
     latency_ms: float
@@ -74,8 +74,7 @@ def _post_with_retry(
 
 
 class OVMSClient:
-    """
-    OpenVINO Model Server client (models configured in config.py).
+    """OpenVINO Model Server client (models configured in config.py).
 
     Both models are served by the same OVMS instance on OVMS_BASE_URL via the
     OpenAI-compatible /v3/chat/completions endpoint:

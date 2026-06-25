@@ -1,6 +1,5 @@
 # tests/unit/test_burst_executor.py
-"""
-Unit tests for Fix 1.1 – ActionBurst.
+"""Unit tests for Fix 1.1 – ActionBurst.
 
 Three test classes:
 
@@ -295,7 +294,7 @@ class TestBurstExecutorRun:
         actor.execute.assert_called_once_with(s1, x=42, y=77)
 
     def test_no_grounding_for_type_steps(self):
-        """type and key_press steps do not trigger grounding."""
+        """Type and key_press steps do not trigger grounding."""
         s1 = _step("type", target=None, value="hello", step_id=1)
         s2 = _step("key_press", target=None, key="enter", step_id=2)
         burst = ActionBurst(steps=[s1, s2], verify_at_end=False)
@@ -342,7 +341,7 @@ class TestBurstExecutorRun:
 
     @patch("core.executor.burst_executor.time")
     def test_sleep_duration_is_80ms_for_type_steps(self, mock_time):
-        """type steps use the default 80 ms inter-step delay."""
+        """Type steps use the default 80 ms inter-step delay."""
         mock_time.time.return_value = 0.0
         s1 = _step("type", value="x", step_id=1)
         s2 = _step("type", value="y", step_id=2)
@@ -532,8 +531,7 @@ class TestBurstExecutorRun:
 # ── 3. Orchestrator integration ───────────────────────────────────────────────
 
 class TestOrchestratorBurstIntegration:
-    """
-    Verify that the orchestrator calls burst_executor.run() for matching
+    """Verify that the orchestrator calls burst_executor.run() for matching
     subtasks, returns True on success, and falls back to the planning loop
     on failure or when no pattern matches.
     """

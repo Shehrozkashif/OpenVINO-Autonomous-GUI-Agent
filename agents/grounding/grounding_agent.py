@@ -1,6 +1,5 @@
 # agents/grounding/grounding_agent.py
-"""
-UI Grounding Agent — locates UI elements by natural language description.
+"""UI Grounding Agent — locates UI elements by natural language description.
 
 Three-stage pipeline (Windows) / Two-stage (Linux/macOS):
   Stage 0 — Windows UIA:  Accessibility tree bounding box lookup    (conf 1.0 / 0.85+)
@@ -96,8 +95,7 @@ class OCRWord:
 
 
 class OCREngine:
-    """
-    Wraps RapidOCR (pure Python ONNX, no system deps) with fuzzy text search.
+    """Wraps RapidOCR (pure Python ONNX, no system deps) with fuzzy text search.
     Initialised lazily on first use. Results are cached by perceptual hash so
     repeated calls on an unchanged screen skip the ONNX inference entirely.
     """
@@ -123,8 +121,7 @@ class OCREngine:
         return self._available
 
     def extract(self, image: Image.Image) -> list[OCRWord]:
-        """
-        Run OCR and return detected text boxes.
+        """Run OCR and return detected text boxes.
         Transparently caches by perceptual hash — unchanged screens reuse the
         previous result without running the ONNX model again (~150 ms saved).
         """
@@ -189,8 +186,7 @@ class OCREngine:
         threshold: float = 0.60,
         foreground_only: bool = False,
     ) -> OCRWord | None:
-        """
-        Fuzzy-match query against all OCR words.
+        """Fuzzy-match query against all OCR words.
         Checks windows of 1-3 consecutive words to handle multi-word labels.
         When foreground_only=True, words with is_in_foreground=False are skipped.
         """
@@ -287,8 +283,7 @@ class ElementCache:
 
 
 class UIGroundingAgent:
-    """
-    Locates UI elements by natural language description.
+    """Locates UI elements by natural language description.
 
     Stage 1 — OCR:  fast, free, pixel-perfect for text-labeled elements.
     Stage 2 — VLM:  UI-TARS-1.5-7B direct coordinate prediction for everything else.
@@ -320,8 +315,7 @@ class UIGroundingAgent:
     # ── public API ────────────────────────────────────────────────────────────
 
     def ground(self, target: str, max_retries: int = 1) -> GroundingResult:
-        """
-        Locate a UI element by natural language description.
+        """Locate a UI element by natural language description.
         Returns GroundingResult with screen (x, y). found=False if all stages fail.
 
         On failure, asks the LLM for 3 alternative phrasings and retries each
@@ -404,8 +398,7 @@ class UIGroundingAgent:
                                target=target, method="failed")
 
     def ground_fast(self, target: str) -> GroundingResult:
-        """
-        Stage 0 + Stage 1 only (UIA + OCR) — no VLM call.
+        """Stage 0 + Stage 1 only (UIA + OCR) — no VLM call.
 
         Used during burst pre-grounding where transient elements (context-menu
         items) may not be visible yet.  If they're absent, Stage 2 would block
@@ -529,8 +522,7 @@ class UIGroundingAgent:
         self, text: str, screen_w: int, screen_h: int,
         display_w: int = 0, display_h: int = 0,
     ) -> tuple[int, int, float] | None:
-        """
-        Parse VLM output into screen pixel coordinates (x, y, confidence).
+        """Parse VLM output into screen pixel coordinates (x, y, confidence).
 
         display_w/display_h: size of the image that was sent to the VLM.
         When the model returns pixel-valued coordinates they are in the display
@@ -680,8 +672,7 @@ class UIGroundingAgent:
         return None
 
     def _rephrase_targets(self, target: str) -> list[str]:
-        """
-        Ask the LLM for up to 3 alternative text labels for the same UI element.
+        """Ask the LLM for up to 3 alternative text labels for the same UI element.
         Used when OCR + VLM both fail to locate the original target string.
         Returns an empty list if the LLM call fails or produces nothing useful.
         """

@@ -1,6 +1,5 @@
 # memory/task/task_memory.py
-"""
-SQLite-backed task memory — two tables:
+"""SQLite-backed task memory — two tables:
 
   tasks            — successful task sequences (used for memory hints to router)
   failure_patterns — steps/targets that failed and how they were recovered
@@ -125,8 +124,7 @@ class TaskMemory:
         app_context: str = "",
         recovery_hint: str = "",
     ):
-        """
-        Record that a specific target/action combination failed.
+        """Record that a specific target/action combination failed.
         Repeated failures on the same target increment the counter.
         """
         existing = self.conn.execute(
@@ -151,8 +149,7 @@ class TaskMemory:
         self.conn.commit()
 
     def get_failure_hints(self, description: str, limit: int = 5) -> list[str]:
-        """
-        Return a list of failure hints relevant to the given step description.
+        """Return a list of failure hints relevant to the given step description.
         Matches by checking if any known-failed target appears in the description.
         Used by the planner to avoid repeating past failures.
         """

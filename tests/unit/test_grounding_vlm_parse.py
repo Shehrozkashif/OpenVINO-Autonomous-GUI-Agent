@@ -1,6 +1,5 @@
 # tests/unit/test_grounding_vlm_parse.py
-"""
-Regression tests for UIGroundingAgent._parse_coords — formats UI-TARS emits
+"""Regression tests for UIGroundingAgent._parse_coords — formats UI-TARS emits
 in practice, including malformed bracket counts seen in live runs.
 """
 import sys

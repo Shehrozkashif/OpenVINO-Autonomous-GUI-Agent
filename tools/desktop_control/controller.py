@@ -1,6 +1,5 @@
 # tools/desktop_control/controller.py
-"""
-Cross-platform desktop controller — auto-detects OS at startup.
+"""Cross-platform desktop controller — auto-detects OS at startup.
 
   Linux  → XTest (Xlib): injects events at the X11 server level so they pass
             through GNOME Shell's global keyboard capture (needed for Activities).
@@ -242,8 +241,7 @@ def _send_text(text: str, interval: float = 0.04):
 # ── DesktopController ─────────────────────────────────────────────────────────
 
 class DesktopController:
-    """
-    Cross-platform desktop controller.
+    """Cross-platform desktop controller.
     Mouse: pynput (works on Linux/Windows/macOS).
     Keyboard: XTest on Linux/X11, pynput on Windows/macOS.
     """
@@ -280,8 +278,7 @@ class DesktopController:
 
     def type_text(self, text: str, interval: float = 0.04,
                   use_clipboard: bool = False, sensitive: bool = False) -> bool:
-        """
-        Type text via keystrokes (default) or clipboard paste.
+        """Type text via keystrokes (default) or clipboard paste.
 
         use_clipboard=True: sets clipboard → ctrl+v — instant, handles all Unicode.
         use_clipboard=False: keystroke-by-keystroke — correct for terminal prompts

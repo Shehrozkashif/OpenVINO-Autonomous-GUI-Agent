@@ -1,6 +1,5 @@
 # ui/widgets.py
-"""
-Reusable design-system components.
+"""Reusable design-system components.
 
 Performance rules (the GPU belongs to the VLM, not the UI):
   * No QGraphicsBlurEffect (software-rendered, expensive).

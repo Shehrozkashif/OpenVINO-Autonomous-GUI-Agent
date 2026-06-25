@@ -1,6 +1,5 @@
 # ui/panels.py
-"""
-IntelligencePanel — the right-hand "agent mind" column.
+"""IntelligencePanel — the right-hand "agent mind" column.
 
 Shows what the agent is thinking, doing and how confident it is. Everything
 here is driven by AgentEventBus signals; nothing polls.

@@ -1,6 +1,5 @@
 # core/safety/action_firewall.py
-"""
-Action firewall — a deterministic guard that inspects text the agent is about to
+"""Action firewall — a deterministic guard that inspects text the agent is about to
 type (and certain key actions) for destructive or dangerous operations BEFORE
 they are executed.
 
@@ -128,8 +127,7 @@ def decide(
     verdict: Verdict,
     confirm_cb: Callable[[str, str], bool] | None = None,
 ) -> Decision:
-    """
-    Turn a Verdict into an ALLOW/BLOCK decision.
+    """Turn a Verdict into an ALLOW/BLOCK decision.
 
     confirm_cb(summary, command) -> bool : optional human confirmation handler.
         Returns True to allow, False to deny. When absent:

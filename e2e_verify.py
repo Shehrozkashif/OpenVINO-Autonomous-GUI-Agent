@@ -1,5 +1,4 @@
-"""
-E2E pipeline verification — uses OVMSClient.
+"""E2E pipeline verification — uses OVMSClient.
 
 Run after: python start.py  (prepares both models and starts OpenVINO Model Server)
 Tests Router → Planner → Grounder with a real instruction.

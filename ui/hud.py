@@ -1,6 +1,5 @@
 # ui/hud.py
-"""
-MissionHUD — compact always-on-top status pill shown while a mission runs.
+"""MissionHUD — compact always-on-top status pill shown while a mission runs.
 
 The main window minimizes during execution (it must not cover the screen the
 agent is operating), which previously left the user staring at nothing for

@@ -1,6 +1,5 @@
 # tests/unit/test_orchestrator_idempotency.py
-"""
-Unit tests for Fix C5 — non-idempotent actions are not blind-retried.
+"""Unit tests for Fix C5 — non-idempotent actions are not blind-retried.
 
 A `type` step (and Enter/paste) changes state every time it runs. When such a
 step physically executes but verification comes back uncertain or failed, the

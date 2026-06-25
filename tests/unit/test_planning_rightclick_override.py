@@ -1,6 +1,5 @@
 # tests/unit/test_planning_rightclick_override.py
-"""
-Unit tests for right_click override — PlanningAgent forces action_type="right_click"
+"""Unit tests for right_click override — PlanningAgent forces action_type="right_click"
 when the subtask description explicitly says "right click" (even if the LLM outputs "click").
 
 Covers:
@@ -113,8 +112,7 @@ class TestRightClickOverride:
         assert step.action_type == "type"
 
     def test_mention_of_right_click_not_at_start_and_no_on_does_not_override(self):
-        """
-        'right click' mentioned mid-sentence without 'right click on' and description
+        """'right click' mentioned mid-sentence without 'right click on' and description
         does not start with 'right click' → override does NOT fire.
         The check requires startswith OR 'right click on' to avoid over-eager matching.
         """

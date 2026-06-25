@@ -1,5 +1,4 @@
-"""
-Live grounding test — tests Stage 0 (UIA), Stage 1 (OCR), Stage 2 (VLM),
+"""Live grounding test — tests Stage 0 (UIA), Stage 1 (OCR), Stage 2 (VLM),
 coordinate parsing, and mouse click accuracy.
 
 Requires: OpenVINO Model Server running (python start.py), real display, Windows.

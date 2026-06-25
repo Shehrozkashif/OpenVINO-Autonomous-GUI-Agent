@@ -1,6 +1,5 @@
 # tests/unit/test_orchestrator_new_window_launch.py
-"""
-Regression tests for the "app already running" launch semantics.
+"""Regression tests for the "app already running" launch semantics.
 
 Live failure this guards against: "open Windows Terminal" was satisfied by
 clicking the taskbar button of the user's EXISTING terminal (which was running
@@ -28,7 +27,8 @@ from core.protocols.a2a import SubTask
 @pytest.fixture(autouse=True)
 def _pin_windows():
     """Every test here exercises Windows launch semantics (process maps,
-    window-count baselines), so pin the platform regardless of the host OS."""
+    window-count baselines), so pin the platform regardless of the host OS.
+    """
     with patch("core.orchestrator._OS", "Windows"):
         yield
 

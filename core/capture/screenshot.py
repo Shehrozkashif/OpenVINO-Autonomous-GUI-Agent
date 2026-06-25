@@ -1,6 +1,5 @@
 # core/capture/screenshot.py
-"""
-Cross-platform screen capture — auto-detects OS at startup.
+"""Cross-platform screen capture — auto-detects OS at startup.
 
   Linux  → Xlib root.get_image(): reads pixels directly from the X server
             without sending compositor events (PIL.ImageGrab causes GNOME Shell

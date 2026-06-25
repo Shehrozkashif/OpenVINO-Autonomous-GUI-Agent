@@ -1,6 +1,5 @@
 # tests/unit/test_orchestrator_cmd_check.py
-"""
-Tests for deterministic terminal-command verification (_verify_command_effect).
+"""Tests for deterministic terminal-command verification (_verify_command_effect).
 
 Live failure this guards against: `echo 'x' > file` SUCCEEDED (file on disk),
 but OCR reflection read the silent new prompt as "no change → failed" and
@@ -148,8 +147,9 @@ class TestGenericCommands:
 class TestSubtaskIntegration:
 
     def test_cmd_subtask_completes_on_verified_effect(self, tmp_path):
-        """type + enter with the file actually created → subtask returns True
-        WITHOUT any reflection call for the Enter step."""
+        """Type + enter with the file actually created → subtask returns True
+        WITHOUT any reflection call for the Enter step.
+        """
         f = tmp_path / "notes.txt"
 
         type_step = ActionStep(id=1, subtask_id=1, action_type="type",

@@ -1,6 +1,5 @@
 # core/orchestrator.py
-"""
-Task Orchestrator — the central coordinator.
+"""Task Orchestrator — the central coordinator.
 
 Execution flow:
   instruction
@@ -429,8 +428,7 @@ class TaskOrchestrator:
         return self._launch_confirmed(goal_proc)
 
     def _execute_subtask(self, subtask: SubTask, task_context: list[str] = None) -> bool:
-        """
-        Dynamic loop — plans ONE step at a time using live screen state.
+        """Dynamic loop — plans ONE step at a time using live screen state.
 
         task_context: summaries of subtasks completed before this one in the same task.
         Each step planner sees: goal + inter-subtask context + within-subtask history + screen.
@@ -1126,8 +1124,7 @@ class TaskOrchestrator:
     # ── Data extraction ────────────────────────────────────────────────────────
 
     def _extract_data(self, step: ActionStep) -> str | None:
-        """
-        Use OCR + LLM to extract a specific value from the current screen.
+        """Use OCR + LLM to extract a specific value from the current screen.
         step.target describes what to extract  (e.g. "the error message",
                                                 "the file path shown",
                                                 "the page title")
@@ -1166,8 +1163,7 @@ class TaskOrchestrator:
     # ── Scroll-to-find ────────────────────────────────────────────────────────
 
     def _scroll_to_find(self, target: str) -> GroundingResult:
-        """
-        Scroll down and retry grounding after each scroll.
+        """Scroll down and retry grounding after each scroll.
         Stops early if the page stops changing (reached end of document).
         Resets scroll position if element is not found.
         """
@@ -1303,8 +1299,7 @@ class TaskOrchestrator:
         return self._APP_SIGNALS_WINDOWS if _OS == "Windows" else self._APP_SIGNALS_LINUX
 
     def _derive_launch_signals(self, description: str) -> list[str]:
-        """
-        Fallback for apps absent from the curated _APP_SIGNALS table: derive OCR
+        """Fallback for apps absent from the curated _APP_SIGNALS table: derive OCR
         signal words directly from the app name in "open <AppName>" — e.g.
         "open Brave Browser" → ["Brave Browser", "Brave"]. This keeps launch
         verification working for ANY installed app, not just well-known ones.
@@ -1398,7 +1393,8 @@ class TaskOrchestrator:
 
     def _launch_confirmed(self, exe_name: str) -> bool:
         """Confirm an app launched. Uses window presence for always-running
-        processes (H9), bare process existence otherwise."""
+        processes (H9), bare process existence otherwise.
+        """
         if exe_name.lower() in self._ALWAYS_RUNNING_WINDOWS:
             return self._process_has_visible_window(exe_name)
         # For normal apps, a running process is a strong signal, but prefer a
@@ -1487,8 +1483,7 @@ class TaskOrchestrator:
     # ── Adaptive inter-subtask wait ───────────────────────────────────────────
 
     def _wait_for_settle(self, min_s: float = 0.5, max_s: float = 3.0, poll_interval: float = 0.25):
-        """
-        Wait until the screen stops changing (transitions complete) or max_s elapses.
+        """Wait until the screen stops changing (transitions complete) or max_s elapses.
         Polls OCR text every poll_interval seconds; if two consecutive reads are identical
         the screen has settled and we return early. Never returns in less than min_s.
         On any error falls back to sleeping max_s.
@@ -1515,8 +1510,7 @@ class TaskOrchestrator:
     # ── Screen context ─────────────────────────────────────────────────────────
 
     def _get_screen_context(self) -> str:
-        """
-        Return a structured screen context string for the planner.
+        """Return a structured screen context string for the planner.
 
         Uses capture_snapshot() to separate foreground UI text from background
         window text so the planner can focus on interactable elements only.

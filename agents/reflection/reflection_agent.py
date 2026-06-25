@@ -1,6 +1,5 @@
 # agents/reflection/reflection_agent.py
-"""
-Reflection Agent — verifies that each action step succeeded.
+"""Reflection Agent — verifies that each action step succeeded.
 
 Primary path: OCR the after-screenshot, pass visible text to the LLM
 (config.LLM_MODEL).
@@ -137,8 +136,7 @@ class ReflectionAgent:
 
     def verify(self, step: ActionStep, wait_s: float = 1.5,
                pre_hash=None) -> ReflectionResult:
-        """
-        Verify if an action step succeeded.
+        """Verify if an action step succeeded.
         1. For click actions: use pre_hash (captured by orchestrator BEFORE the action)
            as the baseline. Falls back to capturing after-action if pre_hash is None.
         2. Adaptive wait for UI to settle.

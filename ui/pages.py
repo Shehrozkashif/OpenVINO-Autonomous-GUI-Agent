@@ -1,6 +1,5 @@
 # ui/pages.py
-"""
-The seven workspace pages of the command center.
+"""The seven workspace pages of the command center.
 
 Every page refreshes its data on showEvent (cheap SQLite reads) and never
 blocks the UI thread — anything slow (health checks) runs in a worker thread.
@@ -63,7 +62,8 @@ def _scrollable(inner: QWidget) -> QScrollArea:
 class MissionComposer(GlassCard):
     """The primary prompt surface: a large natural-language instruction box
     with a Run button — front and center, exactly like a command line for
-    the agent."""
+    the agent.
+    """
 
     run_requested = pyqtSignal(str)
 

@@ -1,6 +1,5 @@
 # tests/unit/test_ui_interactions.py
-"""
-Click-through audit: every interactive control in the command center is
+"""Click-through audit: every interactive control in the command center is
 triggered programmatically and its effect asserted, so a broken
 signal/slot connection fails CI instead of shipping as a dead button.
 """

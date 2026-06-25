@@ -1,6 +1,5 @@
 # tests/unit/test_reflection_screen_delta.py
-"""
-Unit tests for perceptual-hash screen-delta check as ground truth for clicks.
+"""Unit tests for perceptual-hash screen-delta check as ground truth for clicks.
 
 If the perceptual hash of the screen does not change between the moment just
 after the click fires and the moment after the adaptive wait, the reflector
@@ -45,8 +44,7 @@ def _solid(color=(128, 128, 128), size=(200, 100)):
 
 
 def _make_agent_click(before_img, after_img):
-    """
-    Agent configured for a click path test.
+    """Agent configured for a click path test.
     capture() is called exactly twice: first for the before-hash, then for the
     after-screenshot (_adaptive_wait is mocked so it never calls has_changed).
     """
@@ -64,8 +62,7 @@ def _make_agent_click(before_img, after_img):
 
 
 def _make_agent_nonclick(after_img):
-    """
-    Agent configured for a non-click path test.
+    """Agent configured for a non-click path test.
     capture() is called exactly once (the after-screenshot; no before-hash).
     """
     agent = ReflectionAgent.__new__(ReflectionAgent)
@@ -167,8 +164,7 @@ class TestDeltaNonzero:
     """Different before/after → screen-delta check passes, LLM/VLM path runs."""
 
     def test_click_changed_calls_vlm(self):
-        """
-        Sparse OCR (0 words) + click → VLM path.
+        """Sparse OCR (0 words) + click → VLM path.
         LLM must NOT be called; VLM must be called.
         """
         before = _solid((0, 0, 0))
@@ -184,8 +180,7 @@ class TestDeltaNonzero:
         agent.client.query_llm.assert_not_called()
 
     def test_click_changed_with_rich_ocr_calls_llm(self):
-        """
-        Rich OCR (≥3 words) + click → LLM path.
+        """Rich OCR (≥3 words) + click → LLM path.
         """
         before = _solid((0, 0, 0))
         after = _solid((200, 200, 200))
@@ -226,8 +221,7 @@ class TestDeltaNonzero:
 # ── 3. Action-scoping tests (non-click actions skip the delta check) ──────────
 
 class TestActionScoping:
-    """
-    type, key_press, hotkey, scroll must not be subject to the delta check.
+    """type, key_press, hotkey, scroll must not be subject to the delta check.
     - Only one capture() call (no before-hash capture).
     - Even with an "unchanged" screen, the LLM is still called.
     """
@@ -253,7 +247,7 @@ class TestActionScoping:
         assert agent.capturer.capture.call_count == 1
 
     def test_type_calls_llm_regardless_of_screen(self):
-        """type always calls LLM (forced, regardless of screen change)."""
+        """Type always calls LLM (forced, regardless of screen change)."""
         agent = _make_agent_nonclick(_solid())
         agent.verify(_step("type", value="hello"))
         agent.client.query_llm.assert_called_once()
@@ -264,7 +258,7 @@ class TestActionScoping:
         agent.client.query_llm.assert_called_once()
 
     def test_type_result_not_098_confidence(self):
-        """type result must never be the delta-check sentinel confidence=0.98."""
+        """Type result must never be the delta-check sentinel confidence=0.98."""
         agent = _make_agent_nonclick(_solid())
         result = agent.verify(_step("type", value="hello"))
         assert result.confidence != pytest.approx(0.98) or result.success is True

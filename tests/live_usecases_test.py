@@ -1,5 +1,4 @@
-"""
-Live end-to-end use-case test suite.
+"""Live end-to-end use-case test suite.
 
 Runs real tasks through the full orchestrator pipeline (router → burst/planner →
 grounder → actor → reflector) and verifies each outcome independently.

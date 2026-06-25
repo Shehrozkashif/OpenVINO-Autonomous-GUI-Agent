@@ -1,6 +1,5 @@
 # ui/main_window.py
-"""
-Agent command center — the main application shell.
+"""Agent command center — the main application shell.
 
 Layout:  NavRail | header + page stack + CommandDock | IntelligencePanel
 

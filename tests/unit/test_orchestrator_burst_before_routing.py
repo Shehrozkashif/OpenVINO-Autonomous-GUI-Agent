@@ -1,6 +1,5 @@
 # tests/unit/test_orchestrator_burst_before_routing.py
-"""
-Unit tests for Fix C — instruction-level burst detection in orchestrator.execute().
+"""Unit tests for Fix C — instruction-level burst detection in orchestrator.execute().
 
 Verifies:
   1. When detect_burst_from_instruction matches, router.decompose is NOT called.
@@ -218,8 +217,7 @@ class TestExecuteSubtaskUsesBurstField:
         return orch
 
     def test_subtask_with_burst_runs_burst_not_planning_loop(self):
-        """
-        When subtask.burst is set, _execute_subtask must use the burst executor
+        """When subtask.burst is set, _execute_subtask must use the burst executor
         and NOT call planner.plan_next_step.
         """
         orch = self._make_subtask_orch()
@@ -236,8 +234,7 @@ class TestExecuteSubtaskUsesBurstField:
         orch.planner.plan_next_step.assert_not_called()
 
     def test_subtask_without_burst_falls_back_to_planning_loop(self):
-        """
-        When subtask.burst is None and detect_burst returns None,
+        """When subtask.burst is None and detect_burst returns None,
         _execute_subtask must fall through to the LLM planning loop.
         """
         orch = self._make_subtask_orch()

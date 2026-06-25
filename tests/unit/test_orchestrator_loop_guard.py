@@ -1,6 +1,5 @@
 # tests/unit/test_orchestrator_loop_guard.py
-"""
-Unit tests for action-type-aware step deduplication (loop guard) in the orchestrator.
+"""Unit tests for action-type-aware step deduplication (loop guard) in the orchestrator.
 
 The loop guard fires when _same_step_streak > DEDUP_LIMIT_BY_ACTION_TYPE[action_type].
 Streak starts at 0 on the first success of a given signature, increments on each
@@ -51,8 +50,7 @@ _SUCCESS = ReflectionResult(
 
 
 def _make_orch(plan_steps):
-    """
-    Build an orchestrator where:
+    """Build an orchestrator where:
     - planner returns plan_steps in order, then None (goal achieved).
     - every reflection returns success.
     - actor.execute always returns True.
@@ -123,14 +121,12 @@ class TestDedupLimitValues:
 # ── 2. type (limit=1): 1 repeat allowed, 2nd repeat triggers ─────────────────
 
 class TestTypeDedupLimit:
-    """
-    type limit=1 → streak 0→1: allowed; streak 1→2: trigger.
+    """type limit=1 → streak 0→1: allowed; streak 1→2: trigger.
     Total appearances: 2 = allowed, 3 = triggers.
     """
 
     def test_type_appears_twice_is_allowed(self):
-        """
-        type_step × 2, then a different step, then None.
+        """type_step × 2, then a different step, then None.
         Streak after 2nd type = 1 (1 > 1 is False) → no trigger.
         Planner is called 4 times (2 type + 1 diff + None).
         """
@@ -142,8 +138,7 @@ class TestTypeDedupLimit:
         assert orch.planner.plan_next_step.call_count == 4  # all 3 steps + None
 
     def test_type_appears_three_times_triggers(self):
-        """
-        type_step × 3 → streak reaches 2 (2 > 1) → loop guard fires after step 3.
+        """type_step × 3 → streak reaches 2 (2 > 1) → loop guard fires after step 3.
         Planner is called exactly 3 times (4th call never happens).
         """
         ts = _step("type", target=None, value="hello")
@@ -162,14 +157,12 @@ class TestTypeDedupLimit:
 # ── 3. click (limit=2): 2 repeats allowed, 3rd repeat triggers ───────────────
 
 class TestClickDedupLimit:
-    """
-    click limit=2 → streak 0→1→2: allowed; streak 2→3: trigger.
+    """click limit=2 → streak 0→1→2: allowed; streak 2→3: trigger.
     Total appearances: 3 = allowed, 4 = triggers.
     """
 
     def test_click_appears_three_times_is_allowed(self):
-        """
-        click × 3, then different, then None.
+        """Click × 3, then different, then None.
         Streak after 3rd click = 2 (2 > 2 is False) → no trigger.
         Planner called 5 times.
         """
@@ -181,8 +174,7 @@ class TestClickDedupLimit:
         assert orch.planner.plan_next_step.call_count == 5
 
     def test_click_appears_four_times_triggers(self):
-        """
-        click × 4 → streak = 3 (3 > 2) → loop guard fires after step 4.
+        """Click × 4 → streak = 3 (3 > 2) → loop guard fires after step 4.
         Planner called exactly 4 times.
         """
         cs = _step("click", target="Btn")
@@ -192,8 +184,7 @@ class TestClickDedupLimit:
         assert orch.planner.plan_next_step.call_count == 4
 
     def test_click_trigger_injects_escape(self):
-        """
-        When the click loop guard fires, actor.execute must be called with an
+        """When the click loop guard fires, actor.execute must be called with an
         Escape key_press step (in addition to the 4 regular click executions).
         """
         cs = _step("click", target="Btn")
@@ -243,8 +234,7 @@ class TestStreakReset:
     """A different action signature resets the streak; subsequent runs start fresh."""
 
     def test_type_streak_resets_after_click(self):
-        """
-        type × 2 → streak = 1 (at limit, but NOT >1 so not triggered).
+        """Type × 2 → streak = 1 (at limit, but NOT >1 so not triggered).
         click (different) → streak resets to 0.
         type × 2 → streak = 1 again (fresh start, NOT triggered).
         None → done normally.
@@ -258,8 +248,7 @@ class TestStreakReset:
         assert orch.planner.plan_next_step.call_count == 6
 
     def test_click_streak_resets_after_type(self):
-        """
-        click × 3 → streak = 2 (at limit, NOT triggered).
+        """Click × 3 → streak = 2 (at limit, NOT triggered).
         type → streak resets.
         click × 3 → streak = 2 again (NOT triggered).
         """
@@ -271,8 +260,7 @@ class TestStreakReset:
         assert orch.planner.plan_next_step.call_count == 8  # 7 steps + None
 
     def test_different_target_same_type_resets_streak(self):
-        """
-        Two clicks on the same target, then a click on a different target,
+        """Two clicks on the same target, then a click on a different target,
         then two more clicks on the original target — streak for the original
         resets after the different target, so no trigger.
         """
@@ -284,7 +272,7 @@ class TestStreakReset:
         assert orch.planner.plan_next_step.call_count == 6
 
     def test_only_type_no_escape_on_trigger(self):
-        """type loop guard does NOT inject Escape (only click/right_click do)."""
+        """Type loop guard does NOT inject Escape (only click/right_click do)."""
         ts = _step("type", target=None, value="hello")
         orch = _make_orch([ts, ts, ts])
         orch._execute_subtask(_subtask())

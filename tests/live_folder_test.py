@@ -1,5 +1,4 @@
-"""
-Live end-to-end test: create a folder on the desktop via the GUI agent pipeline.
+"""Live end-to-end test: create a folder on the desktop via the GUI agent pipeline.
 
 Task: "Right click on the desktop, click New, click Folder, type TestFolder, press Enter."
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Desktop GUI Agent — single entry point.
+"""Desktop GUI Agent — single entry point.
 
     python start.py
 

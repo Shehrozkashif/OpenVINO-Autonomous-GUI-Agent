@@ -1,6 +1,5 @@
 # utils/credentials.py
-"""
-Credential manager — stores username/password pairs keyed by site/app name.
+"""Credential manager — stores username/password pairs keyed by site/app name.
 
 Storage backends (in preference order):
   1. OS keyring (Windows Credential Locker / macOS Keychain / libsecret) — used

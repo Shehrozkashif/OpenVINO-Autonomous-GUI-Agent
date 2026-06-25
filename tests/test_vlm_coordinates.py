@@ -1,5 +1,4 @@
-"""
-End-to-end VLM coordinate accuracy test for UI-TARS-1.5-7B.
+"""End-to-end VLM coordinate accuracy test for UI-TARS-1.5-7B.
 
 What it does:
   1. Captures a live screenshot.

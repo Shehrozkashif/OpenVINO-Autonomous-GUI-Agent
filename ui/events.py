@@ -1,6 +1,5 @@
 # ui/events.py
-"""
-AgentEventBus — turns the orchestrator's log stream into structured Qt signals.
+"""AgentEventBus — turns the orchestrator's log stream into structured Qt signals.
 
 The orchestrator reports progress through `self.log(str)` with stable prefixes
 ([TASK START], [ROUTER], [SUBTASK n], "Step N: [type] …", "Verified (conf=…)",

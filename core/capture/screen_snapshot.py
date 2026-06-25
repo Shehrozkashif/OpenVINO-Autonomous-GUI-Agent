@@ -1,6 +1,5 @@
 # core/capture/screen_snapshot.py
-"""
-ScreenSnapshot — structured world model for the current display state.
+"""ScreenSnapshot — structured world model for the current display state.
 
 Captures foreground window identity and assigns each OCR word to its
 owning window, marking whether it belongs to the foreground or not.
@@ -176,8 +175,7 @@ def _point_in_rect(px: int, py: int, rect: tuple[int, int, int, int]) -> bool:
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
-    """
-    Build a ScreenSnapshot:
+    """Build a ScreenSnapshot:
     1. Get foreground window title + process via Win32 API.
     2. Enumerate all visible window rects (front-to-back order).
     3. Run OCR on the current screenshot thumbnail.

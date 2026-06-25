@@ -1,6 +1,5 @@
 # tests/unit/test_reflection_success_condition.py
-"""
-Unit tests for Fix 0.1 — the broken success condition in _execute_subtask.
+"""Unit tests for Fix 0.1 — the broken success condition in _execute_subtask.
 
 Regression guard: ensures that a low-confidence failure from the reflector
 can never be silently converted into step_success=True.
@@ -45,8 +44,7 @@ def _make_reflection(success: bool, confidence: float, should_retry: bool = True
 
 
 def _make_orchestrator(reflection_results: list, step_override: ActionStep = None):
-    """
-    Build a TaskOrchestrator with all collaborators mocked.
+    """Build a TaskOrchestrator with all collaborators mocked.
 
     reflection_results: list of ReflectionResult objects returned by reflector.verify()
     in sequence (one per call).
@@ -110,8 +108,7 @@ def _make_orchestrator(reflection_results: list, step_override: ActionStep = Non
 # ── tests ─────────────────────────────────────────────────────────────────────
 
 class TestFix01_SuccessCondition:
-    """
-    Core invariant: only reflection.success=True can produce step_success=True.
+    """Core invariant: only reflection.success=True can produce step_success=True.
     Low-confidence failure must NOT be treated as success.
     """
 
@@ -122,8 +119,7 @@ class TestFix01_SuccessCondition:
         assert result is True
 
     def test_failure_low_conf_does_not_pass_click(self):
-        """
-        Click step. Reflector says success=False, conf=0.60.
+        """Click step. Reflector says success=False, conf=0.60.
         Old code: 0.60 < 0.75 (min_confidence) → treated as success.
         New code: success=False → step fails → retried → subtask fails.
         """
@@ -136,8 +132,7 @@ class TestFix01_SuccessCondition:
         )
 
     def test_failure_low_conf_does_not_pass_type(self):
-        """
-        Type step. Reflector says success=False, conf=0.60.
+        """Type step. Reflector says success=False, conf=0.60.
         Old code: 0.60 < 0.95 (type fail_threshold) → treated as success.
         New code: success=False → step fails → retried → subtask fails.
         """
@@ -151,8 +146,7 @@ class TestFix01_SuccessCondition:
         )
 
     def test_failure_low_conf_does_not_pass_enter_key(self):
-        """
-        key_press enter (launcher key). fail_threshold=0.95.
+        """key_press enter (launcher key). fail_threshold=0.95.
         Old code: conf=0.60 < 0.95 → success.
         New code: success=False → step fails.
         """
@@ -165,8 +159,7 @@ class TestFix01_SuccessCondition:
         assert result is False
 
     def test_failure_high_conf_fails(self):
-        """
-        Reflector says success=False, conf=0.80 (above min_confidence=0.75).
+        """Reflector says success=False, conf=0.80 (above min_confidence=0.75).
         This is a confident failure — must not pass.
         """
         reflections = [
@@ -179,8 +172,7 @@ class TestFix01_SuccessCondition:
         assert result is False
 
     def test_failure_high_conf_no_retry_stops_immediately(self):
-        """
-        Confident failure + should_retry=False → break out of retry loop immediately.
+        """Confident failure + should_retry=False → break out of retry loop immediately.
         Reflector is called exactly once (not retried).
         """
         reflections = [_make_reflection(success=False, confidence=0.80, should_retry=False)]
@@ -192,8 +184,7 @@ class TestFix01_SuccessCondition:
         )
 
     def test_uncertain_failure_retries_before_giving_up(self):
-        """
-        Low-confidence failure (uncertain) → the system retries max_retries_per_step
+        """Low-confidence failure (uncertain) → the system retries max_retries_per_step
         times, then fails. Reflector is called exactly max_retries times.
         """
         n_retries = 3
@@ -206,8 +197,7 @@ class TestFix01_SuccessCondition:
         )
 
     def test_success_after_retry_passes(self):
-        """
-        First attempt fails (uncertain), second attempt succeeds.
+        """First attempt fails (uncertain), second attempt succeeds.
         Subtask must succeed overall.
         """
         reflections = [

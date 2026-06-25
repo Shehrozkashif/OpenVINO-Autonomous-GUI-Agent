@@ -1,6 +1,5 @@
 # tests/unit/test_planning_prompt_bias.py
-"""
-Unit tests for planning prompt safety — "when in doubt, stop" bias and LOOP PREVENTION rule.
+"""Unit tests for planning prompt safety — "when in doubt, stop" bias and LOOP PREVENTION rule.
 
 Two properties are verified:
 

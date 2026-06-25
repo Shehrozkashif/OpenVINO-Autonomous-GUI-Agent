@@ -60,6 +60,7 @@ class ActionBurst:
     All targets are pre-grounded before step 0 fires.  If any grounding fails
     the burst is aborted and the orchestrator falls back to the planning loop.
     """
+
     steps: list[ActionStep]
     verify_at_end: bool = True              # run ONE reflection on the final step only
     timeout_ms: int = 5000                  # abort if the whole burst exceeds this
@@ -69,6 +70,7 @@ class ActionBurst:
 @dataclass
 class BurstResult:
     """Outcome returned by BurstExecutor.run()."""
+
     success: bool
     failed_at_step: int | None           # None on success
     reason: str                             # human-readable summary
