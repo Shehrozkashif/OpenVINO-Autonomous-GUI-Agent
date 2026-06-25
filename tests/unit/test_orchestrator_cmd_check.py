@@ -183,3 +183,86 @@ class TestSubtaskIntegration:
         # Reflection ran for the type step only — never for the Enter
         reflected = [c.args[0].action_type for c in orch.reflector.verify.call_args_list]
         assert "key_press" not in reflected
+
+
+class TestSaveTargetExtraction:
+    """_subtask_save_target parses the destination path from a save subtask."""
+
+    def test_extracts_windows_path(self):
+        assert TaskOrchestrator._subtask_save_target(
+            _sub("with text in Notepad, save the document as C:/Users/x/Desktop/haiku.txt")
+        ) == "C:/Users/x/Desktop/haiku.txt"
+
+    def test_no_path_returns_none(self):
+        assert TaskOrchestrator._subtask_save_target(_sub("save the document")) is None
+
+    def test_non_save_returns_none(self):
+        assert TaskOrchestrator._subtask_save_target(
+            _sub("click in the document area and type: hello world")) is None
+
+    def test_quoted_path_with_spaces(self):
+        assert TaskOrchestrator._subtask_save_target(
+            _sub("save the report as 'D:/work/report v2.pdf'")) == "D:/work/report v2.pdf"
+
+
+class TestFileSavedFresh:
+    """_file_saved_fresh confirms a save by checking the file on disk."""
+
+    def test_fresh_file_passes(self, orch, tmp_path):
+        f = tmp_path / "a.txt"
+        started = time.time()
+        f.write_text("x")
+        assert orch._file_saved_fresh(str(f), started) is True
+
+    def test_missing_file_fails(self, orch, tmp_path):
+        assert orch._file_saved_fresh(str(tmp_path / "nope.txt"), time.time()) is False
+
+    def test_stale_file_fails(self, orch, tmp_path):
+        f = tmp_path / "old.txt"
+        f.write_text("x")
+        old = time.time() - 3600
+        os.utime(f, (old, old))
+        assert orch._file_saved_fresh(str(f), time.time()) is False
+
+
+class TestSaveSubtaskIntegration:
+
+    def test_save_subtask_completes_when_file_appears(self, tmp_path):
+        """A "save as <path>" subtask returns True the moment the file lands on
+        disk — it must NOT loop on ctrl+s waiting for an OCR confirmation that
+        editors never show.
+        """
+        f = tmp_path / "haiku.txt"
+        ctrls = ActionStep(id=1, subtask_id=1, action_type="hotkey",
+                           target=None, value=None, key="ctrl+s",
+                           description="Save the document", verification="")
+        enter = ActionStep(id=2, subtask_id=1, action_type="key_press",
+                           target=None, value=None, key="enter",
+                           description="Confirm save", verification="")
+
+        from agents.reflection.reflection_agent import ReflectionResult
+        ok_reflect = ReflectionResult(
+            success=True, confidence=0.95, observation="ok",
+            error_description="", should_retry=False, recovery_hint="",
+            ocr_text="")
+
+        orch = _make_orch()
+        # Plenty of ctrl+s steps queued — the save-check must short-circuit
+        # before they are all consumed.
+        orch.planner.plan_next_step = MagicMock(
+            side_effect=[ctrls, enter, ctrls, ctrls, ctrls])
+        orch.reflector.verify = MagicMock(return_value=ok_reflect)
+
+        def _exec(step, **kw):
+            if step.key == "enter":
+                f.write_text("a haiku")   # the save writes the file
+            return True
+        orch.actor.execute = MagicMock(side_effect=_exec)
+
+        with patch("core.orchestrator.time.sleep"):
+            result = orch._execute_subtask(_sub(f"save the document as {f}"))
+
+        assert result is True
+        assert f.exists()
+        # Confirmed shortly after the save — no long ctrl+s loop.
+        assert orch.planner.plan_next_step.call_count <= 3

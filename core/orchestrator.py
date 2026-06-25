@@ -455,6 +455,12 @@ class TaskOrchestrator:
         _is_cmd_subtask = "run:" in subtask.description.lower()
         _typed_ok = False   # a type step succeeded in this subtask
 
+        # "Save the document as <path>" subtasks are ALSO file-producing, but
+        # through a GUI dialog. Editors give no OCR-readable "saved" signal, so
+        # reflection loops on ctrl+s forever. Verify the same way as commands:
+        # the subtask is DONE the moment the named file appears on disk (fresh).
+        _save_target = self._subtask_save_target(subtask)
+
         _subtask_start = time.time()
         for step_idx in range(self.config.max_steps_per_subtask):
             if self._stop_event.is_set():
@@ -469,6 +475,15 @@ class TaskOrchestrator:
                     f"exceeded — aborting subtask"
                 )
                 return False
+
+            # A "save as <path>" subtask is COMPLETE the instant the file lands on
+            # disk. Check before planning so a successful save short-circuits the
+            # ctrl+s retry loop (editors show no readable confirmation).
+            if _save_target and self._file_saved_fresh(_save_target, _subtask_start):
+                self.log(
+                    f"  [SAVE-CHECK] '{_save_target}' on disk (fresh) — save confirmed"
+                )
+                return True
 
             screen_context = _cached_ocr if _cached_ocr else self._get_screen_context()
             _cached_ocr = ""   # consume — will be refreshed after reflection
@@ -1124,6 +1139,43 @@ class TaskOrchestrator:
             return True, "no error output — shell silence means success"
         except Exception:
             return True, "no error detected (output check unavailable)"
+
+    @staticmethod
+    def _subtask_save_target(subtask) -> str | None:
+        """Extract the destination path from a "save ... as <path>" subtask.
+
+        Returns the expanded path string when the subtask is a save-to-named-file
+        (the description contains "save ... as <something with a / or \\>"), else
+        None. Lets the orchestrator confirm the save deterministically on disk
+        instead of OCR-reading a silent editor.
+        """
+        import os
+        desc = subtask.description or ""
+        m = re.search(
+            r"\bsave\b[^\n]*?\bas\s+['\"]?([^'\"\n]+?)['\"]?\s*$",
+            desc, re.IGNORECASE,
+        )
+        if not m:
+            return None
+        path = m.group(1).strip().rstrip(".")
+        # Only a real path (has a separator + filename) is disk-verifiable.
+        if "/" not in path and "\\" not in path:
+            return None
+        return os.path.expanduser(os.path.expandvars(path))
+
+    def _file_saved_fresh(self, path: str, started_at: float) -> bool:
+        """True if `path` exists and was written during this subtask.
+
+        Freshness (mtime >= started_at - 2) prevents a stale file from an earlier
+        run from falsely passing the save.
+        """
+        import os
+        try:
+            if not os.path.exists(path):
+                return False
+            return os.path.getmtime(path) >= started_at - 2
+        except OSError:
+            return False
 
     # ── Destructive-action firewall ─────────────────────────────────────────────
 
