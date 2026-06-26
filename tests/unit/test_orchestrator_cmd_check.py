@@ -274,7 +274,8 @@ class TestDeterministicSaveAs:
         """ctrl+s → (dialog) → ctrl+a → type path → enter, confirmed on disk."""
         f = tmp_path / "haiku.txt"
         orch = _make_orch()
-        orch._save_dialog_visible = MagicMock(return_value=True)
+        # No dialog yet → ctrl+s fires; dialog visible on the confirm check.
+        orch._save_dialog_visible = MagicMock(side_effect=[False, True])
         orch._wait_for_settle = MagicMock()
 
         def _exec(step):
@@ -290,6 +291,35 @@ class TestDeterministicSaveAs:
         assert f.exists()
         keys = [c.args[0].key for c in orch._execute_step.call_args_list]
         assert "ctrl+s" in keys and "ctrl+a" in keys and "enter" in keys
+
+    def test_try_save_as_types_backslashes_on_windows(self, tmp_path):
+        """The router emits forward-slash paths, but the Windows Save dialog
+        rejects them — the deterministic save must type a backslash path.
+        """
+        import core.orchestrator as orch_mod
+        if orch_mod._OS != "Windows":
+            import pytest
+            pytest.skip("backslash conversion is Windows-only")
+
+        f = tmp_path / "haiku.txt"
+        forward = str(f).replace("\\", "/")   # as the router/sub-task emits it
+        orch = _make_orch()
+        orch._save_dialog_visible = MagicMock(return_value=True)
+        orch._wait_for_settle = MagicMock()
+
+        def _exec(step):
+            if step.key == "enter":
+                f.write_text("x")
+            return True
+        orch._execute_step = MagicMock(side_effect=_exec)
+
+        with patch("core.orchestrator.time.sleep"):
+            ok = orch._try_save_as(forward, time.time())
+
+        assert ok is True
+        typed = [c.args[0].value for c in orch._execute_step.call_args_list
+                 if c.args[0].action_type == "type"]
+        assert typed and "/" not in typed[0] and "\\" in typed[0]
 
     def test_try_save_as_defers_when_no_dialog(self, tmp_path):
         """If ctrl+s opens no dialog, never type the path into the document —

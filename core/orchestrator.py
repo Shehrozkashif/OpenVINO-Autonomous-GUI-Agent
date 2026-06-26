@@ -1222,18 +1222,28 @@ class TaskOrchestrator:
                 value=value, key=key, description=desc, verification="",
             )
 
+        # The Windows Save-As filename field rejects forward slashes as invalid
+        # characters ("The file name is not valid"). Type the native separator;
+        # disk verification (_file_saved_fresh) still accepts either form.
+        typed_path = target.replace("/", "\\") if _OS == "Windows" else target
+
         # Already saved (e.g. an earlier step did it) — nothing to do.
         if self._file_saved_fresh(target, started_at):
             return True
 
-        self.log(f"  [SAVE-AS] Saving deterministically to '{target}'")
+        self.log(f"  [SAVE-AS] Saving deterministically to '{typed_path}'")
 
-        # 1. Open the Save dialog from the editor.
-        if not self._execute_step(_step("hotkey", key="ctrl+s", desc="Open Save dialog")):
-            return False
-        self._wait_for_settle(0.8, 3.0)
+        # 1. Open the Save dialog from the editor — unless one is already open
+        #    (a prior step may have left it up), in which case reopening it is at
+        #    best a no-op and at worst dismisses it.
+        if not self._save_dialog_visible():
+            if not self._execute_step(
+                _step("hotkey", key="ctrl+s", desc="Open Save dialog")
+            ):
+                return False
+            self._wait_for_settle(0.8, 3.0)
 
-        # 2. Confirm a dialog actually opened before typing — otherwise ctrl+s may
+        # 2. Confirm a dialog is actually open before typing — otherwise ctrl+s may
         #    have saved silently (already-named file) and typing would corrupt the
         #    document body.
         if not self._save_dialog_visible():
@@ -1245,7 +1255,7 @@ class TaskOrchestrator:
 
         # 3. Replace the default filename with the full target path.
         self._execute_step(_step("hotkey", key="ctrl+a", desc="Select filename field"))
-        if not self._execute_step(_step("type", value=target, desc="Type save path")):
+        if not self._execute_step(_step("type", value=typed_path, desc="Type save path")):
             return False
 
         # 4. Confirm. Poll the disk; a "Replace existing file?" prompt (file already

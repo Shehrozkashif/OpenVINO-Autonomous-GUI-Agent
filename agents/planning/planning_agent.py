@@ -368,10 +368,12 @@ How to detect: screen text contains "File name" AND "Save" AND "Cancel".
 When this pattern is visible, a Save-As dialog is open. Your ONLY valid actions are:
   a) If the GOAL names a file path or name (e.g. "save ... as C:/Users/.../haiku.txt"):
        hotkey ctrl+a              (select all text in the filename field)
-       type  value="<the FULL path/name from the goal>"  (REPLACES the default)
+       type  value="<the FULL path/name from the goal, with BACKSLASHES>"
        key_press "enter"          (confirm — this is the step IMMEDIATELY after type)
      ALWAYS type the exact path the goal specifies — NEVER accept the default
      name, or the file saves to the wrong place with the wrong name.
+     WINDOWS: the filename field REJECTS forward slashes ("file name is not
+     valid"). Convert the path to backslashes: C:\\Users\\me\\Desktop\\haiku.txt
   b) If no specific name is required: key_press "enter"  (save with current name)
   c) "Replace existing file?" prompt → key_press "enter"  (confirm overwrite)
 CRITICAL: After typing the filename (step a), your very next step MUST be key_press "enter".
