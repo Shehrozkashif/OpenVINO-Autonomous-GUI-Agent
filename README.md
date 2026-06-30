@@ -6,64 +6,23 @@
 
 **Tell your computer what to do — in plain English.**
 An autonomous desktop agent that observes your screen, plans, clicks, types, and
-**verifies every single step** — running entirely on your own machine.
-No cloud. No API keys. No data ever leaves your desk.
+**verifies every single step** — running entirely on your own machine via
+OpenVINO™ Model Server. No cloud. No API keys. No data ever leaves your desk.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)](#installation)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![Backend](https://img.shields.io/badge/inference-OpenVINO%E2%84%A2%20Model%20Server-0068b5)](https://github.com/openvinotoolkit/model_server)
 [![GUI](https://img.shields.io/badge/GUI-PyQt6-41cd52)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Tests](https://img.shields.io/badge/tests-355%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-353%20passing-brightgreen)](#running-tests)
 
-[Quick Start](#quick-start) •
 [How It Works](#how-it-works) •
 [Architecture](#architecture) •
-[Safety](#safety) •
 [Installation](#installation) •
+[Safety](#safety) •
 [Contributing](CONTRIBUTING.md)
 
 </div>
-
----
-
-## Demo
-
-```
-User:  "Open Firefox and navigate to wikipedia.org"
-
-Agent: [ROUTER]   2 sub-tasks: open Firefox → navigate to URL
-       [PLAN]     Super → click search bar → type firefox → Enter
-       [GROUND]   OCR found "Type to search" at (850, 78)
-       [ACTION]   key_press super
-       [VERIFY]   ✓ Activities overlay appeared (conf=1.00)
-       [ACTION]   type firefox
-       [VERIFY]   ✓ Firefox search result visible (conf=1.00)
-       [ACTION]   key_press enter
-       [VERIFY]   ✓ Firefox window opened (conf=0.95)
-       [PLAN]     hotkey ctrl+l → type wikipedia.org → Enter
-       [ACTION]   hotkey ctrl+l
-       [VERIFY]   ✓ Address bar focused (conf=1.00)
-       [ACTION]   type wikipedia.org
-       [ACTION]   key_press enter
-       [DONE]     Task completed in 29s
-```
-
----
-
-## Highlights
-
-|     | Feature | What it means |
-|-----|---------|---------------|
-| 🔒 | **100 % local** | All inference runs on your Intel® GPU via OpenVINO™ Model Server — nothing is sent to the cloud |
-| 👁 | **Verifies every step** | A reflection agent checks the screen after each action; failures trigger automatic replanning |
-| 🎯 | **3-stage grounding** | UIA accessibility tree → OCR fuzzy-match → vision model, fastest path first |
-| 🛡 | **Prompt-injection-proof firewall** | Destructive shell commands are blocked by a deterministic classifier that never calls a model |
-| 🚨 | **Hardware-style kill switch** | Triple-Esc or slam the mouse into the top-left corner — the agent stops instantly |
-| 🧠 | **Learns from experience** | Successful task plans and known failure patterns are stored in SQLite and reused |
-| ⚡ | **Burst execution** | Recognised multi-step patterns (context menus, rename dialogs) run with zero LLM calls |
-| 🖥 | **Cross-platform** | Windows 10/11 and Linux (X11), with per-platform input and capture backends |
-| 💾 | **Fits 16 GB VRAM** | Two INT4 quantised 7–8 B models run simultaneously on a 16 GB Intel GPU — no datacenter hardware required |
 
 ---
 
@@ -106,7 +65,7 @@ Planning is **dynamic**: the planner sees the live screen before every step, so
 it recovers from popups, focus changes, and failed actions instead of blindly
 executing a stale plan.
 
-### Grounding Pipeline (fastest → most robust)
+### Grounding pipeline (fastest → most robust)
 
 | Stage | Method | When it fires |
 |-------|--------|---------------|
@@ -122,8 +81,8 @@ and retries the pipeline.
 ## Architecture
 
 The system is organised into five layers. Every agent depends only on the
-`InferenceClient` protocol — never on a concrete backend — so inference
-engines are drop-in replaceable.
+`InferenceClient` protocol — never on a concrete backend — so the inference
+engine is drop-in replaceable.
 
 ```mermaid
 flowchart TB
@@ -177,13 +136,12 @@ flowchart TB
     AGENT_LAYER -- "plan · ground · verify queries" --> INFER_LAYER
 ```
 
-**How to read it:** the orchestrator owns the loop — it consults memory before
-routing, screens every typed command through the firewall, and arms the kill
-switch for the duration of a task. Agents do one job each and touch the world
-only through the platform layer. All model calls funnel through a single
-client behind the `InferenceClient` protocol (`core/protocols/a2a.py`) — which
-is what let the inference backend be swapped to OpenVINO™ Model Server without
-touching a single agent.
+The orchestrator owns the loop — it consults memory before routing, screens
+every typed command through the firewall, and arms the kill switch for the
+duration of a task. Agents do one job each and touch the world only through
+the platform layer. All model calls funnel through a single client behind the
+`InferenceClient` protocol (`core/protocols/a2a.py`), which is what let the
+inference backend move to OpenVINO™ Model Server without touching an agent.
 
 | Agent | Consumes | Produces |
 |-------|----------|----------|
@@ -193,30 +151,12 @@ touching a single agent.
 | Action | grounded step | real mouse / keyboard events |
 | Reflection | post-action screen | verdict: success · fail · uncertain |
 
-### Reliability Engineering
-
-Real desktops are messy. The orchestrator defends against the failure modes
-that actually happen in live runs:
-
-- **Loop guard** — per-action limits on identical repeated steps; a plan stuck
-  in a loop is detected and stopped instead of clicking forever.
-- **Idempotency protection** — non-repeatable actions (typing, Enter, paste)
-  are never blind-retried after an uncertain verdict; the planner re-evaluates
-  the live screen instead, so text is never typed twice.
-- **Deterministic command verification** — terminal commands are verified
-  against the real filesystem (file created / deleted / fresh mtime), because
-  a successful shell command prints nothing and OCR would misread that
-  silence as failure.
-- **Launch verification** — "open X" subtasks are confirmed by process and
-  window checks; focusing an *existing* window does not count as launching a
-  new one.
-- **Visual replanning** — when text-based planning stalls, the agent escalates
-  to the vision model with a full screenshot to see what OCR can't.
-- **Degraded-run quarantine** — tasks that finish through a recovery path are
-  never stored as reusable successes, so broken plans cannot poison future
-  routing.
-- **Memory with failure patterns** — known-bad target/action combinations are
-  fed to the planner as warnings before it repeats them.
+The orchestrator also handles failure modes that show up in real runs: a
+**loop guard** stops a plan stuck repeating the same step, **idempotency
+protection** never blind-retries non-repeatable actions like typing or Enter,
+**visual replanning** escalates to the VLM when text-based planning stalls,
+and tasks completed via a recovery path are quarantined from success memory
+so broken plans can't poison future routing.
 
 ---
 
@@ -232,66 +172,9 @@ Model ids live in [`config.py`](config.py) — the single source of truth.
 Both models are served by a **single OpenVINO™ Model Server instance** on one
 OpenAI-compatible endpoint (`http://localhost:8000/v3/chat/completions`) and
 selected per request by the `model` field. On a 16 GB Intel® GPU both INT4
-models (~5 GB weights each) plus KV-cache (2 GB each by default) stay resident —
-no model swapping. Adjust `KV_CACHE_SIZE_GB` in [`config.py`](config.py) for your GPU.
-
-> **OpenVINO™ backend** — inference runs entirely through OpenVINO™ Model Server
-> (OVMS) on Intel® CPU / iGPU / Arc™ GPU / NPU. The `InferenceClient` protocol in
-> `core/protocols/a2a.py` keeps every agent backend-agnostic; `OVMSClient`
-> (`core/pipeline/ovms_client.py`) is the only component that talks to the server.
-> Set the device in [`config.py`](config.py) via `TARGET_DEVICE`.
-
----
-
-## Quick Start
-
-### Windows (Intel Arc / Core Ultra — recommended)
-
-```powershell
-# 1. Clone and set up
-git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
-cd intel-openvino-desktop-agent
-python -m venv venv
-venv\Scripts\activate
-
-# 2. Install ALL dependencies (includes the model conversion toolchain)
-pip install -r requirements.txt
-
-# 3. Install OVMS native binary (one-time)
-#    Prerequisite: Visual C++ Redistributable x64 — https://aka.ms/vs/17/release/vc_redist.x64.exe
-curl.exe -L https://github.com/openvinotoolkit/model_server/releases/download/v2026.2/ovms_windows_2026.2.0_python_on.zip -o ovms.zip
-tar.exe -xf ovms.zip          # creates .\ovms\ with ovms.exe + setupvars.bat
-setx OVMS_DIR "%CD%\ovms"     # tell start.py where to find ovms.exe (restart shell after this)
-
-# 4. Run — first launch downloads/converts models (30–60 min), then starts the GUI
-python start.py
-```
-
-### Linux
-
-```bash
-git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
-cd intel-openvino-desktop-agent
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-
-# Install OVMS — Docker is easiest on Linux:
-docker pull openvino/model_server:latest-gpu
-
-python start.py
-```
-
-`start.py` does the rest: detects your GPU, prepares both OpenVINO models in the
-OVMS model repository (converting UI-TARS on first run — **this takes 30–60 minutes**),
-starts OpenVINO™ Model Server, waits for both models to load, and opens the agent GUI.
-
-```bash
-# Pre-fill the instruction box
-python start.py --prompt "Open VS Code and enable autosave"
-
-# Pre-fill and run immediately on startup
-python start.py --prompt "Search for OpenVINO documentation" --auto-run
-```
+models (~5 GB weights each) plus KV-cache (2 GB each by default) stay resident
+— no model swapping. Adjust `KV_CACHE_SIZE_GB` and `TARGET_DEVICE` (GPU / CPU
+/ NPU / AUTO) in [`config.py`](config.py) for your hardware.
 
 ---
 
@@ -302,13 +185,9 @@ python start.py --prompt "Search for OpenVINO documentation" --auto-run
 | OS | Ubuntu 22.04 / Windows 10 | Ubuntu 24.04 / Windows 11 |
 | Python | 3.10 | 3.12 |
 | RAM | 16 GB | 32 GB |
-| GPU VRAM | 16 GB Intel Arc / iGPU (both models resident) | 24 GB+ (larger KV-cache for longer contexts) |
+| GPU VRAM | 16 GB Intel Arc / iGPU (both models resident) | 24 GB+ (larger KV-cache) |
 | Disk | 20 GB free | 30 GB free |
-| Display | X11 (Linux) | X11 or Windows desktop |
-
-> Both INT4 models (~5 GB weights each) plus KV-cache must fit in GPU memory.
-> On a 16 GB GPU the default `KV_CACHE_SIZE_GB = 2` per model works well.
-> Increase it in [`config.py`](config.py) if you have a larger GPU.
+| Display | X11 (Linux — Wayland is not supported) | Windows desktop |
 
 ---
 
@@ -317,134 +196,67 @@ python start.py --prompt "Search for OpenVINO documentation" --auto-run
 ### Windows (recommended for Intel Arc / Core Ultra)
 
 ```powershell
-# 1. Clone the repository
+# 1. Clone and set up a virtual environment
 git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
 cd intel-openvino-desktop-agent
-
-# 2. Create and activate a virtual environment
 python -m venv venv
 venv\Scripts\activate
 
-# 3. Install Python dependencies (includes model conversion toolchain)
+# 2. Install Python dependencies (includes the model conversion toolchain)
 pip install -r requirements.txt
 
-# 4. Install OpenVINO™ Model Server — NATIVE BINARY (ovms.exe)
+# 3. Install OpenVINO™ Model Server — native binary (ovms.exe)
 #    Prerequisite: Microsoft Visual C++ Redistributable (x64)
 #    https://aka.ms/vs/17/release/vc_redist.x64.exe
-#
-#    Download the python_on build (GenAI LLM/VLM servables need the bundled Python).
 #    Use curl.exe / tar.exe explicitly (PowerShell aliases `curl` to Invoke-WebRequest):
 curl.exe -L https://github.com/openvinotoolkit/model_server/releases/download/v2026.2/ovms_windows_2026.2.0_python_on.zip -o ovms.zip
-tar.exe -xf ovms.zip      # extracts .\ovms\ containing ovms.exe + setupvars.bat
+tar.exe -xf ovms.zip          # extracts .\ovms\ containing ovms.exe + setupvars.bat
+setx OVMS_DIR "%CD%\ovms"     # tell start.py where to find ovms.exe (restart shell after this)
 
-#    Point start.py at the folder (restart the shell after setx):
-setx OVMS_DIR "%CD%\ovms"
-
-# 5. Run
+# 4. Run — first launch downloads/converts models (30–60 min), then starts the GUI
 python start.py
 ```
 
-> **Why native `ovms.exe` on Windows?** Docker Desktop on Windows runs Linux
-> containers in a VM — it cannot pass the Intel Arc / iGPU into the container.
-> `start.py` handles this automatically (falls back to CPU-mode Docker if no
-> native binary is found), but inference is ~5–10× slower on CPU.  The native
-> `ovms.exe` accesses the GPU directly and is strongly recommended for Windows.
-
-> **Do NOT run `setupvars.bat` / `setupvars.ps1` in your agent terminal.** The
-> `python_on` package sets `PYTHONHOME`/`PYTHONPATH` to OVMS's bundled Python,
-> which hijacks your venv (`ModuleNotFoundError: No module named 'config'`).
-> `start.py` sources `setupvars.bat` **inside the `ovms.exe` subprocess only** —
-> just run `python start.py` from a clean shell.
+> **Do NOT run `setupvars.bat` in your agent terminal.** It sets
+> `PYTHONHOME`/`PYTHONPATH` to OVMS's bundled Python, which hijacks your venv
+> (`ModuleNotFoundError: No module named 'config'`). `start.py` sources it
+> **inside the `ovms.exe` subprocess only** — just run `python start.py` from
+> a clean shell.
 
 ### Linux
 
 ```bash
-# 1. Clone the repository
+# 1. Clone and set up a virtual environment
 git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
 cd intel-openvino-desktop-agent
+python3 -m venv venv && source venv/bin/activate
 
-# 2. Create and activate a virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# 3. Install Python dependencies (includes model conversion toolchain)
+# 2. Install Python dependencies (includes the model conversion toolchain)
 pip install -r requirements.txt
 
-# 4. Install OpenVINO™ Model Server
-#    Docker (simplest — supports GPU passthrough on Linux):
-docker pull openvino/model_server:latest-gpu
-#    Or native binary: see https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html
+# 3. Install OpenVINO™ Model Server — native binary
+#    https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html
+#    then set OVMS_DIR to the folder containing the ovms binary, or add it to PATH
 
-# 5. Run
+# 4. Run — first launch downloads/converts models (30–60 min), then starts the GUI
 python start.py
 ```
 
 > **No sudo required.** `start.py` extracts the missing Qt system library
 > (`libxcb-cursor0`) to `~/.local_xcb` automatically on first run.
 
-### OVMS Method Comparison
-
-| Method | Platform | GPU Support | Speed | Status |
-|--------|----------|-------------|-------|--------|
-| **Native `ovms.exe`** | Windows | Direct GPU (Intel Arc, iGPU, NPU) | Fast (~1–3 s/query) | **Recommended on Windows** |
-| **Docker** `openvino/model_server:latest-gpu` | Linux | GPU via `/dev/dri` passthrough | Fast (~1–3 s/query) | **Recommended on Linux** |
-| **Docker** on Windows | Windows | CPU only (auto-detected) | Slow (~10–15 s/query) | **Works — fallback option** |
-| Native `ovms` binary | Linux | Direct GPU access | Fast | Supported but Docker is simpler |
-
-> **Docker on Windows note:** `start.py` automatically detects that Docker on
-> Windows cannot access the Intel GPU and creates CPU-mode overlay files for the
-> model graphs. Both models load and produce correct results, but inference is
-> ~5–10× slower than GPU. Use the native `ovms.exe` for production use on Windows.
-
----
-
-## Running the Agent
+`start.py` does the rest on every run: detects your GPU, prepares both
+OpenVINO models in the OVMS model repository, starts OpenVINO™ Model Server
+on the native `ovms`/`ovms.exe` binary (found via `OVMS_DIR` / `OVMS_PATH` /
+`PATH`), waits for both models to load, and opens the agent GUI.
 
 ```bash
-# Linux
-source venv/bin/activate
-python start.py
+# Pre-fill the instruction box
+python start.py --prompt "Open VS Code and enable autosave"
 
-# Windows
-venv\Scripts\activate
-python start.py
+# Pre-fill and run immediately on startup
+python start.py --prompt "Search for OpenVINO documentation" --auto-run
 ```
-
-`start.py` handles everything automatically:
-
-1. **Environment setup** — configures `LD_LIBRARY_PATH` on Linux (no sudo)
-2. **GPU detection** — finds Intel / AMD / NVIDIA GPUs for the startup banner
-3. **Model prep** — pulls `qwen3-8b-int4-ov` and converts UI-TARS to INT4 into the OVMS repo (first run only)
-4. **Server start** — launches OpenVINO™ Model Server (native binary, else Docker) serving both models on port 8000
-5. **Readiness wait** — polls until both models report AVAILABLE
-6. **Launches** `main.py` — the agent GUI opens
-
-<details>
-<summary><b>First-run output</b></summary>
-
-```
-╔══════════════════════════════════════════════╗
-║       Desktop GUI Agent — Startup Check      ║
-╚══════════════════════════════════════════════╝
-
-Platform: Linux
-  [OK] Linux environment configured
-
-GPU Detection:
-  [INTEL] GPU0: Intel(R) Arc(TM) 140V GPU (16GB)
-  OVMS target device: GPU
-
-Models:
-  [OK] qwen3-8b-int4-ov         already in repository
-  [OK] ui-tars-1.5-7b-int4-ov   already in repository
-
-OpenVINO Model Server:
-  [OK] OVMS ready — both models loaded (12s)
-
-Starting Desktop GUI Agent...
-```
-
-</details>
 
 ### Using the GUI
 
@@ -457,41 +269,41 @@ Other pages: **Agent Sessions** (task history & re-run), **Workflows**,
 **Memory** (learned tasks & failure patterns), **Screen History** (frames
 recorded during missions), and **Settings**.
 
----
+<details>
+<summary><b>Manual setup, without start.py</b></summary>
 
-## Safety
+```bash
+pip install -r requirements.txt   # includes optimum-intel[openvino] and nncf
 
-- **Action firewall** — every `type` step is screened by a deterministic
-  classifier before execution; destructive shell commands (`rm -rf /`, `mkfs`,
-  fork bombs, …) are blocked. It never calls a model, so it is immune to
-  prompt injection.
-- **Kill switch** — press Esc three times, or slam the mouse into the
-  top-left corner, to stop the agent instantly and release all held keys.
-- **Wall-clock budgets** — a stuck task aborts (default 10 min/task,
-  4 min/subtask) instead of running unbounded.
-- **Credential safety** — `{{cred:site:field}}` values live in the OS keyring,
-  are redacted from all logs, and are cleared from the clipboard after paste.
-- **Keyboard injection** uses `XTest` (Linux) or `win32 SendInput` (Windows) —
-  standard OS-level events, same as a real keyboard.
-- **Agent window minimises** before executing tasks so the agent never clicks
-  its own UI.
-- **Stop button** in the GUI interrupts execution after the current step
-  completes.
-- **Max retries** — each step retries at most 3 times before the task is
-  marked failed.
+# 1. Pull / convert both models into the OVMS repository (writes models/config.json)
+python tools/ovms/export_model.py text_generation \
+  --source_model OpenVINO/Qwen3-8B-int4-ov  --model_name qwen3-8b-int4-ov \
+  --weight-format int4 --config_file_path models/config.json \
+  --model_repository_path models --target_device GPU --cache_size 2
 
----
+python tools/ovms/export_model.py text_generation \
+  --source_model ByteDance-Seed/UI-TARS-1.5-7B --model_name ui-tars-1.5-7b-int4-ov \
+  --weight-format int4 --config_file_path models/config.json \
+  --model_repository_path models --target_device GPU --cache_size 2
 
-## Platform Differences
+# 2. Serve both from one OVMS instance. The device is baked into each servable
+#    at export time (step 1's --target_device) — do NOT pass --target_device
+#    alongside --config_path.
+#    Linux:
+ovms --config_path models/config.json --rest_port 8000
+#    Windows (setupvars must run in the ovms.exe process only):
+.\ovms\setupvars.bat && .\ovms\ovms.exe --config_path models\config.json --rest_port 8000
 
-| Feature | Linux | Windows |
-|---------|-------|---------|
-| Keyboard backend | **XTest** (Xlib) — injects at X11 server level; reaches GNOME Shell global capture | **pynput** — uses win32 `SendInput`; works with all Windows apps |
-| Screenshot backend | **Xlib `get_image`** — focus-neutral, does not dismiss overlays | **PIL `ImageGrab`** — GDI BitBlt |
-| Grounding Stage 0 | — | **UIA accessibility tree** (~20–50 ms, exact) |
-| App launcher key | `Super` (GNOME Activities) | `Win` (Start Menu) |
-| libxcb-cursor | Extracted automatically to `~/.local_xcb` (no sudo) | Not needed |
-| Wayland | ❌ X11 session required (`GDK_BACKEND=x11`) | N/A |
+# 3. Launch the agent against the running server
+python main.py
+```
+
+```bash
+# Checking the server
+curl http://localhost:8000/v1/config        # servable states (AVAILABLE?)
+```
+
+</details>
 
 ---
 
@@ -533,62 +345,24 @@ intel-openvino-desktop-agent/
 
 ---
 
-<details>
-<summary><h2>Manual Setup (without start.py)</h2></summary>
+## Safety
 
-If you prefer to control each step manually (these are exactly what `start.py`
-automates). The export helper is the one bundled with OVMS —
-[`demos/common/export_models/export_model.py`](https://github.com/openvinotoolkit/model_server/tree/main/demos/common/export_models).
-
-```bash
-pip install -r requirements.txt   # includes optimum-intel[openvino] and nncf
-
-# 1. Pull / convert both models into the OVMS repository (writes models/config.json)
-#    --cache_size 2 = 2 GB KV-cache per model (safe for 16 GB GPUs with two models)
-python tools/ovms/export_model.py text_generation \
-  --source_model OpenVINO/Qwen3-8B-int4-ov  --model_name qwen3-8b-int4-ov \
-  --weight-format int4 --config_file_path models/config.json \
-  --model_repository_path models --target_device GPU --cache_size 2
-
-python tools/ovms/export_model.py text_generation \
-  --source_model ByteDance-Seed/UI-TARS-1.5-7B --model_name ui-tars-1.5-7b-int4-ov \
-  --weight-format int4 --config_file_path models/config.json \
-  --model_repository_path models --target_device GPU --cache_size 2
-
-# 2. Serve both from one OVMS instance.
-#    NOTE: the device is baked into each servable at export time (step 1's
-#    --target_device); do NOT pass --target_device alongside --config_path
-#    ("Model parameters in CLI are exclusive with the config file").
-#
-#    native (Linux):
-ovms --config_path models/config.json --rest_port 8000
-#
-#    native (Windows) — launch via a wrapper .bat so setupvars runs in the ovms
-#    subprocess only (do NOT source setupvars in your agent terminal):
-.\ovms\setupvars.bat && .\ovms\ovms.exe --config_path models\config.json --rest_port 8000
-#
-#    Docker (Linux — supports GPU; NOT recommended on Windows):
-docker run --rm -p 8000:8000 -v $PWD/models:/models:rw --device /dev/dri \
-  openvino/model_server:latest-gpu \
-  --config_path /models/config.json --rest_port 8000
-
-# 3. Launch the agent against the running server
-python main.py
-```
-
-### Checking the server
-
-```bash
-curl http://localhost:8000/v1/config        # servable states (AVAILABLE?)
-curl http://localhost:8000/v3/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"qwen3-8b-int4-ov","messages":[{"role":"user","content":"hi"}],"max_tokens":10}'
-```
-
-If a model fails to load, check `ovms.log`. For GPU execution make sure the Intel
-GPU drivers are installed and (Docker on Linux) `/dev/dri` is passed through.
-
-</details>
+- **Action firewall** — every `type` step is screened by a deterministic
+  classifier before execution; destructive shell commands (`rm -rf /`, `mkfs`,
+  fork bombs, …) are blocked. It never calls a model, so it is immune to
+  prompt injection.
+- **Kill switch** — press Esc three times, or slam the mouse into the
+  top-left corner, to stop the agent instantly and release all held keys.
+- **Wall-clock budgets** — a stuck task aborts (default 10 min/task,
+  4 min/subtask) instead of running unbounded.
+- **Credential safety** — `{{cred:site:field}}` values live in the OS keyring,
+  are redacted from all logs, and are cleared from the clipboard after paste.
+- **Keyboard injection** uses `XTest` (Linux) or `win32 SendInput` (Windows) —
+  standard OS-level events, same as a real keyboard.
+- **Agent window minimises** before executing tasks so the agent never clicks
+  its own UI.
+- **Max retries** — each step retries at most 3 times before the task is
+  marked failed.
 
 ---
 
@@ -610,34 +384,17 @@ python e2e_test.py
 
 ---
 
-## Performance Reference
-
-Measured on an Intel® Arc™ 140V (16 GB) with OVMS (both INT4 models resident):
-
-| Operation | Latency |
-|-----------|---------|
-| Screen capture (Xlib / GDI) | < 20 ms |
-| Windows UIA grounding | 20 – 50 ms |
-| OCR (RapidOCR) | < 150 ms |
-| VLM grounding (`ui-tars-1.5-7b-int4-ov`) | 1 – 3 s |
-| LLM planning (`qwen3-8b-int4-ov`) | 1 – 3 s |
-| Full task (3–5 steps) | 15 s – 60 s |
-
----
-
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
 | `qt.qpa.plugin: could not load xcb` | Run `start.py` — it auto-extracts `libxcb-cursor0` |
 | `Could not connect to OpenVINO Model Server` | Run `python start.py`; check `ovms.log` and `curl localhost:8000/v1/config` |
-| Native `ovms` not found | Set `OVMS_DIR` to the folder containing `ovms.exe`, or install Docker |
-| `ModuleNotFoundError: No module named 'config'` (Windows) | You ran OVMS's `setupvars` in your agent shell — it hijacks the venv's Python. Open a fresh terminal, activate the venv, and run `python start.py` (it handles `setupvars` for ovms.exe itself) |
-| OVMS in Docker is slow on Windows | Expected — Docker on Windows uses CPU only (no GPU passthrough). `start.py` handles this automatically by switching to CPU-mode graphs. Install native `ovms.exe` (set `OVMS_DIR`) for GPU-accelerated inference |
-| `Requested KV-cache size is larger than available memory` | Both models' KV-caches exceed your GPU's VRAM. Lower `KV_CACHE_SIZE_GB` in `config.py` (default: 2 GB per model). On a 16 GB GPU the total must be: 2 × `KV_CACHE_SIZE_GB` + ~10 GB model weights < 16 GB |
-| Model files have `Access is denied` / broken permissions (Windows) | The `optimum-cli` conversion can create files with restrictive NTFS ACLs. Delete the model folder from an **elevated** (Run as Administrator) terminal: `rd /s /q models\ui-tars-1.5-7b-int4-ov`, then re-run `python start.py` to re-export |
-| Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers; (Docker/Linux) pass `/dev/dri` |
-| `No JSON array in router response` | Rare LLM format issue; retry the task |
+| Native `ovms` not found | Set `OVMS_DIR` to the folder containing `ovms`/`ovms.exe` |
+| `ModuleNotFoundError: No module named 'config'` (Windows) | You ran OVMS's `setupvars` in your agent shell — it hijacks the venv's Python. Open a fresh terminal, activate the venv, and run `python start.py` |
+| `Requested KV-cache size is larger than available memory` | Lower `KV_CACHE_SIZE_GB` in `config.py` (default: 2 GB per model). Total must satisfy: 2 × `KV_CACHE_SIZE_GB` + ~10 GB model weights < your GPU's VRAM |
+| Model files have `Access is denied` (Windows) | Delete the model folder from an **elevated** terminal: `rd /s /q models\ui-tars-1.5-7b-int4-ov`, then re-run `python start.py` to re-export |
+| Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers |
 | Agent clicks wrong place | Lower screen scaling or check `DISPLAY` env var points to your active session |
 | Wayland session (Linux) | Log out, select "GNOME on Xorg" at login screen, log back in |
 | First run takes very long | Expected — UI-TARS conversion (INT4 quantization of a 7B model) takes 30–60 minutes. The LLM (Qwen3) is pre-converted and downloads in minutes. Subsequent runs skip this step |

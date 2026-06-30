@@ -18,9 +18,8 @@ sentence-transformers>=2.2.0
 numpy>=1.24.0
 
 # ── Inference backend: OpenVINO™ Model Server (OVMS) ──────────────────────────
-# The server itself is external — installed as a native binary (ovms.exe) or run
-# via the openvino/model_server Docker image; start.py launches it. The Python
-# client only needs httpx (above).
+# The server itself is external — installed as the native ovms/ovms.exe binary;
+# start.py launches it. The Python client only needs httpx (above).
 #
 # FIRST-RUN REQUIREMENT: UI-TARS → OpenVINO INT4 conversion needs the optimum
 # toolchain. Install BEFORE running start.py for the first time:

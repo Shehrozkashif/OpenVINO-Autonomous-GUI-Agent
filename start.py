@@ -10,7 +10,7 @@ Does everything automatically:
        • LLM  qwen3-8b-int4-ov        (pulled pre-converted from Hugging Face)
        • VLM  ui-tars-1.5-7b-int4-ov  (converted from UI-TARS on first run)
   4. Start OVMS serving both models on one OpenAI-compatible endpoint (port 8000)
-       — native ovms/ovms.exe if available, otherwise the Docker image
+       using the native ovms/ovms.exe binary
   5. Wait for the server to be ready
   6. Launch the agent UI
 """
@@ -45,7 +45,6 @@ _EXPORT_TOOL_URL = (
     f"https://raw.githubusercontent.com/openvinotoolkit/model_server/"
     f"{_OVMS_REF}/demos/common/export_models/export_model.py"
 )
-_DOCKER_IMAGE = "openvino/model_server:latest-gpu"
 
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
@@ -112,7 +111,7 @@ def check_gpus():
     return backend, gpus
 
 
-# ── 3. Locate OVMS (native binary or Docker) ─────────────────────────────────
+# ── 3. Locate OVMS (native binary) ────────────────────────────────────────────
 
 def find_ovms_binary() -> str:
     """Return the path to a native ovms executable, or '' if none is found.
@@ -132,16 +131,6 @@ def find_ovms_binary() -> str:
                 return cand
     found = shutil.which("ovms") or shutil.which(exe)
     return found or ""
-
-
-def docker_available() -> bool:
-    if not shutil.which("docker"):
-        return False
-    try:
-        r = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
-        return r.returncode == 0
-    except Exception:
-        return False
 
 
 # ── 4. Model preparation (export into the OVMS repository) ────────────────────
@@ -332,73 +321,6 @@ def start_ovms_native(binary: str, device: str) -> bool:
     return _wait_for_ovms(log_path)
 
 
-def _ensure_docker_cpu_graphs() -> str:
-    """Create CPU-mode graph.pbtxt overlays for Docker on Windows.
-
-    Docker Desktop on Windows cannot pass the Intel GPU into a Linux container,
-    so models exported with ``device: "GPU"`` fail to load.  This writes thin
-    overlay files that switch the device to ``"CPU"`` and returns the overlay
-    base directory (to be mounted with ``-v`` over the per-model graph.pbtxt).
-    """
-    overlay_dir = os.path.join(_REPO, ".docker-cpu-overlay")
-    for model_name in (LLM_MODEL, VLM_MODEL):
-        src = os.path.join(_REPO, model_name, "graph.pbtxt")
-        dst_dir = os.path.join(overlay_dir, model_name)
-        dst = os.path.join(dst_dir, "graph.pbtxt")
-        os.makedirs(dst_dir, exist_ok=True)
-        if not os.path.isfile(src):
-            continue
-        with open(src) as f:
-            content = f.read()
-        cpu_content = content.replace('device: "GPU"', 'device: "CPU"')
-        if not os.path.isfile(dst) or open(dst).read() != cpu_content:
-            with open(dst, "w") as f:
-                f.write(cpu_content)
-    return overlay_dir
-
-
-def start_ovms_docker(device: str) -> bool:
-    print(_yellow(f"  [SETUP] Starting OVMS (Docker: {_DOCKER_IMAGE})..."))
-    repo_mount = _REPO.replace("\\", "/")
-    cmd = ["docker", "run", "-d", "--rm",
-           "-p", f"{OVMS_REST_PORT}:{OVMS_REST_PORT}",
-           "-v", f"{repo_mount}:/models:rw"]
-
-    if _OS == "Windows":
-        # Docker Desktop on Windows runs Linux VMs without GPU passthrough for
-        # Intel iGPU/Arc.  Override graph.pbtxt files to use CPU.
-        print(_yellow("  [NOTE] Docker on Windows — GPU not available in container, using CPU"))
-        overlay = _ensure_docker_cpu_graphs()
-        for model_name in (LLM_MODEL, VLM_MODEL):
-            overlay_graph = os.path.join(overlay, model_name, "graph.pbtxt").replace("\\", "/")
-            cmd += ["-v", f"{overlay_graph}:/models/{model_name}/graph.pbtxt:ro"]
-    else:
-        # GPU passthrough for Linux Docker (Intel/AMD render nodes)
-        if os.path.exists("/dev/dri"):
-            cmd += ["--device", "/dev/dri"]
-
-    # --target_device is per-model and exclusive with --config_path; the device
-    # is already baked into each servable's graph.pbtxt at export time.
-    cmd += [_DOCKER_IMAGE,
-            "--config_path", "/models/config.json",
-            "--rest_port", str(OVMS_REST_PORT)]
-
-    # Prevent MSYS/Git-Bash from mangling /models paths on Windows.
-    env = os.environ.copy()
-    if _OS == "Windows":
-        env["MSYS_NO_PATHCONV"] = "1"
-
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, env=env)
-    except FileNotFoundError:
-        print(_red("  [FAIL] docker not found"))
-        return False
-    if r.returncode != 0:
-        print(_red(f"  [FAIL] docker run failed: {r.stderr.strip()[:300]}"))
-        return False
-    return _wait_for_ovms()
-
-
 def _wait_for_ovms(log_path: str = "") -> bool:
     """Poll until both servables report ready (model load can take minutes)."""
     max_wait, poll = 600, 5
@@ -461,21 +383,16 @@ def main():
             print(_red("\n  Could not prepare models. Check the messages above."))
             sys.exit(1)
 
-        # ── Launch OVMS (native preferred, Docker fallback) ───────
+        # ── Launch OVMS (native binary) ────────────────────────────
         print(_bold("\nStarting server:"))
         binary = find_ovms_binary()
         started = False
         if binary:
             started = start_ovms_native(binary, device)
-        elif docker_available():
-            print(_yellow("  No native ovms found — using Docker."))
-            started = start_ovms_docker(device)
         else:
-            print(_red("  [FAIL] Neither a native OVMS binary nor Docker is available."))
-            print(_yellow("  Install one of:"))
-            print(_yellow("    • OVMS binary — https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html"))
-            print(_yellow("      then set OVMS_DIR to its folder (containing ovms.exe), or add it to PATH"))
-            print(_yellow("    • Docker     — https://docs.docker.com/get-docker/"))
+            print(_red("  [FAIL] No native OVMS binary found."))
+            print(_yellow("  Install OVMS — https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html"))
+            print(_yellow("  then set OVMS_DIR to its folder (containing ovms.exe), or add it to PATH"))
             sys.exit(1)
 
         if not started:

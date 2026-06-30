@@ -38,8 +38,7 @@ OVMS serving both on port 8000:
 
 ```bash
 # The conversion toolchain (optimum-intel, nncf) is included in requirements.txt.
-# On Windows: install the native ovms.exe and set OVMS_DIR (see README.md).
-# On Linux:   docker pull openvino/model_server:latest-gpu
+# Install the native ovms/ovms.exe binary and set OVMS_DIR (see README.md).
 python start.py                              # prepares models + starts OVMS + UI
 ```
 
