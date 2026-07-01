@@ -1,13 +1,12 @@
 # agents/reflection/reflection_agent.py
-"""
-Reflection Agent — verifies that each action step succeeded.
+"""Reflection Agent — verifies that each action step succeeded.
 
 Primary path: OCR the after-screenshot, pass visible text to the LLM
 (config.LLM_MODEL).
   - A reasoning LLM handles conditional success logic accurately.
   - No image encoding needed — fast, cheap, high quality.
 
-Fallback path: VLM (qwen2.5vl / UI-TARS) is used only when OCR returns fewer
+Fallback path: the VLM (UI-TARS) is used only when OCR returns fewer
 than 3 meaningful words (icon-heavy screens, blank desktops).
 """
 import base64
@@ -16,7 +15,6 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from loguru import logger
 from PIL import Image
@@ -119,7 +117,7 @@ class ReflectionAgent:
         client: InferenceClient,
         capturer: ScreenCapture,
         min_confidence: float = 0.75,
-        ocr: Optional[OCREngine] = None,
+        ocr: OCREngine | None = None,
         escalate_uncertain: bool = True,
     ):
         self.client = client
@@ -137,8 +135,7 @@ class ReflectionAgent:
 
     def verify(self, step: ActionStep, wait_s: float = 1.5,
                pre_hash=None) -> ReflectionResult:
-        """
-        Verify if an action step succeeded.
+        """Verify if an action step succeeded.
         1. For click actions: use pre_hash (captured by orchestrator BEFORE the action)
            as the baseline. Falls back to capturing after-action if pre_hash is None.
         2. Adaptive wait for UI to settle.

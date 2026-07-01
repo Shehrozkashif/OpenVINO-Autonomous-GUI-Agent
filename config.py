@@ -1,41 +1,48 @@
 # config.py — single source of truth for all model and server settings.
 # Change values here; everything else picks them up automatically.
+#
+# Inference runs entirely through OpenVINO™ Model Server (OVMS). A single OVMS
+# instance serves BOTH models on one OpenAI-compatible endpoint (port 8000):
+#   • the LLM  (planning / routing / reflection)
+#   • the VLM  (visual grounding / verification)
+# Requests are routed to the right model by the "model" field in the request body.
 
-# ── Models ────────────────────────────────────────────────────────────────────
+# ── Models (OVMS servable names) ────────────────────────────────────────────────
+# These names must match the servable names registered in the OVMS config.json
+# that start.py generates (model_repository_path below).
 
-LLM_MODEL  = "qwen3:8b"                         # Ollama LLM — routing, planning, reflection
-VLM_OLLAMA = "hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S"  # UI-TARS-1.5-7B Q4_K_S (4.6 GB + 1 GB mmproj, fits 6 GB VRAM)
-VLM_VLLM   = "ByteDance-Seed/UI-TARS-1.5-7B"   # vLLM primary VLM (port 8000, if running)
+LLM_MODEL = "qwen3-8b-int4-ov"          # text reasoning — routing, planning, reflection
+VLM_MODEL = "ui-tars-1.5-7b-int4-ov"    # GUI grounding & visual verification (UI-TARS)
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# ── Model sources (where start.py fetches / converts them from) ─────────────────
+# LLM_SOURCE is a pre-converted OpenVINO IR repo on Hugging Face — OVMS pulls it
+# directly. VLM_SOURCE is the upstream UI-TARS checkpoint; start.py converts it to
+# OpenVINO INT4 IR with optimum-cli on first run (no pre-built OV build exists).
 
-LLM_BASE_URL = "http://localhost:11434"   # Ollama server
-VLM_BASE_URL = "http://localhost:8000"    # vLLM server (optional)
+LLM_SOURCE = "OpenVINO/Qwen3-8B-int4-ov"
+VLM_SOURCE = "ByteDance-Seed/UI-TARS-1.5-7B"
 
-# ── GPU / Server settings ─────────────────────────────────────────────────────
-# These are used by start.py to generate the correct vLLM launch command.
-# They do NOT affect the HTTP client — vLLM handles GPU assignment internally.
+# ── Endpoint ────────────────────────────────────────────────────────────────────
 
-# Which GPU index(es) Ollama uses (set via ROCR_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES)
-# "0"   → GPU 0 only
-# "0,1" → both GPUs (for Ollama with tensor parallelism)
-# ""    → let Ollama choose (uses all available GPUs)
-OLLAMA_GPU_DEVICES = "0"
+OVMS_BASE_URL = "http://localhost:8000"   # OpenVINO Model Server (OpenAI-compatible)
+OVMS_REST_PORT = 8000
 
-# Which GPU index(es) vLLM uses (set via HIP_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES)
-# Recommended for 2×24GB setup: "1" so Ollama and vLLM each own one GPU
-# For maximum vLLM throughput: "0,1" with TENSOR_PARALLEL_SIZE = 2 (Ollama falls to CPU)
-VLLM_GPU_DEVICES = "1"
+# ── Server settings ─────────────────────────────────────────────────────────────
+# Used by start.py to launch OVMS. The HTTP client only needs OVMS_BASE_URL.
 
-# Number of GPUs vLLM splits the VLM across (tensor parallelism)
-# 1 → single GPU   2 → both GPUs (set VLLM_GPU_DEVICES = "0,1")
-TENSOR_PARALLEL_SIZE = 1
+# Inference device passed to OVMS as --target_device.
+#   "GPU"  → Intel iGPU / Arc discrete GPU
+#   "CPU"  → portable fallback (slower for 7–8 B models)
+#   "NPU"  → Intel Core Ultra NPU (limited model support)
+#   "AUTO" → let OpenVINO pick the best available device
+TARGET_DEVICE = "GPU"
 
-# Fraction of GPU VRAM vLLM may use (0.85 leaves headroom for other processes)
-VLM_GPU_MEMORY_UTIL = 0.85
+# KV-cache budget PER MODEL (GB).  Both models share the same GPU memory, so the
+# total KV-cache allocation is 2 × this value.  On a 16 GB GPU with two INT4 7–8 B
+# models (~5 GB weights each), 2 GB per model is a safe default.  Increase on GPUs
+# with more VRAM (e.g. 4–6 on a 24 GB card) for longer context windows.
+KV_CACHE_SIZE_GB = 2
 
-# VLM precision — float16 is safe for AMD ROCm; bfloat16 requires CDNA2+ (MI200+)
-VLM_DTYPE = "float16"
-
-# VLM context window (tokens) — 4096 is enough for grounding + reflection
-VLM_MAX_MODEL_LEN = 4096
+# Local directory OVMS uses as its model repository (holds the IR models and the
+# generated config.json). Relative to the project root.
+MODEL_REPOSITORY_PATH = "models"

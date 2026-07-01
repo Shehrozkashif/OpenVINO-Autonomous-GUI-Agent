@@ -1,6 +1,5 @@
 # tests/unit/test_ui_smoke.py
-"""
-End-to-end UI smoke test (offscreen).
+"""End-to-end UI smoke test (offscreen).
 
 Builds the full command-center window and pushes REAL orchestrator log lines
 through the same signal path used at runtime:
@@ -8,7 +7,7 @@ through the same signal path used at runtime:
     orchestrator.log(str) → WorkerSignals.log_update → AgentEventBus.feed()
         → MissionPage timeline / IntelligencePanel / status chip
 
-verifying the UI is wired to the backend without needing Ollama running.
+verifying the UI is wired to the backend without needing OVMS running.
 """
 import os
 
@@ -34,7 +33,8 @@ def _no_live_screen_capture(monkeypatch):
     """UI tests must never grab the real screen. Live Xlib captures firing on
     the 1 s preview timer while Qt pumps events have caused native segfaults
     in full-suite runs (X11 + offscreen Qt in one process), and the preview
-    path is already exercised deterministically via WorkerSignals."""
+    path is already exercised deterministically via WorkerSignals.
+    """
     from ui.main_window import DesktopGUIAgent
     monkeypatch.setattr(DesktopGUIAgent, "_refresh_screen", lambda self: None)
 
@@ -176,7 +176,8 @@ def test_mission_hud_masks_itself_from_captures(app):
 
 def test_grounding_overlay_marks_preview(app):
     """[GROUNDING] events must place a reticle on the Mission Control preview
-    at the located element's normalized screen position."""
+    at the located element's normalized screen position.
+    """
     from ui.main_window import DesktopGUIAgent
 
     win = DesktopGUIAgent(orchestrator=None)
@@ -264,8 +265,9 @@ def test_window_end_to_end_wiring(app):
 
 
 def test_run_task_requires_orchestrator(app, monkeypatch):
-    """_run_task must fail safe (dialog, no crash) when Ollama is down."""
+    """_run_task must fail safe (dialog, no crash) when OVMS is down."""
     from PyQt6.QtWidgets import QMessageBox
+
     from ui.main_window import DesktopGUIAgent
 
     win = DesktopGUIAgent(orchestrator=None)

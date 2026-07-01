@@ -1,6 +1,5 @@
 # ui/icons.py
-"""
-Vector line-icon set drawn with QPainter — no asset files, crisp at any DPI,
+"""Vector line-icon set drawn with QPainter — no asset files, crisp at any DPI,
 recolorable per state. Icons are drawn in a normalized 24x24 box.
 
 Usage:

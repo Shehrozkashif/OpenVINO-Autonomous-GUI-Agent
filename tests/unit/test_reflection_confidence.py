@@ -1,6 +1,5 @@
 # tests/unit/test_reflection_confidence.py
-"""
-Unit tests for reflection prompt safety and raw confidence pass-through.
+"""Unit tests for reflection prompt safety and raw confidence pass-through.
 
 Three properties are verified:
 
@@ -14,16 +13,17 @@ Three properties are verified:
                     clamping no longer caps it at 0.60 before the threshold comparison.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 import pytest
+
 from agents.reflection.reflection_agent import (
-    ReflectionAgent,
-    ReflectionResult,
     _LLM_REFLECTION_PROMPT,
     _VLM_REFLECTION_PROMPT,
+    ReflectionAgent,
+    ReflectionResult,
 )
-
 
 # ── 1. Prompt-stance tests (static string checks) ────────────────────────────
 
@@ -60,8 +60,7 @@ class TestPromptStance:
 # ── 2. Confidence-clamping tests (unit tests on _parse) ──────────────────────
 
 class TestNoConfidenceClamping:
-    """
-    _parse() must pass through the LLM's raw confidence unchanged.
+    """_parse() must pass through the LLM's raw confidence unchanged.
     Old code clamped:
       success=True  → conf forced up   to ≥0.75
       success=False → conf forced down to ≤0.60
@@ -130,8 +129,7 @@ class TestNoConfidenceClamping:
 # ── 3. Interaction with Fix 0.1 — confident failures now reachable ────────────
 
 class TestInteractionWithFix01:
-    """
-    With clamping removed, the orchestrator's fail_threshold comparison
+    """With clamping removed, the orchestrator's fail_threshold comparison
     (from Fix 0.1) can now actually detect confident failures.
 
     Before Fix 0.2: failure conf was always ≤0.60. With fail_threshold=0.75
@@ -149,8 +147,7 @@ class TestInteractionWithFix01:
         return agent._parse(json_str)
 
     def test_confident_failure_conf_above_click_threshold(self):
-        """
-        LLM says success=false, confidence=0.85.
+        """LLM says success=false, confidence=0.85.
         With Fix 0.2: conf=0.85 (not clamped to 0.60).
         In Fix 0.1 orchestrator: 0.85 >= min_confidence(0.75) → confident failure.
         """
@@ -166,8 +163,7 @@ class TestInteractionWithFix01:
         )
 
     def test_uncertain_failure_still_triggers_retry(self):
-        """
-        LLM says success=false, confidence=0.5 (ambiguous case from new prompt).
+        """LLM says success=false, confidence=0.5 (ambiguous case from new prompt).
         Fix 0.1 orchestrator: 0.5 < fail_threshold(0.75) → uncertain → retry.
         """
         result = self._parse(
@@ -189,8 +185,7 @@ class TestInteractionWithFix01:
         assert result.should_retry is False
 
     def test_fallback_parse_failure_conf_unchanged(self):
-        """
-        When JSON parsing fails, the keyword-based fallback uses confidence=0.5
+        """When JSON parsing fails, the keyword-based fallback uses confidence=0.5
         for failures. This must not be changed by clamping.
         """
         result = self._parse("The action clearly did not succeed at all.")

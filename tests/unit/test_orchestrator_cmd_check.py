@@ -1,21 +1,21 @@
 # tests/unit/test_orchestrator_cmd_check.py
-"""
-Tests for deterministic terminal-command verification (_verify_command_effect).
+"""Tests for deterministic terminal-command verification (_verify_command_effect).
 
 Live failure this guards against: `echo 'x' > file` SUCCEEDED (file on disk),
 but OCR reflection read the silent new prompt as "no change → failed" and
 aborted a subtask whose goal was already achieved.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 import os
 import time
-
-import pytest
 from unittest.mock import MagicMock, patch
 
-from core.orchestrator import TaskOrchestrator, OrchestratorConfig
+import pytest
+
+from core.orchestrator import OrchestratorConfig, TaskOrchestrator
 from core.protocols.a2a import ActionStep, SubTask
 
 
@@ -147,8 +147,9 @@ class TestGenericCommands:
 class TestSubtaskIntegration:
 
     def test_cmd_subtask_completes_on_verified_effect(self, tmp_path):
-        """type + enter with the file actually created → subtask returns True
-        WITHOUT any reflection call for the Enter step."""
+        """Type + enter with the file actually created → subtask returns True
+        WITHOUT any reflection call for the Enter step.
+        """
         f = tmp_path / "notes.txt"
 
         type_step = ActionStep(id=1, subtask_id=1, action_type="type",
@@ -182,3 +183,173 @@ class TestSubtaskIntegration:
         # Reflection ran for the type step only — never for the Enter
         reflected = [c.args[0].action_type for c in orch.reflector.verify.call_args_list]
         assert "key_press" not in reflected
+
+
+class TestSaveTargetExtraction:
+    """_subtask_save_target parses the destination path from a save subtask."""
+
+    def test_extracts_windows_path(self):
+        assert TaskOrchestrator._subtask_save_target(
+            _sub("with text in Notepad, save the document as C:/Users/x/Desktop/haiku.txt")
+        ) == "C:/Users/x/Desktop/haiku.txt"
+
+    def test_no_path_returns_none(self):
+        assert TaskOrchestrator._subtask_save_target(_sub("save the document")) is None
+
+    def test_non_save_returns_none(self):
+        assert TaskOrchestrator._subtask_save_target(
+            _sub("click in the document area and type: hello world")) is None
+
+    def test_quoted_path_with_spaces(self):
+        assert TaskOrchestrator._subtask_save_target(
+            _sub("save the report as 'D:/work/report v2.pdf'")) == "D:/work/report v2.pdf"
+
+
+class TestFileSavedFresh:
+    """_file_saved_fresh confirms a save by checking the file on disk."""
+
+    def test_fresh_file_passes(self, orch, tmp_path):
+        f = tmp_path / "a.txt"
+        started = time.time()
+        f.write_text("x")
+        assert orch._file_saved_fresh(str(f), started) is True
+
+    def test_missing_file_fails(self, orch, tmp_path):
+        assert orch._file_saved_fresh(str(tmp_path / "nope.txt"), time.time()) is False
+
+    def test_stale_file_fails(self, orch, tmp_path):
+        f = tmp_path / "old.txt"
+        f.write_text("x")
+        old = time.time() - 3600
+        os.utime(f, (old, old))
+        assert orch._file_saved_fresh(str(f), time.time()) is False
+
+
+class TestSaveSubtaskIntegration:
+
+    def test_save_subtask_completes_when_file_appears(self, tmp_path):
+        """A "save as <path>" subtask returns True the moment the file lands on
+        disk — it must NOT loop on ctrl+s waiting for an OCR confirmation that
+        editors never show.
+        """
+        f = tmp_path / "haiku.txt"
+        ctrls = ActionStep(id=1, subtask_id=1, action_type="hotkey",
+                           target=None, value=None, key="ctrl+s",
+                           description="Save the document", verification="")
+        enter = ActionStep(id=2, subtask_id=1, action_type="key_press",
+                           target=None, value=None, key="enter",
+                           description="Confirm save", verification="")
+
+        from agents.reflection.reflection_agent import ReflectionResult
+        ok_reflect = ReflectionResult(
+            success=True, confidence=0.95, observation="ok",
+            error_description="", should_retry=False, recovery_hint="",
+            ocr_text="")
+
+        orch = _make_orch()
+        # Plenty of ctrl+s steps queued — the save-check must short-circuit
+        # before they are all consumed.
+        orch.planner.plan_next_step = MagicMock(
+            side_effect=[ctrls, enter, ctrls, ctrls, ctrls])
+        orch.reflector.verify = MagicMock(return_value=ok_reflect)
+
+        def _exec(step, **kw):
+            if step.key == "enter":
+                f.write_text("a haiku")   # the save writes the file
+            return True
+        orch.actor.execute = MagicMock(side_effect=_exec)
+
+        with patch("core.orchestrator.time.sleep"):
+            result = orch._execute_subtask(_sub(f"save the document as {f}"))
+
+        assert result is True
+        assert f.exists()
+        # Confirmed shortly after the save — no long ctrl+s loop.
+        assert orch.planner.plan_next_step.call_count <= 3
+
+
+class TestDeterministicSaveAs:
+
+    def test_try_save_as_writes_and_confirms(self, tmp_path):
+        """ctrl+s → (dialog) → ctrl+a → type path → enter, confirmed on disk."""
+        f = tmp_path / "haiku.txt"
+        orch = _make_orch()
+        # No dialog yet → ctrl+s fires; dialog visible on the confirm check.
+        orch._save_dialog_visible = MagicMock(side_effect=[False, True])
+        orch._wait_for_settle = MagicMock()
+
+        def _exec(step):
+            if step.key == "enter":
+                f.write_text("a haiku")
+            return True
+        orch._execute_step = MagicMock(side_effect=_exec)
+
+        with patch("core.orchestrator.time.sleep"):
+            ok = orch._try_save_as(str(f), time.time())
+
+        assert ok is True
+        assert f.exists()
+        keys = [c.args[0].key for c in orch._execute_step.call_args_list]
+        assert "ctrl+s" in keys and "ctrl+a" in keys and "enter" in keys
+
+    def test_try_save_as_types_backslashes_on_windows(self, tmp_path):
+        """The router emits forward-slash paths, but the Windows Save dialog
+        rejects them — the deterministic save must type a backslash path.
+        """
+        import core.orchestrator as orch_mod
+        if orch_mod._OS != "Windows":
+            import pytest
+            pytest.skip("backslash conversion is Windows-only")
+
+        f = tmp_path / "haiku.txt"
+        forward = str(f).replace("\\", "/")   # as the router/sub-task emits it
+        orch = _make_orch()
+        orch._save_dialog_visible = MagicMock(return_value=True)
+        orch._wait_for_settle = MagicMock()
+
+        def _exec(step):
+            if step.key == "enter":
+                f.write_text("x")
+            return True
+        orch._execute_step = MagicMock(side_effect=_exec)
+
+        with patch("core.orchestrator.time.sleep"):
+            ok = orch._try_save_as(forward, time.time())
+
+        assert ok is True
+        typed = [c.args[0].value for c in orch._execute_step.call_args_list
+                 if c.args[0].action_type == "type"]
+        assert typed and "/" not in typed[0] and "\\" in typed[0]
+
+    def test_try_save_as_defers_when_no_dialog(self, tmp_path):
+        """If ctrl+s opens no dialog, never type the path into the document —
+        fall back to the planning loop and don't write the file.
+        """
+        f = tmp_path / "haiku.txt"   # never created
+        orch = _make_orch()
+        orch._save_dialog_visible = MagicMock(return_value=False)
+        orch._wait_for_settle = MagicMock()
+        orch._execute_step = MagicMock(return_value=True)
+
+        with patch("core.orchestrator.time.sleep"):
+            ok = orch._try_save_as(str(f), time.time())
+
+        assert ok is False
+        typed = [c.args[0] for c in orch._execute_step.call_args_list
+                 if c.args[0].action_type == "type"]
+        assert typed == [], "must not type a path when no Save dialog is visible"
+
+    def test_save_subtask_uses_deterministic_path(self, tmp_path):
+        """A save subtask runs _try_save_as up front and completes without ever
+        entering the planning loop.
+        """
+        f = tmp_path / "haiku.txt"
+        orch = _make_orch()
+        orch._try_save_as = MagicMock(side_effect=lambda *_: (f.write_text("x"), True)[1])
+
+        with patch("core.orchestrator.time.sleep"):
+            result = orch._execute_subtask(_sub(f"save the document as {f}"))
+
+        assert result is True
+        orch._try_save_as.assert_called_once()
+        orch.planner.plan_next_step.assert_not_called()

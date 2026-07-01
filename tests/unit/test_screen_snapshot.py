@@ -1,6 +1,5 @@
 # tests/unit/test_screen_snapshot.py
-"""
-Unit tests for Fix 1.2 — ScreenSnapshot structured world model.
+"""Unit tests for Fix 1.2 — ScreenSnapshot structured world model.
 
 Covers:
   TestOCRRegionAndSnapshot  — dataclass construction, foreground_texts(),
@@ -14,7 +13,6 @@ Covers:
 """
 import time
 import unittest
-from typing import List
 from unittest.mock import MagicMock, patch
 
 from agents.grounding.grounding_agent import OCREngine, OCRWord
@@ -24,7 +22,6 @@ from core.capture.screen_snapshot import (
     _point_in_rect,
     capture_snapshot,
 )
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -155,7 +152,7 @@ class TestCaptureSnapshot(unittest.TestCase):
         capturer.capture.return_value = img
         return capturer
 
-    def _make_ocr(self, words: List[OCRWord]):
+    def _make_ocr(self, words: list[OCRWord]):
         ocr = MagicMock(spec=OCREngine)
         ocr.is_available.return_value = True
         ocr.extract.return_value = words

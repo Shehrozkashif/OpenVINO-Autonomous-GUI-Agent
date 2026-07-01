@@ -30,32 +30,44 @@ python -m venv venv && venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Pull the models (only needed for live/e2e testing)
+### 4. Prepare the models (only needed for live/e2e testing)
 
-Model ids live in `config.py` — the single source of truth.
+Model ids live in `config.py` — the single source of truth. `start.py` pulls the
+LLM and converts UI-TARS into the OpenVINO Model Server repository, then launches
+OVMS serving both on port 8000:
 
 ```bash
-ollama pull qwen3:8b
-ollama pull hf.co/mradermacher/UI-TARS-1.5-7B-GGUF:Q4_K_S
+# The conversion toolchain (optimum-intel, nncf) is included in requirements.txt.
+# Install the native ovms/ovms.exe binary and set OVMS_DIR (see README.md).
+python start.py                              # prepares models + starts OVMS + UI
 ```
+
+> **First run takes 30–60 minutes** for the UI-TARS INT4 conversion. Subsequent
+> runs skip this step. If conversion produces files with broken permissions on
+> Windows, delete the model folder from an elevated terminal and re-run `start.py`.
 
 ### 5. Run tests
 
 ```bash
 pytest                    # unit tests — fast, no backend or desktop required
-python e2e_test.py        # end-to-end — requires Ollama running + a live desktop
+python e2e_test.py        # end-to-end — requires OVMS running + a live desktop
 ```
 
-The unit suite must pass on a machine with no Ollama and no GPU; anything that
-needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
+The unit suite must pass on a machine with no model server and no GPU; anything
+that needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
 `tests/unit/`.
 
 ---
 
 ## Code Style
 
-- Follow **PEP 8**; lint with `ruff check .` (configured in `pyproject.toml`).
-- Use **type hints** on all public function signatures.
+- Follow the **[Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)**;
+  lint with `ruff check .` (rules configured in `pyproject.toml`: pyflakes,
+  import order, modern typing, bugbear, comprehensions, and Google-convention
+  docstrings). It must pass clean before you submit.
+- Use **type hints** on all public function signatures; prefer the modern forms
+  (`list`/`dict`/`tuple` over `typing.List`/`Dict`/`Tuple`, and `X | None` over
+  `Optional[X]`).
 - Agent constructors must accept `InferenceClient` (the Protocol in
   `core/protocols/a2a.py`), not a concrete client class.
 - Heavy or optional dependencies may be imported lazily inside functions
@@ -72,7 +84,7 @@ needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
 |------|--------|
 | All OS input goes through `tools/desktop_control/controller.py` | Single place for platform differences (XTest vs pynput) and the kill switch |
 | Grounding coordinates are always physical screen pixels | Capture returns physical pixels; the controller expects physical pixels |
-| Agents depend on the `InferenceClient` Protocol, never on `OllamaClient` directly | Keeps future backends (OVMS, direct OpenVINO) drop-in compatible |
+| Agents depend on the `InferenceClient` Protocol, never on `OVMSClient` directly | Keeps the inference backend (OVMS today, anything else tomorrow) drop-in replaceable |
 | `type` steps must pass the action firewall (`core/safety/action_firewall.py`) | Deterministic protection against destructive shell commands |
 | Tasks completed via degraded paths must not be stored in success memory | Broken plans would otherwise poison future routing hints |
 
@@ -92,6 +104,6 @@ needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
 
 Open a GitHub issue with:
 - OS and Python version
-- VLM backend in use (vLLM or Ollama — shown at startup)
+- Target device in use (`TARGET_DEVICE` in `config.py` — GPU / CPU / NPU)
 - The instruction that failed
 - The full log output from the Agent Log panel

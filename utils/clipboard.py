@@ -1,6 +1,5 @@
 # utils/clipboard.py
-"""
-Cross-platform clipboard read/write.
+"""Cross-platform clipboard read/write.
 
 On Linux: tries xclip then xsel (no Python deps needed).
 On Windows/macOS: uses pyperclip.
@@ -9,15 +8,14 @@ import platform
 import subprocess
 import threading
 import time
-from typing import Optional
 
 _OS = platform.system()
 
 # ── Availability check (done once at import) ──────────────────────────────────
 
-def _probe_linux_clipboard() -> Optional[str]:
+def _probe_linux_clipboard() -> str | None:
     """Return the first working clipboard tool name, or None."""
-    for tool, args_write, args_read in [
+    for tool, args_write, _args_read in [
         ("xclip",
          ["xclip", "-selection", "clipboard"],
          ["xclip", "-selection", "clipboard", "-out"]),
@@ -35,7 +33,7 @@ def _probe_linux_clipboard() -> Optional[str]:
     return None
 
 
-_LINUX_TOOL: Optional[str] = _probe_linux_clipboard() if _OS == "Linux" else None
+_LINUX_TOOL: str | None = _probe_linux_clipboard() if _OS == "Linux" else None
 
 
 # ── Write ─────────────────────────────────────────────────────────────────────
@@ -103,8 +101,7 @@ def available() -> bool:
 # ── Clipboard-paste typing ────────────────────────────────────────────────────
 
 def paste_type(text: str, send_hotkey_fn, sensitive: bool = False) -> bool:
-    """
-    Type text by setting the clipboard and sending ctrl+v.
+    """Type text by setting the clipboard and sending ctrl+v.
     Restores previous clipboard content after 600 ms (async).
 
     send_hotkey_fn: callable that accepts *key_names (e.g. controller._send_hotkey)

@@ -1,5 +1,4 @@
-"""
-End-to-end VLM coordinate accuracy test for UI-TARS-1.5-7B.
+"""End-to-end VLM coordinate accuracy test for UI-TARS-1.5-7B.
 
 What it does:
   1. Captures a live screenshot.
@@ -19,7 +18,6 @@ import io
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 sys.path.insert(0, ".")
 
@@ -27,8 +25,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from agents.grounding.grounding_agent import OCREngine, UIGroundingAgent
 from core.capture.screenshot import ScreenCapture, _screen_size
-from core.pipeline.ollama_client import OllamaClient
-
+from core.pipeline.ovms_client import OVMSClient
 
 # ── Expected regions ──────────────────────────────────────────────────────────
 # Each entry: (label, expected_region_as_fraction (x0,y0,x1,y1), description)
@@ -47,8 +44,8 @@ TARGETS = [
 @dataclass
 class CoordResult:
     target: str
-    predicted_x: Optional[int]
-    predicted_y: Optional[int]
+    predicted_x: int | None
+    predicted_y: int | None
     conf: float
     in_region: bool
     raw_response: str
@@ -72,14 +69,14 @@ def run_vlm_coord_test():
 
     # ── Setup ──────────────────────────────────────────────────────────────────
     capturer = ScreenCapture()
-    client   = OllamaClient()
+    client   = OVMSClient()
     ocr      = OCREngine()
     grounder = UIGroundingAgent(client, capturer, ocr=ocr)
     sw, sh   = _screen_size()
 
     print(f"\nScreen: {sw}×{sh}")
     print(f"VLM model: {client.vlm_model}")
-    print(f"VLM backend: {'vLLM' if client.vlm_base_url != client.llm_base_url else 'Ollama'}")
+    print(f"VLM backend: OpenVINO Model Server ({client.base_url})")
 
     # ── Capture once and reuse ─────────────────────────────────────────────────
     print("\nCapturing screenshot…")
@@ -101,7 +98,7 @@ def run_vlm_coord_test():
         raw = "—"
         try:
             # Patch _vlm_coords to also return raw response for debugging
-            from agents.grounding.grounding_agent import _VLM_COORD_PROMPT, _UITARS_SYSTEM_PROMPT
+            from agents.grounding.grounding_agent import _UITARS_SYSTEM_PROMPT, _VLM_COORD_PROMPT
             resp = client.query_vlm(
                 prompt=_VLM_COORD_PROMPT.format(target=target),
                 image_base64=img_b64,
@@ -154,7 +151,7 @@ def run_vlm_coord_test():
         "label_bg":    (0, 0, 0, 160),
     }
 
-    for r, (target, region, _) in zip(results, TARGETS):
+    for r, (target, region, _) in zip(results, TARGETS, strict=False):
         x0f, y0f, x1f, y1f = region
         rx0, ry0 = int(x0f * sw), int(y0f * sh)
         rx1, ry1 = int(x1f * sw), int(y1f * sh)

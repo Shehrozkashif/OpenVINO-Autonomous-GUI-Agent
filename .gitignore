@@ -1,39 +1,53 @@
-# Python cache files
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+dist/
+build/
 
-# Model files (BIG - 6.4 GB, don't commit!)
-models/OpenVINO/
-*.bin
-*.onnx
-*.xml
-*.gguf
+# ── Virtual environment ──────────────────────────────────────────────────────
+venv/
+env/
+.venv/
 
-# Runtime artifacts
-logs/
+# ── Model files (large — never commit) ──────────────────────────────────────
+# OVMS model repository: IR weights, tokenizers, generated config
+models/*
+!models/.gitkeep
+
+# ── OVMS binary (downloaded by user, not part of source) ────────────────────
+ovms/
+ovms.zip
+
+# ── OVMS export tool (downloaded by start.py on first run) ──────────────────
+tools/ovms/
+
+# ── Generated OVMS launchers (Windows) ──────────────────────────────────────
+_run_ovms.bat
+_test_ovms.bat
+
+# ── Runtime artifacts ────────────────────────────────────────────────────────
 *.log
+logs/
 @AutomationLog.txt
-memory/interaction_memory.db
 *.db
 
-# Test / lint cache
+# ── Test / lint cache ────────────────────────────────────────────────────────
 .pytest_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 
-# IDE
+# ── IDE ──────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
 .DS_Store
+Thumbs.db
 
-# Virtual environment
-venv/
-env/
-.venv/
-
-# Docker
+# ── Docker ───────────────────────────────────────────────────────────────────
 *.pid

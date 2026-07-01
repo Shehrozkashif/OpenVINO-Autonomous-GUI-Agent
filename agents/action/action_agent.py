@@ -1,6 +1,5 @@
 # agents/action/action_agent.py
-"""
-Action Execution Agent — physically executes action steps on the desktop.
+"""Action Execution Agent — physically executes action steps on the desktop.
 Calls the Tool Server (not pyautogui directly) via DesktopController.
 """
 import time
@@ -10,15 +9,13 @@ from loguru import logger
 from core.protocols.a2a import ActionStep
 from tools.desktop_control.controller import DesktopController
 
-
 _TERMINAL_WORDS = frozenset(
     ("terminal", "command", "shell", "bash", "sh", "prompt", "console", "run")
 )
 
 
 def _should_use_clipboard_for(step, text: str) -> bool:
-    """
-    Use clipboard paste instead of keystroke-by-keystroke when:
+    """Use clipboard paste instead of keystroke-by-keystroke when:
       - text is long (> 20 chars) OR contains non-ASCII / special symbols
       - AND the context is NOT a terminal (ctrl+v is a control char in bash)
     """
@@ -42,8 +39,7 @@ def _screen_center():
 
 
 class ActionExecutionAgent:
-    """
-    Executes atomic ActionStep objects by translating them into tool calls.
+    """Executes atomic ActionStep objects by translating them into tool calls.
     The Orchestrator calls execute(step, x=None, y=None) for each step.
 
     x, y are provided by the Grounding Agent for click/double_click/drag steps.
@@ -62,8 +58,7 @@ class ActionExecutionAgent:
         x2: int = None,
         y2: int = None,
     ) -> bool:
-        """
-        Execute one ActionStep. Returns True on success, False on failure.
+        """Execute one ActionStep. Returns True on success, False on failure.
 
         x, y:      screen coordinates from UIGroundingAgent (source element).
         x2, y2:    destination coordinates for drag steps.
@@ -104,7 +99,7 @@ class ActionExecutionAgent:
                 value = step.value
                 sensitive = False
                 try:
-                    from utils.credentials import substitute, has_tokens
+                    from utils.credentials import has_tokens, substitute
                     if has_tokens(value):
                         value = substitute(value)
                         sensitive = True

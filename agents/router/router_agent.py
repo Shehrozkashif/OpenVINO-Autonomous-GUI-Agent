@@ -6,7 +6,6 @@ import os
 import platform
 import re
 import uuid
-from typing import List, Optional, Tuple
 
 from loguru import logger
 
@@ -64,16 +63,27 @@ _FIREFOX_LAUNCH = _FIREFOX_CMD if _OS == "Windows" else f"{_FIREFOX_CMD} &"
 # ── Router system prompt ───────────────────────────────────────────────────────
 
 ROUTER_SYSTEM_PROMPT = """You are a desktop automation coordinator on ROUTER_OS_PLACEHOLDER.
-Decompose any user instruction into the MINIMUM ordered sub-tasks a GUI agent can execute.
+Decompose any user instruction into ordered sub-tasks a GUI agent can execute —
+covering the user's FULL intent with the fewest steps that leave nothing out.
 
 ━━━ CORE RULES ━━━
-1. One distinct action per sub-task (launch app / navigate / click / type / run command).
-2. Minimum sub-tasks — never add unnecessary confirmation, wait, or close steps.
-3. Set depends_on so each sub-task runs after its prerequisites complete.
+1. COVER THE FULL INTENT (most important rule). Scan the instruction and find
+   EVERY action the user asks for. Each verb is an action: open, go to, search,
+   click, type/write, run, save, rename, send, download, print, delete, close,
+   etc. Emit ONE sub-task per action, IN ORDER, and make the LAST sub-task
+   achieve the user's end result. Silently dropping or merging a requested
+   action is the #1 failure — if the words "and X" appear, there is a sub-task
+   for X. (e.g. "...and save it" → a save sub-task; "...and close it" → a close
+   sub-task; "...and email it" → a send sub-task.)
+2. FEWEST STEPS, but never fewer than rule 1 requires. Do not INVENT steps the
+   user didn't ask for (no extra confirm / wait / re-open / close). "Minimum"
+   limits invented steps only — it NEVER licenses skipping a requested action.
+3. One distinct action per sub-task (launch app / navigate / click / type / run / save).
+4. Set depends_on so each sub-task runs after its prerequisites complete.
    CRITICAL: If sub-task B opens/reads a file that sub-task A creates, set B's depends_on to [A_id].
    Example: create file (id=2) then open in Notepad (id=3) → Notepad sub-task has depends_on:[2].
-4. Descriptions must be SPECIFIC — include exact URLs, filenames, commands, and app names.
-5. STATE CONTEXT in every dependent sub-task description so the planner knows what is already open:
+5. Descriptions must be SPECIFIC — include exact URLs, filenames, commands, and app names.
+6. STATE CONTEXT in every dependent sub-task description so the planner knows what is already open:
      "with the terminal already open, run: <command>"
      "with Firefox already open, navigate to <url>"
      "with VS Code already open, create a new file named <name>"
@@ -172,6 +182,11 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 → [{"id":1,"description":"open LibreOffice Writer","depends_on":[]},
    {"id":2,"description":"with LibreOffice Writer open, click in the document area and type: hello world","depends_on":[1]}]
 
+"open notepad, write a haiku about the sea, and save the file"
+→ [{"id":1,"description":"open Notepad","depends_on":[]},
+   {"id":2,"description":"with Notepad already open, click in the document area and type: <the haiku text>","depends_on":[1]},
+   {"id":3,"description":"with the text written in Notepad, save the document as DESKTOP_PATH_PLACEHOLDER/haiku.txt","depends_on":[2]}]
+
 "open a spreadsheet and enter sales data in cell A1"
 → [{"id":1,"description":"open LibreOffice Calc","depends_on":[]},
    {"id":2,"description":"with LibreOffice Calc open, click on cell A1 and enter the sales data","depends_on":[1]}]
@@ -220,9 +235,9 @@ class RouterAgent:
     def decompose(
         self,
         instruction: str,
-        screen_context: Optional[str] = None,
-        memory_hint: Optional[str] = None,
-    ) -> Tuple[str, List[SubTask]]:
+        screen_context: str | None = None,
+        memory_hint: str | None = None,
+    ) -> tuple[str, list[SubTask]]:
         task_id = str(uuid.uuid4())[:8]
         logger.info(f"[ROUTER] Task {task_id}: '{instruction}'")
 
@@ -254,13 +269,100 @@ class RouterAgent:
                                        response_schema=_SUBTASK_SCHEMA)
             subtasks = self._parse_subtasks(resp.content)
 
+        # Completeness backstop. The prompt rule helps but an 8B router
+        # intermittently drops a trailing requested action. Detection is
+        # deterministic and general (a list of action verbs); the FIX is handed
+        # back to the LLM (re-prompt) so filenames/steps stay model-chosen, not
+        # hardcoded.
+        subtasks = self._ensure_complete(instruction, user_content, subtasks)
+
         logger.info(f"[ROUTER] Decomposed into {len(subtasks)} sub-tasks:")
         for st in subtasks:
             logger.info(f"  [{st.id}] {st.description} (depends on: {st.depends_on})")
 
         return task_id, subtasks
 
-    def _parse_subtasks(self, text: str) -> List[SubTask]:
+    # ── Completeness backstop (deterministic detection, LLM correction) ─────────
+
+    # Trailing/finalizing actions a user commonly appends ("...and save it",
+    # "...then close it"). General, not per-task: detection only — the fix is the
+    # model's job. Each entry: canonical name → regex matching the user's verb.
+    _FINALIZING_ACTIONS = {
+        "save":     r"\bsave\b",
+        "close":    r"\bclose\b",
+        "send":     r"\b(?:send|e-?mail)\b",
+        "print":    r"\bprint\b",
+        "download": r"\bdownload\b",
+        "delete":   r"\b(?:delete|remove)\b",
+        "rename":   r"\brename\b",
+    }
+
+    @classmethod
+    def _missing_actions(cls, instruction: str, subtasks: list[SubTask]) -> list[str]:
+        """Return finalizing actions the user requested but no sub-task covers.
+
+        Deterministic and general — it flags an OMISSION, it does not invent the
+        missing step (that is the model's job on re-prompt).
+        """
+        instr = instruction.lower()
+        covered = " ".join((st.description or "").lower() for st in subtasks)
+        missing = []
+        for name, pat in cls._FINALIZING_ACTIONS.items():
+            if re.search(pat, instr) and not re.search(pat, covered):
+                missing.append(name)
+        return missing
+
+    def _ensure_complete(
+        self, instruction: str, user_content: str, subtasks: list[SubTask]
+    ) -> list[SubTask]:
+        """Re-prompt the router ONCE if it dropped an explicitly requested action.
+
+        Keeps the model in charge of the fix (filenames, exact steps) — code only
+        detects the gap. Accepts the retry only if it actually closes the gap;
+        otherwise keeps the original so we never make things worse.
+        """
+        missing = self._missing_actions(instruction, subtasks)
+        if not missing or not subtasks:
+            return subtasks
+
+        logger.warning(
+            f"[ROUTER] Decomposition dropped requested action(s) {missing} — "
+            f"re-prompting once to complete it"
+        )
+        prior = json.dumps([
+            {"id": st.id, "description": st.description, "depends_on": st.depends_on}
+            for st in subtasks
+        ])
+        correction = (
+            f"Your sub-task list dropped these actions the user explicitly asked "
+            f"for: {', '.join(missing)}. Re-output the COMPLETE ordered JSON array, "
+            f"keeping every existing sub-task and adding one sub-task for each "
+            f"missing action as the final step(s), with a concrete filename/target "
+            f"where relevant. JSON array only."
+        )
+        messages = [
+            {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": prior},
+            {"role": "user", "content": correction},
+        ]
+        try:
+            resp = self.client.query_llm(
+                messages, max_tokens=768, temperature=0.1,
+                response_schema=_SUBTASK_SCHEMA,
+            )
+            fixed = self._parse_subtasks(resp.content)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"[ROUTER] Re-prompt parse failed ({e}) — keeping original")
+            return subtasks
+
+        # Only take the retry if it genuinely covers more of what was missing.
+        if len(self._missing_actions(instruction, fixed)) < len(missing) and fixed:
+            return fixed
+        logger.warning("[ROUTER] Re-prompt did not close the gap — keeping original")
+        return subtasks
+
+    def _parse_subtasks(self, text: str) -> list[SubTask]:
         if "</think>" in text:
             text = text.split("</think>")[-1]
         else:

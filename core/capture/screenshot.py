@@ -1,6 +1,5 @@
 # core/capture/screenshot.py
-"""
-Cross-platform screen capture — auto-detects OS at startup.
+"""Cross-platform screen capture — auto-detects OS at startup.
 
   Linux  → Xlib root.get_image(): reads pixels directly from the X server
             without sending compositor events (PIL.ImageGrab causes GNOME Shell
@@ -13,7 +12,6 @@ Cross-platform screen capture — auto-detects OS at startup.
 import base64
 import io
 import platform
-from typing import Optional
 
 import imagehash
 from PIL import Image
@@ -27,8 +25,10 @@ _xd = None   # set only when Xlib initialises successfully
 
 if _OS == "Linux":
     try:
-        from Xlib import display as _Xdisplay, X as _Xconst
         import os as _os
+
+        from Xlib import X as _Xconst
+        from Xlib import display as _Xdisplay
         _xd = _Xdisplay.Display(_os.environ.get("DISPLAY", ":0"))
         _XLIB_OK = True
     except Exception as _xlib_err:
@@ -113,7 +113,7 @@ def frame_phash(img: Image.Image) -> "imagehash.ImageHash":
 class ScreenCapture:
     def __init__(self, monitor: int = 1):
         self.monitor = monitor
-        self._last_hash: Optional[imagehash.ImageHash] = None
+        self._last_hash: imagehash.ImageHash | None = None
         # Regions (x1, y1, x2, y2) to black out in every captured frame.
         # Used to mask the agent's own GUI window so its text doesn't pollute OCR.
         # NOTE: the orchestrator overwrites this list every refresh cycle.

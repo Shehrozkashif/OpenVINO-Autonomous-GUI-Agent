@@ -1,5 +1,4 @@
-"""
-Live end-to-end test: create a folder on the desktop via the GUI agent pipeline.
+"""Live end-to-end test: create a folder on the desktop via the GUI agent pipeline.
 
 Task: "Right click on the desktop, click New, click Folder, type TestFolder, press Enter."
 
@@ -7,7 +6,7 @@ Run:
     python tests/live_folder_test.py
 
 Requirements:
-    - Ollama serving qwen3:8b (LLM) and qwen2.5vl:3b (VLM)
+    - OpenVINO Model Server serving qwen3-8b-int4-ov (LLM) and ui-tars-1.5-7b-int4-ov (VLM)
     - Real Windows display (desktop visible, no fullscreen apps)
     - Write permission to %USERPROFILE%\\Desktop
 """
@@ -83,7 +82,7 @@ def main():
     _clean_existing()
 
     # ── Phase 1: Build orchestrator ────────────────────────────────────────────
-    phase("1. Build orchestrator (Ollama health-check + component init)")
+    phase("1. Build orchestrator (OVMS health-check + component init)")
     t0 = time.perf_counter()
     try:
         from main import build_orchestrator
@@ -92,7 +91,7 @@ def main():
         print(f"  Orchestrator ready in {build_ms:.0f} ms")
     except Exception as e:
         print(f"  [FATAL] Could not build orchestrator: {e}")
-        print("  Make sure 'ollama serve' is running with qwen3:8b and qwen2.5vl:3b loaded.")
+        print("  Make sure OpenVINO Model Server is running (python start.py) with both models loaded.")
         raise
 
     # ── Phase 2: Instrument the orchestrator to capture per-phase timing ───────

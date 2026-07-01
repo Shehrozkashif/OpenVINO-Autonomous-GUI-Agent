@@ -1,6 +1,5 @@
 # agents/grounding/grounding_agent.py
-"""
-UI Grounding Agent — locates UI elements by natural language description.
+"""UI Grounding Agent — locates UI elements by natural language description.
 
 Three-stage pipeline (Windows) / Two-stage (Linux/macOS):
   Stage 0 — Windows UIA:  Accessibility tree bounding box lookup    (conf 1.0 / 0.85+)
@@ -18,7 +17,7 @@ import platform
 import re
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import imagehash
 import numpy as np
@@ -26,7 +25,8 @@ from loguru import logger
 from PIL import Image
 
 from core.capture.screenshot import ScreenCapture, _screen_size
-from core.grounding.windows_uia import find_element as _uia_find, is_available as _uia_ok
+from core.grounding.windows_uia import find_element as _uia_find
+from core.grounding.windows_uia import is_available as _uia_ok
 from core.protocols.a2a import InferenceClient
 
 _IS_WINDOWS = platform.system() == "Windows"
@@ -95,8 +95,7 @@ class OCRWord:
 
 
 class OCREngine:
-    """
-    Wraps RapidOCR (pure Python ONNX, no system deps) with fuzzy text search.
+    """Wraps RapidOCR (pure Python ONNX, no system deps) with fuzzy text search.
     Initialised lazily on first use. Results are cached by perceptual hash so
     repeated calls on an unchanged screen skip the ONNX inference entirely.
     """
@@ -106,8 +105,8 @@ class OCREngine:
 
     def __init__(self):
         self._ocr = None
-        self._available: Optional[bool] = None
-        self._cache: Dict[str, tuple] = {}   # phash_str → (words, timestamp)
+        self._available: bool | None = None
+        self._cache: dict[str, tuple] = {}   # phash_str → (words, timestamp)
 
     def is_available(self) -> bool:
         if self._available is None:
@@ -121,9 +120,8 @@ class OCREngine:
                 logger.warning(f"[OCR] RapidOCR not available: {e}")
         return self._available
 
-    def extract(self, image: Image.Image) -> List[OCRWord]:
-        """
-        Run OCR and return detected text boxes.
+    def extract(self, image: Image.Image) -> list[OCRWord]:
+        """Run OCR and return detected text boxes.
         Transparently caches by perceptual hash — unchanged screens reuse the
         previous result without running the ONNX model again (~150 ms saved).
         """
@@ -131,7 +129,7 @@ class OCREngine:
             return []
 
         # ── Cache lookup ──────────────────────────────────────────────────────
-        phash_str: Optional[str] = None
+        phash_str: str | None = None
         try:
             phash_str = str(imagehash.phash(image))
             cached = self._cache.get(phash_str)
@@ -153,7 +151,7 @@ class OCREngine:
         if not results:
             return []
 
-        words: List[OCRWord] = []
+        words: list[OCRWord] = []
         for item in results:
             if len(item) < 3:
                 continue
@@ -183,20 +181,19 @@ class OCREngine:
 
     def find_text(
         self,
-        words: List[OCRWord],
+        words: list[OCRWord],
         query: str,
         threshold: float = 0.60,
         foreground_only: bool = False,
-    ) -> Optional[OCRWord]:
-        """
-        Fuzzy-match query against all OCR words.
+    ) -> OCRWord | None:
+        """Fuzzy-match query against all OCR words.
         Checks windows of 1-3 consecutive words to handle multi-word labels.
         When foreground_only=True, words with is_in_foreground=False are skipped.
         """
         if not words or not query.strip():
             return None
         q = query.strip().lower()
-        best: Optional[Tuple[float, OCRWord]] = None
+        best: tuple[float, OCRWord] | None = None
 
         for window in range(1, 4):
             for i in range(len(words) - window + 1):
@@ -263,10 +260,10 @@ class ElementCache:
     """Cache coordinates keyed by (target, perceptual screen hash) with TTL."""
 
     def __init__(self, ttl_seconds: int = 300):
-        self._cache: Dict[str, tuple] = {}
+        self._cache: dict[str, tuple] = {}
         self._ttl = ttl_seconds
 
-    def get(self, target: str, screen_hash: str) -> Optional[Tuple[int, int, float, str, str]]:
+    def get(self, target: str, screen_hash: str) -> tuple[int, int, float, str, str] | None:
         if target not in self._cache:
             return None
         x, y, conf, method, element_type, ts, cached_hash = self._cache[target]
@@ -286,13 +283,12 @@ class ElementCache:
 
 
 class UIGroundingAgent:
-    """
-    Locates UI elements by natural language description.
+    """Locates UI elements by natural language description.
 
     Stage 1 — OCR:  fast, free, pixel-perfect for text-labeled elements.
     Stage 2 — VLM:  UI-TARS-1.5-7B direct coordinate prediction for everything else.
 
-    Accepts any client that implements InferenceClient (OllamaClient, OVMSClient, etc.).
+    Accepts any client that implements InferenceClient (OVMSClient, etc.).
     """
 
     _DISPLAY_W = 960   # must match capture_snapshot() thumbnail size so OCR cache entries are shared
@@ -319,8 +315,7 @@ class UIGroundingAgent:
     # ── public API ────────────────────────────────────────────────────────────
 
     def ground(self, target: str, max_retries: int = 1) -> GroundingResult:
-        """
-        Locate a UI element by natural language description.
+        """Locate a UI element by natural language description.
         Returns GroundingResult with screen (x, y). found=False if all stages fail.
 
         On failure, asks the LLM for 3 alternative phrasings and retries each
@@ -403,8 +398,7 @@ class UIGroundingAgent:
                                target=target, method="failed")
 
     def ground_fast(self, target: str) -> GroundingResult:
-        """
-        Stage 0 + Stage 1 only (UIA + OCR) — no VLM call.
+        """Stage 0 + Stage 1 only (UIA + OCR) — no VLM call.
 
         Used during burst pre-grounding where transient elements (context-menu
         items) may not be visible yet.  If they're absent, Stage 2 would block
@@ -446,7 +440,7 @@ class UIGroundingAgent:
                                latency_ms=(time.time() - start) * 1000,
                                target=target, method="failed")
 
-    def ground_multiple(self, targets: List[str]) -> List[GroundingResult]:
+    def ground_multiple(self, targets: list[str]) -> list[GroundingResult]:
         return [self.ground(t) for t in targets]
 
     # ── grounding stages ──────────────────────────────────────────────────────
@@ -456,11 +450,11 @@ class UIGroundingAgent:
         target: str,
         display: Image.Image,
         img_b64: str,
-        words: List[OCRWord],
+        words: list[OCRWord],
         scale_x: float,
         scale_y: float,
         use_vlm: bool = True,
-    ) -> Optional[Tuple[int, int, float, str, str]]:
+    ) -> tuple[int, int, float, str, str] | None:
         # Stage 0: Windows UIAutomation — fast, pixel-perfect, no model needed
         # UIA elements are always interactive → element_type="foreground_interactive"
         if _IS_WINDOWS and _uia_ok():
@@ -495,7 +489,7 @@ class UIGroundingAgent:
     def _vlm_coords(
         self, target: str, img_b64: str,
         display_w: int = 0, display_h: int = 0,
-    ) -> Optional[Tuple[int, int, float, str, str]]:
+    ) -> tuple[int, int, float, str, str] | None:
         """Ask UI-TARS for normalized (x,y) coordinates and scale to screen pixels.
 
         display_w/display_h: pixel dimensions of the image sent to the VLM.
@@ -527,9 +521,8 @@ class UIGroundingAgent:
     def _parse_coords(
         self, text: str, screen_w: int, screen_h: int,
         display_w: int = 0, display_h: int = 0,
-    ) -> Optional[Tuple[int, int, float]]:
-        """
-        Parse VLM output into screen pixel coordinates (x, y, confidence).
+    ) -> tuple[int, int, float] | None:
+        """Parse VLM output into screen pixel coordinates (x, y, confidence).
 
         display_w/display_h: size of the image that was sent to the VLM.
         When the model returns pixel-valued coordinates they are in the display
@@ -554,38 +547,61 @@ class UIGroundingAgent:
         dw = display_w if display_w > 1 else screen_w
         dh = display_h if display_h > 1 else screen_h
 
-        def _px_to_screen(px: float, py: float) -> Tuple[int, int]:
+        def _px_to_screen(px: float, py: float) -> tuple[int, int]:
             """Scale display-space pixels to screen pixels, clamped to screen bounds."""
             return (
                 min(int(px / dw * screen_w), screen_w - 1),
                 min(int(py / dh * screen_h), screen_h - 1),
             )
 
-        # UI-TARS native action format (0-1000 scale, independent of display size):
+        # UI-TARS native action format:
         #   click(start_box='[[x1, y1, x2, y2]]')
-        # Bracket count varies in practice ('[[', '[[[', …) — tolerate 0-4.
+        # Bracket style varies wildly: '[[', '[[[', '(', '[(', etc.
+        # Scale interpretation: the prompt asks for 0-1000 but the OVMS-served
+        # INT4 UI-TARS often emits coordinates in the screenshot's pixel space
+        # instead.  Heuristic: if any coordinate exceeds 1000, treat ALL values
+        # as display-space pixels; otherwise use the 0-1000 convention.
+        _OPEN = r"[\[\(]{0,4}"
+        _CLOSE = r"[\]\)]{0,4}"
+
+        def _scale_box_coord(val: float, screen_dim: int, display_dim: int) -> int:
+            """Convert a VLM coordinate to screen pixels.
+
+            If val > 1000 it must be a display-space pixel, not 0-1000.
+            If display_dim is available and val fits within it, treat as pixel.
+            Otherwise fall back to 0-1000 normalised interpretation.
+            """
+            if val > 1000:
+                return _px_to_screen(val, 0)[0] if screen_dim == screen_w else _px_to_screen(0, val)[1]
+            if display_dim > 1 and val <= display_dim:
+                return min(int(val / display_dim * screen_dim), screen_dim - 1)
+            return int(val / 1000 * screen_dim)
+
         m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _OPEN +
             r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
-            r"\]{0,4}'?\s*\)",
+            + _CLOSE + r"'?\s*\)",
             text,
         )
         if m:
             x1, y1, x2, y2 = (float(m.group(i)) for i in range(1, 5))
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-            return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.90)
+            sx = _scale_box_coord(cx, screen_w, dw)
+            sy = _scale_box_coord(cy, screen_h, dh)
+            return (sx, sy, 0.90)
 
-        # 2-value form: model emits [[cx, cy]] instead of [[x1,y1,x2,y2]].
-        # Treat as center point on the 0-1000 scale.
+        # 2-value form: model emits [[cx, cy]] or (cx, cy) instead of a full bbox.
         m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _OPEN +
             r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
-            r"\s*[\]\)']+",
+            r"\s*[\]\)\s']+",
             text,
         )
         if m:
             cx, cy = float(m.group(1)), float(m.group(2))
-            return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.80)
+            sx = _scale_box_coord(cx, screen_w, dw)
+            sy = _scale_box_coord(cy, screen_h, dh)
+            return (sx, sy, 0.80)
 
         # JSON block — x/y may be:
         #   0-1 normalised floats  (model followed instructions)
@@ -655,9 +671,8 @@ class UIGroundingAgent:
         logger.debug(f"[GROUNDING/S2] Unrecognised VLM format: '{text[:100]}'")
         return None
 
-    def _rephrase_targets(self, target: str) -> List[str]:
-        """
-        Ask the LLM for up to 3 alternative text labels for the same UI element.
+    def _rephrase_targets(self, target: str) -> list[str]:
+        """Ask the LLM for up to 3 alternative text labels for the same UI element.
         Used when OCR + VLM both fail to locate the original target string.
         Returns an empty list if the LLM call fails or produces nothing useful.
         """

@@ -1,6 +1,5 @@
 # tests/unit/test_grounding_element_types.py
-"""
-Unit tests for OCR element_type semantics in the grounding pipeline.
+"""Unit tests for OCR element_type semantics in the grounding pipeline.
 
 Test 1: OCRWord with element_type="document_text" is rejected by
         find_text(foreground_only=True).
@@ -24,7 +23,6 @@ from agents.grounding.grounding_agent import (
     OCRWord,
 )
 from core.protocols.a2a import ActionStep
-
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -108,8 +106,7 @@ class TestFindTextRejectsDocumentText(unittest.TestCase):
 # ── Test 2: _execute_step allows document_text grounding (Start menu / search) ──
 
 class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
-    """
-    _execute_step() now allows OCR hits with element_type="document_text" so
+    """_execute_step() now allows OCR hits with element_type="document_text" so
     that Start menu search results (which Windows 11 does not expose as a
     foreground window) can be clicked correctly.
 

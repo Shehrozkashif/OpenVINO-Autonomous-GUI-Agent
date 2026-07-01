@@ -1,6 +1,5 @@
 # core/grounding/windows_uia.py
-"""
-Windows UIAutomation (UIA) — Stage 0 grounding for Windows.
+"""Windows UIAutomation (UIA) — Stage 0 grounding for Windows.
 
 Queries the Windows UI Automation tree for elements matching a text label.
 Returns screen-pixel coordinates directly from the accessibility tree —
@@ -19,13 +18,12 @@ Why UIA beats OCR for grounding:
 import difflib
 import platform
 import threading
-from typing import Optional, Tuple
 
 from loguru import logger
 
 _IS_WINDOWS = platform.system() == "Windows"
 _uia = None          # lazy-loaded uiautomation module reference
-_available: Optional[bool] = None
+_available: bool | None = None
 
 
 # ── Module availability ───────────────────────────────────────────────────────
@@ -75,9 +73,8 @@ def find_element(
     target: str,
     fuzzy_threshold: float = 0.65,
     timeout_s: float = 1.5,
-) -> Optional[Tuple[int, int, float]]:
-    """
-    Search the Windows UIA tree for a UI element matching `target`.
+) -> tuple[int, int, float] | None:
+    """Search the Windows UIA tree for a UI element matching `target`.
     Returns (screen_x, screen_y, confidence) or None if not found.
 
     Search order (fastest → broadest):
@@ -165,8 +162,7 @@ def get_interactive_elements(
     max_depth: int = 7,
     timeout_s: float = 1.5,
 ) -> list:
-    """
-    Collect interactive controls from the foreground window's UIA subtree.
+    """Collect interactive controls from the foreground window's UIA subtree.
 
     Returns [(name, control_type)] — e.g. [("Save", "Button"), ("File", "MenuItem")].
     Gives the planner a ground-truth list of elements it can actually click,
@@ -241,9 +237,8 @@ def _walk_and_match(
     query: str,
     threshold: float,
     max_depth: int,
-) -> Optional[Tuple[int, int, float]]:
-    """
-    DFS walk of a UIA subtree.  Returns the best (x, y, confidence) match or None.
+) -> tuple[int, int, float] | None:
+    """DFS walk of a UIA subtree.  Returns the best (x, y, confidence) match or None.
     Stops immediately on an exact name match.
     """
     best_result: list = [None]
@@ -291,8 +286,7 @@ def _walk_and_match(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _control_texts(ctrl) -> list:
-    """
-    Return all useful text strings exposed by a UIA control:
+    """Return all useful text strings exposed by a UIA control:
       Name      — the accessible name shown visually (button label, menu item, etc.)
       Value     — current value of a text field or combo box
     Both are stripped and lowercased. Empty strings are excluded.

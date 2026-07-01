@@ -1,6 +1,5 @@
 # ui/pages.py
-"""
-The seven workspace pages of the command center.
+"""The seven workspace pages of the command center.
 
 Every page refreshes its data on showEvent (cheap SQLite reads) and never
 blocks the UI thread — anything slow (health checks) runs in a worker thread.
@@ -12,16 +11,34 @@ import time
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (
-    QDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QDialog,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
 from ui.events import AgentEventBus, AgentState
 from ui.icons import icon_pixmap
-from ui.theme import C, S, STATE_STYLE
+from ui.theme import STATE_STYLE, C, S
 from ui.widgets import (
-    CommandInput, EmptyState, GlassCard, MetricTile, PulseOrb, ScreenPreview,
-    SectionHeader, Timeline, relative_time,
+    CommandInput,
+    EmptyState,
+    GlassCard,
+    MetricTile,
+    PulseOrb,
+    ScreenPreview,
+    SectionHeader,
+    Timeline,
+    relative_time,
 )
 
 _SUGGESTIONS = [
@@ -45,7 +62,8 @@ def _scrollable(inner: QWidget) -> QScrollArea:
 class MissionComposer(GlassCard):
     """The primary prompt surface: a large natural-language instruction box
     with a Run button — front and center, exactly like a command line for
-    the agent."""
+    the agent.
+    """
 
     run_requested = pyqtSignal(str)
 
@@ -126,9 +144,8 @@ class HomePage(QWidget):
         self.headline.setProperty("role", "display")
         hcol.addWidget(self.headline)
         try:
-            from config import LLM_MODEL, VLM_VLLM
-            vlm_short = VLM_VLLM.split("/")[-1]
-            sub = f"{LLM_MODEL}  ·  {vlm_short}  ·  fully local inference"
+            from config import LLM_MODEL, VLM_MODEL
+            sub = f"{LLM_MODEL}  ·  {VLM_MODEL}  ·  OpenVINO Model Server"
         except Exception:
             sub = "local inference"
         subtitle = QLabel(sub)
@@ -776,12 +793,11 @@ class SettingsPage(QWidget):
         form = QFormLayout()
         form.setHorizontalSpacing(S.XL)
         try:
-            from config import (LLM_BASE_URL, LLM_MODEL, VLM_BASE_URL,
-                                VLM_VLLM)
+            from config import LLM_MODEL, OVMS_BASE_URL, TARGET_DEVICE, VLM_MODEL
             rows = [
                 ("Language model", f"{LLM_MODEL} — routing · planning · reflection"),
-                ("Vision model", f"{VLM_VLLM.split('/')[-1]} via vLLM ({VLM_BASE_URL})"),
-                ("Vision fallback", f"UI-TARS GGUF via Ollama ({LLM_BASE_URL})"),
+                ("Vision model", f"{VLM_MODEL} — grounding · visual verification"),
+                ("Served by", f"OpenVINO Model Server ({OVMS_BASE_URL}) · device {TARGET_DEVICE}"),
             ]
         except Exception:
             rows = [("Configuration", "config.py could not be read")]
@@ -890,8 +906,8 @@ class SettingsPage(QWidget):
 
         def worker():
             try:
-                from core.pipeline.ollama_client import OllamaClient
-                health = OllamaClient().check_health()
+                from core.pipeline.ovms_client import OVMSClient
+                health = OVMSClient().check_health()
                 text = "   ".join(f"{k}: {v}" for k, v in health.items())
             except Exception as e:
                 text = f"unreachable: {e}"

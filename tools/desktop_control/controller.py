@@ -1,6 +1,5 @@
 # tools/desktop_control/controller.py
-"""
-Cross-platform desktop controller — auto-detects OS at startup.
+"""Cross-platform desktop controller — auto-detects OS at startup.
 
   Linux  → XTest (Xlib): injects events at the X11 server level so they pass
             through GNOME Shell's global keyboard capture (needed for Activities).
@@ -15,8 +14,10 @@ import platform
 import time
 
 from loguru import logger
-from pynput.mouse import Button, Controller as MouseController
-from pynput.keyboard import Key as _PKey, Controller as _PKB
+from pynput.keyboard import Controller as _PKB
+from pynput.keyboard import Key as _PKey
+from pynput.mouse import Button
+from pynput.mouse import Controller as MouseController
 
 _mouse = MouseController()
 _OS = platform.system()
@@ -31,7 +32,8 @@ _XTEST_OK = False
 
 if _OS == "Linux":
     try:
-        from Xlib import display as _Xdisplay, X as _X
+        from Xlib import X as _X
+        from Xlib import display as _Xdisplay
         from Xlib.ext import xtest as _xtest
         _xdisplay = _Xdisplay.Display(os.environ.get("DISPLAY", ":0"))
         # Verify it actually works before committing
@@ -239,8 +241,7 @@ def _send_text(text: str, interval: float = 0.04):
 # ── DesktopController ─────────────────────────────────────────────────────────
 
 class DesktopController:
-    """
-    Cross-platform desktop controller.
+    """Cross-platform desktop controller.
     Mouse: pynput (works on Linux/Windows/macOS).
     Keyboard: XTest on Linux/X11, pynput on Windows/macOS.
     """
@@ -277,8 +278,7 @@ class DesktopController:
 
     def type_text(self, text: str, interval: float = 0.04,
                   use_clipboard: bool = False, sensitive: bool = False) -> bool:
-        """
-        Type text via keystrokes (default) or clipboard paste.
+        """Type text via keystrokes (default) or clipboard paste.
 
         use_clipboard=True: sets clipboard → ctrl+v — instant, handles all Unicode.
         use_clipboard=False: keystroke-by-keystroke — correct for terminal prompts
@@ -343,6 +343,7 @@ class DesktopController:
     def screenshot_base64(self) -> str:
         import base64
         import io
+
         from core.capture.screenshot import ScreenCapture
         img = ScreenCapture().capture()
         buf = io.BytesIO()
@@ -398,7 +399,8 @@ class KillSwitch:
 
     def start(self) -> None:
         try:
-            from pynput import keyboard as _kb, mouse as _ms
+            from pynput import keyboard as _kb
+            from pynput import mouse as _ms
         except Exception as e:
             logger.warning(f"[KILL-SWITCH] pynput unavailable — kill switch disabled ({e})")
             return

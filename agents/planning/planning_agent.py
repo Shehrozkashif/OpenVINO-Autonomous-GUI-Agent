@@ -1,6 +1,5 @@
 # agents/planning/planning_agent.py
-"""
-Planning Agent — generates precise step sequences for sub-tasks.
+"""Planning Agent — generates precise step sequences for sub-tasks.
 Uses Chain-of-Thought prompting for complex multi-step tasks.
 """
 
@@ -8,12 +7,11 @@ import json
 import os
 import platform
 import re
-from typing import List, Optional
 
 from loguru import logger
-from utils.platform_utils import detect_firefox, get_desktop_path
 
 from core.protocols.a2a import ActionStep, InferenceClient, SubTask
+from utils.platform_utils import detect_firefox, get_desktop_path
 
 
 class PlanningParseError(Exception):
@@ -205,7 +203,7 @@ Turn each sub-task into the SHORTEST correct sequence of atomic actions.
 
 ━━━ ACTION REFERENCE ━━━
 click / right_click / double_click  →  target = exact visible text label (1-4 words MAX, never null)
-                                       GOOD targets: "Calculator" "Code" "File" "Save" "OK" "shehrozbaloch"
+                                       GOOD targets: "Calculator" "Code" "File" "Save" "OK" "Username"
                                        BAD targets:  "GNOME Calculator icon" "the VS Code app" "click here"
 type                                →  value  = exact string to type (never null)
 key_press                           →  key    = single key name:
@@ -368,10 +366,14 @@ Tab-based form navigation (when multiple fields exist):
 ━━━ WINDOWS SAVE / SAVE-AS DIALOG ━━━
 How to detect: screen text contains "File name" AND "Save" AND "Cancel".
 When this pattern is visible, a Save-As dialog is open. Your ONLY valid actions are:
-  a) If a specific filename is required:
+  a) If the GOAL names a file path or name (e.g. "save ... as C:/Users/.../haiku.txt"):
        hotkey ctrl+a              (select all text in the filename field)
-       type  value="hello.txt"    (type the new filename — this REPLACES the old name)
+       type  value="<the FULL path/name from the goal, with BACKSLASHES>"
        key_press "enter"          (confirm — this is the step IMMEDIATELY after type)
+     ALWAYS type the exact path the goal specifies — NEVER accept the default
+     name, or the file saves to the wrong place with the wrong name.
+     WINDOWS: the filename field REJECTS forward slashes ("file name is not
+     valid"). Convert the path to backslashes: C:\\Users\\me\\Desktop\\haiku.txt
   b) If no specific name is required: key_press "enter"  (save with current name)
   c) "Replace existing file?" prompt → key_press "enter"  (confirm overwrite)
 CRITICAL: After typing the filename (step a), your very next step MUST be key_press "enter".
@@ -485,7 +487,7 @@ is bottom-right of the screenshot."""
 
 def _parse_visual_action(
     text: str, subtask_id: int, screen_w: int, screen_h: int
-) -> Optional[ActionStep]:
+) -> ActionStep | None:
     """Parse a UI-TARS action line into an ActionStep.
 
     Click-family steps carry explicit screen-pixel coordinates in `value`
@@ -571,12 +573,11 @@ class PlanningAgent:
         self,
         subtask: SubTask,
         image_base64: str,
-        completed: List[str] = None,
+        completed: list[str] = None,
         screen_w: int = 1920,
         screen_h: int = 1080,
-    ) -> Optional[ActionStep]:
-        """
-        Visual recovery planning: send the actual screenshot to the VLM (UI-TARS)
+    ) -> ActionStep | None:
+        """Visual recovery planning: send the actual screenshot to the VLM (UI-TARS)
         and get the next action directly, with pixel coordinates.
 
         Used by the orchestrator when text-based planning has failed repeatedly —
@@ -611,13 +612,12 @@ class PlanningAgent:
         self,
         subtask: SubTask,
         screen_context: str = None,
-        completed: List[str] = None,
-        task_context: List[str] = None,
-        failure_hints: List[str] = None,
+        completed: list[str] = None,
+        task_context: list[str] = None,
+        failure_hints: list[str] = None,
         snapshot=None,   # Optional[ScreenSnapshot] — when provided overrides screen_context
-    ) -> Optional[ActionStep]:
-        """
-        Dynamic planning: return the ONE next action step toward the subtask goal.
+    ) -> ActionStep | None:
+        """Dynamic planning: return the ONE next action step toward the subtask goal.
         Returns None when the goal is already achieved (planner returns empty array).
 
         task_context:   descriptions of subtasks already completed in this overall task.
@@ -737,7 +737,7 @@ class PlanningAgent:
         logger.info(f"[PLANNING] Next: [{step.action_type}] {step.description}")
         return step
 
-    def _parse_steps(self, text: str, subtask_id: int) -> List[ActionStep]:
+    def _parse_steps(self, text: str, subtask_id: int) -> list[ActionStep]:
         if "</think>" in text:
             text = text.split("</think>")[-1]
         else:

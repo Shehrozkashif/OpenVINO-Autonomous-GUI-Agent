@@ -1,6 +1,5 @@
 # core/executor/burst_executor.py
-"""
-BurstExecutor — executes an ActionBurst: a short sequence of UI actions that
+"""BurstExecutor — executes an ActionBurst: a short sequence of UI actions that
 must happen quickly (context menus, rename dialogs, form submissions) without
 any intermediate LLM planning or reflection calls.
 
@@ -41,7 +40,6 @@ versions without brittle shortcut assumptions.
 """
 import re
 import time
-from typing import Optional
 
 from loguru import logger
 
@@ -64,8 +62,7 @@ class BurstExecutor:
         self.delay    = inter_step_delay_s
 
     def run(self, burst: ActionBurst) -> BurstResult:
-        """
-        Execute burst.steps in order.
+        """Execute burst.steps in order.
 
         Returns BurstResult with success=False as soon as any phase fails so
         the orchestrator can fall back to the planning loop without side effects
@@ -226,9 +223,8 @@ class BurstExecutor:
 
 # ── Burst detection ───────────────────────────────────────────────────────────
 
-def detect_burst(subtask: SubTask) -> Optional[ActionBurst]:
-    """
-    Analyse a SubTask description and return an ActionBurst if one of the
+def detect_burst(subtask: SubTask) -> ActionBurst | None:
+    """Analyse a SubTask description and return an ActionBurst if one of the
     known fast-sequence patterns is recognised, else None.
 
     Patterns (checked in priority order, first match wins):
@@ -343,9 +339,8 @@ def detect_burst(subtask: SubTask) -> Optional[ActionBurst]:
 
 # ── Public instruction-level helper ──────────────────────────────────────────
 
-def detect_burst_from_instruction(instruction: str) -> Optional[ActionBurst]:
-    """
-    Match the full raw user instruction (before LLM routing) against burst patterns.
+def detect_burst_from_instruction(instruction: str) -> ActionBurst | None:
+    """Match the full raw user instruction (before LLM routing) against burst patterns.
 
     Lets the orchestrator skip the router entirely for known compound-action
     sequences such as "right click → New → Folder → type name → Enter".

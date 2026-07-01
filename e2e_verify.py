@@ -1,27 +1,27 @@
-"""
-E2E pipeline verification — uses OllamaClient (qwen2.5vl:7b).
+"""E2E pipeline verification — uses OVMSClient.
 
-Run after: ollama pull qwen2.5vl:7b
+Run after: python start.py  (prepares both models and starts OpenVINO Model Server)
 Tests Router → Planner → Grounder with a real instruction.
 """
 import sys
 
 from loguru import logger
+
 logger.remove()
 logger.add(sys.stdout, format="{level}: {message}", level="INFO")
 
-from core.pipeline.ollama_client import OllamaClient
-from agents.router.router_agent import RouterAgent
-from agents.planning.planning_agent import PlanningAgent
 from agents.grounding.grounding_agent import UIGroundingAgent
+from agents.planning.planning_agent import PlanningAgent
+from agents.router.router_agent import RouterAgent
 from core.capture.screenshot import ScreenCapture
+from core.pipeline.ovms_client import OVMSClient
 
 
 def test_pipeline():
-    print("=== E2E Pipeline Verification (Ollama backend) ===\n")
+    print("=== E2E Pipeline Verification (OVMS backend) ===\n")
 
     # ── 1. Backend health ──────────────────────────────────────────────────────
-    client = OllamaClient()
+    client = OVMSClient()
     health = client.check_health()
     print("Backend health:")
     all_ok = True
@@ -31,7 +31,7 @@ def test_pipeline():
         if not ok:
             all_ok = False
     if not all_ok:
-        print("\n  Pull the model first:  ollama pull qwen2.5vl:7b")
+        print("\n  Prepare models and start the server first:  python start.py")
         sys.exit(1)
 
     # ── 2. Router ──────────────────────────────────────────────────────────────
@@ -64,7 +64,7 @@ def test_pipeline():
         status = "FOUND" if r.found else "NOT FOUND"
         print(f"  {status}  \"{t}\"  ({r.x},{r.y})  conf={r.confidence:.2f}  method={r.method}")
 
-    # ── 5. VLM grounding (needs qwen2.5vl loaded) ─────────────────────────────
+    # ── 5. VLM grounding (needs the UI-TARS servable loaded) ──────────────────
     print("\n--- Grounder (VLM stage — icon-only element) ---")
     icon_result = grounder.ground("the terminal or shell icon")
     if icon_result.found:

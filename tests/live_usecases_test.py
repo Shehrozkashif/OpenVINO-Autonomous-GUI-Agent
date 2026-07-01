@@ -1,5 +1,4 @@
-"""
-Live end-to-end use-case test suite.
+"""Live end-to-end use-case test suite.
 
 Runs real tasks through the full orchestrator pipeline (router → burst/planner →
 grounder → actor → reflector) and verifies each outcome independently.
@@ -16,9 +15,9 @@ Run:
     python tests/live_usecases_test.py
 
 Requirements:
-    - Ollama running: ollama serve
-    - qwen3:8b  pulled (LLM)
-    - UI-TARS GGUF pulled (VLM fallback)
+    - OpenVINO Model Server running: python start.py
+    - qwen3-8b-int4-ov         served (LLM)
+    - ui-tars-1.5-7b-int4-ov   served (VLM)
     - Real Windows display, desktop visible, no fullscreen app
 """
 import os
@@ -32,12 +31,14 @@ sys.path.insert(0, ".")
 
 # Force UTF-8 so Windows console never raises UnicodeEncodeError
 import io as _io
+
 if hasattr(sys.stdout, "buffer") and (not sys.stdout.encoding or sys.stdout.encoding.lower() not in ("utf-8","utf8")):
     sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "buffer") and (not sys.stderr.encoding or sys.stderr.encoding.lower() not in ("utf-8","utf8")):
     sys.stderr = _io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from loguru import logger
+
 logger.remove()
 logger.add(
     sys.stderr,
@@ -337,7 +338,7 @@ def main():
         tester = LiveUseCaseTester()
     except Exception as e:
         print(f"\n[FATAL] Could not build orchestrator: {e}")
-        print("  Make sure 'ollama serve' is running.")
+        print("  Make sure OpenVINO Model Server is running (python start.py).")
         sys.exit(1)
 
     print(f"  Desktop  : {tester.desktop}")

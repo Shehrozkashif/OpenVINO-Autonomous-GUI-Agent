@@ -1,6 +1,5 @@
 # tests/unit/test_planning_visual.py
-"""
-Unit tests for the visual planning recovery path and the planner parse-error fix.
+"""Unit tests for the visual planning recovery path and the planner parse-error fix.
 
 1. _parse_visual_action — UI-TARS native action strings → ActionStep, with
    0-1000 coordinates scaled to screen pixels and carried in step.value ("x,y").
@@ -11,10 +10,12 @@ Unit tests for the visual planning recovery path and the planner parse-error fix
    execute directly without grounding.
 """
 import sys
+
 sys.path.insert(0, ".")
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 from agents.planning.planning_agent import (
     PlanningAgent,
@@ -24,7 +25,6 @@ from agents.planning.planning_agent import (
 from agents.reflection.reflection_agent import ReflectionResult
 from core.orchestrator import OrchestratorConfig, TaskOrchestrator
 from core.protocols.a2a import ActionStep, SubTask
-
 
 _W, _H = 1000, 1000   # identity scaling — 0-1000 coords map 1:1 to pixels
 
@@ -135,7 +135,8 @@ class TestPlanNextStepParseError:
 
     def test_double_parse_error_raises_not_none(self):
         """Unparseable output twice must raise — returning None would be read
-        by the orchestrator as 'goal achieved'."""
+        by the orchestrator as 'goal achieved'.
+        """
         client = MagicMock()
         client.query_llm = MagicMock(side_effect=[
             _resp("garbage"), _resp("more garbage"),

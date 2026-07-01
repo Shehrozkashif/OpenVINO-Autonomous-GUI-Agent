@@ -1,6 +1,5 @@
 # tests/unit/test_orchestrator_new_window_launch.py
-"""
-Regression tests for the "app already running" launch semantics.
+"""Regression tests for the "app already running" launch semantics.
 
 Live failure this guards against: "open Windows Terminal" was satisfied by
 clicking the taskbar button of the user's EXISTING terminal (which was running
@@ -14,20 +13,22 @@ Rules under test:
   3. Without a baseline (app was not running), behaviour is unchanged.
 """
 import sys
+
 sys.path.insert(0, ".")
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core.orchestrator import TaskOrchestrator, OrchestratorConfig
+from core.orchestrator import OrchestratorConfig, TaskOrchestrator
 from core.protocols.a2a import SubTask
 
 
 @pytest.fixture(autouse=True)
 def _pin_windows():
     """Every test here exercises Windows launch semantics (process maps,
-    window-count baselines), so pin the platform regardless of the host OS."""
+    window-count baselines), so pin the platform regardless of the host OS.
+    """
     with patch("core.orchestrator._OS", "Windows"):
         yield
 
@@ -146,8 +147,8 @@ class TestLoopGuardCommandSubtask:
 
     def _looping_orch(self, desc):
         """Orchestrator where a key_press enter loops 5× after one failure."""
-        from core.protocols.a2a import ActionStep
         from agents.reflection.reflection_agent import ReflectionResult
+        from core.protocols.a2a import ActionStep
 
         enter = ActionStep(id=1, subtask_id=1, action_type="key_press",
                            target=None, value=None, key="enter",
@@ -189,8 +190,8 @@ class TestGoalCheckWithBaseline:
 
     def test_goal_check_requires_new_window_when_preexisting(self):
         """The in-loop GOAL-CHECK early exit must not fire while count is flat."""
-        from core.protocols.a2a import ActionStep
         from agents.reflection.reflection_agent import ReflectionResult
+        from core.protocols.a2a import ActionStep
 
         click = ActionStep(id=1, subtask_id=1, action_type="click",
                            target="Terminal", value=None, key=None,
