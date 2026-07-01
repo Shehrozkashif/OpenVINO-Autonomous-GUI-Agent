@@ -333,7 +333,7 @@ class UIGroundingAgent:
             x, y, conf, method, element_type = cached
             # Canonical "[GROUNDING] '…' → (x,y) conf=… method=…" format — the
             # UI event bus parses these lines (ui/events.py _RX_LOCATED).
-            logger.info(f"[GROUNDING] '{target}' → ({x},{y}) "
+            logger.info(f"[GROUNDING] '{target}' -> ({x},{y}) "
                         f"conf={conf:.2f} method=cache/{method}")
             return GroundingResult(x=x, y=y, confidence=conf, found=True,
                                    latency_ms=(time.time() - start) * 1000,
@@ -355,7 +355,7 @@ class UIGroundingAgent:
                 y = max(0, min(y, self.screen_h - 1))
                 self.cache.put(target, x, y, conf, method, screen_hash, element_type)
                 logger.info(
-                    f"[GROUNDING] '{target}' → ({x},{y}) conf={conf:.2f} "
+                    f"[GROUNDING] '{target}' -> ({x},{y}) conf={conf:.2f} "
                     f"method={method} attempt={attempt+1} "
                     f"latency={1000*(time.time()-start):.0f}ms"
                 )
@@ -378,7 +378,7 @@ class UIGroundingAgent:
                 x = max(0, min(x, self.screen_w - 1))
                 y = max(0, min(y, self.screen_h - 1))
                 self.cache.put(target, x, y, conf, f"rephrase/{method}", screen_hash, element_type)
-                logger.info(f"[GROUNDING] '{target}' → ({x},{y}) "
+                logger.info(f"[GROUNDING] '{target}' -> ({x},{y}) "
                             f"conf={conf:.2f} method=rephrase/{method} "
                             f"(as '{alt}')")
                 return GroundingResult(x=x, y=y, confidence=conf,

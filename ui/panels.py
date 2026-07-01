@@ -98,7 +98,7 @@ class IntelligencePanel(QWidget):
         ccap.setProperty("role", "micro")
         crow.addWidget(ccap)
         crow.addStretch()
-        self.conf_value = QLabel("—")
+        self.conf_value = QLabel("-")
         self.conf_value.setStyleSheet(
             f"color: {C.TEXT_DIM}; font-size: 12px; font-weight: 700;")
         crow.addWidget(self.conf_value)
@@ -163,10 +163,10 @@ class IntelligencePanel(QWidget):
     def _wire(self, bus: AgentEventBus):
         bus.state_changed.connect(self.on_state)
         bus.task_started.connect(lambda instr: self._feed("plan", f"Mission: {instr}"))
-        bus.plan_ready.connect(lambda n: self._feed("plan", f"Plan ready — {n} subtask(s)"))
+        bus.plan_ready.connect(lambda n: self._feed("plan", f"Plan ready - {n} subtask(s)"))
         bus.subtask_started.connect(self._on_subtask)
         bus.step_started.connect(
-            lambda n, a, d: self._feed("act", f"{a.replace('_', ' ')} → {d}"))
+            lambda n, a, d: self._feed("act", f"{a.replace('_', ' ')} -> {d}"))
         bus.step_verified.connect(self._on_verified)
         bus.step_failed.connect(self._on_failed)
         bus.retrying.connect(
@@ -174,7 +174,7 @@ class IntelligencePanel(QWidget):
         bus.guard_event.connect(
             lambda k, m: self._feed("guard", f"{k}: {m}"))
         bus.extracted.connect(
-            lambda k, v: self._feed("extract", f"Extracted {k} = “{v}”"))
+            lambda k, v: self._feed("extract", f"Extracted {k} = '{v}'"))
         bus.memory_hint.connect(
             lambda sim: self._feed(
                 "memory", f"Recognized a similar past task ({sim:.0%} match)"))
@@ -200,7 +200,7 @@ class IntelligencePanel(QWidget):
         self.conf_value.setStyleSheet(
             f"color: {ConfidenceBar.color_for(conf).name()};"
             f"font-size: 12px; font-weight: 700;")
-        self._feed("ok", f"Step verified · confidence {conf:.0%}")
+        self._feed("ok", f"Step verified | confidence {conf:.0%}")
 
     def _on_failed(self, reason: str, conf: float):
         self.conf_bar.set_value(conf)
@@ -210,7 +210,7 @@ class IntelligencePanel(QWidget):
     def _on_element(self, target: str, x: int, y: int, conf: float,
                     method: str):
         self._no_elements.hide()
-        row = QLabel(f"“{target}”  ·  {conf:.0%} {method}  ·  ({x},{y})")
+        row = QLabel(f"'{target}'  |  {conf:.0%} {method}  |  ({x},{y})")
         row.setStyleSheet(
             f"color: {C.TEXT_DIM}; font-size: 11px;"
             f"font-family: Consolas, monospace;")
@@ -238,7 +238,7 @@ class IntelligencePanel(QWidget):
     def clear_mission(self):
         self.objective.setText("Waiting for a mission.")
         self.conf_bar.set_value(0)
-        self.conf_value.setText("—")
+        self.conf_value.setText("-")
         while self.elements_box.count() > 1:
             it = self.elements_box.takeAt(1)
             if it.widget():

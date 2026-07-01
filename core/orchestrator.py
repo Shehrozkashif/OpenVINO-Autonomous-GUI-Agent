@@ -701,7 +701,7 @@ class TaskOrchestrator:
                             f"uncertain outcome (conf={reflection.confidence:.2f}, "
                             f"threshold={fail_threshold:.2f})"
                         )
-                        self.log(f"  Uncertain result — retrying ({last_error})")
+                        self.log(f"  Uncertain result - retrying ({last_error})")
                         # Fast-path: if the goal process is already running after an
                         # uncertain click, skip the remaining retries.
                         if _is_launch_goal and (
@@ -838,7 +838,7 @@ class TaskOrchestrator:
                     return True
 
                 consecutive_failures += 1
-                self.log("  Step failed — re-evaluating next action")
+                self.log("  Step failed - re-evaluating next action")
 
                 # Persist failure so future tasks can avoid this pattern
                 try:

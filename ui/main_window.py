@@ -101,7 +101,7 @@ class DesktopGUIAgent(QMainWindow):
         self.frame_store = deque(maxlen=48)
         self._frame_counter = 0
 
-        self.setWindowTitle("Desktop GUI Agent — GSoC 2026")
+        self.setWindowTitle("Desktop GUI Agent")
         self.setGeometry(80, 60, 1480, 920)
         self.setWindowIcon(QIcon(icon_pixmap("sparkle", QColor(C.ACCENT), 32)))
         self.setStyleSheet(build_stylesheet())
@@ -298,7 +298,7 @@ class DesktopGUIAgent(QMainWindow):
         if self.orchestrator is None:
             QMessageBox.critical(
                 self, "Agent offline",
-                "Orchestrator not initialized — is OpenVINO Model Server running?\n\n"
+                "Orchestrator not initialized - is OpenVINO Model Server running?\n\n"
                 "Start it with:  python start.py")
             return
 

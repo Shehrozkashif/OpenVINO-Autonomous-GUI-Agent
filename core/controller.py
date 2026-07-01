@@ -389,7 +389,7 @@ class KillSwitch:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
-        logger.info("[KILL-SWITCH] Armed — triple-Esc or top-left corner to stop")
+        logger.info("[KILL-SWITCH] Armed - triple-Esc or top-left corner to stop")
 
     def _poll_loop(self) -> None:
         user32 = ctypes.windll.user32
