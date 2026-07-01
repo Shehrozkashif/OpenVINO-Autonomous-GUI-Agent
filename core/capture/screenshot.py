@@ -50,6 +50,14 @@ def _screen_size() -> tuple:
 _FRAME_HASH_SIZE = 16
 _FRAME_THUMB = (960, 540)
 
+# Shared thumbnail size for ALL OCR passes (grounding, screen snapshot,
+# reflection, dialog checks). One size means identical pixels → identical
+# phash → every consumer hits the same OCR cache entry. Raised from 960×540:
+# halving a desktop screenshot made small UI text (menu items, dialog labels)
+# unreadable to OCR, which cost both element recall and verification accuracy.
+# The price is ~1.8× OCR pixels, paid only on cache misses.
+OCR_THUMB = (1280, 720)
+
 
 def frame_phash(img: Image.Image) -> "imagehash.ImageHash":
     """Perceptual hash tuned for before/after UI change detection (see H2)."""

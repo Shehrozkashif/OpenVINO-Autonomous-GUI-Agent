@@ -73,16 +73,22 @@ def find_element(
     Returns (screen_x, screen_y, confidence) or None if not found.
 
     Search order (fastest → broadest):
-      1. Foreground window, depth 6  — covers 95% of cases
+      1. Foreground window, depth 12 — deep enough for browser/Electron
+         accessibility trees, where a page button can sit 10+ levels down
       2. All top-level windows, depth 4 — for taskbar / notification area
 
-    Runs in a daemon thread with `timeout_s` to never stall the pipeline.
+    Runs in a daemon thread with `timeout_s` to never stall the pipeline; the
+    walk publishes its best match as it goes, so a timeout on a very deep tree
+    still returns the best element found so far instead of nothing.
     Confidence is 1.0 for exact name match, ~0.85-0.92 for fuzzy match.
     """
     if not _load():
         return None
 
     result: list = [None]
+
+    def _publish(candidate):
+        result[0] = candidate
 
     def _search():
         _com = _thread_com_init()
@@ -93,7 +99,8 @@ def find_element(
 
             # Fast path — foreground window only
             fg = _uia.GetForegroundControl()
-            r = _walk_and_match(fg, query, fuzzy_threshold, max_depth=6)
+            r = _walk_and_match(fg, query, fuzzy_threshold, max_depth=12,
+                                publish=_publish)
             if r:
                 result[0] = r
                 return
@@ -108,7 +115,8 @@ def find_element(
                     rect = win.BoundingRectangle
                     if (rect.right - rect.left) < 10 or (rect.bottom - rect.top) < 10:
                         continue
-                    r = _walk_and_match(win, query, fuzzy_threshold, max_depth=4)
+                    r = _walk_and_match(win, query, fuzzy_threshold, max_depth=4,
+                                        publish=_publish)
                     if r:
                         result[0] = r
                         return
@@ -336,9 +344,14 @@ def _walk_and_match(
     query: str,
     threshold: float,
     max_depth: int,
+    publish=None,
 ) -> tuple[int, int, float] | None:
     """DFS walk of a UIA subtree.  Returns the best (x, y, confidence) match or None.
     Stops immediately on an exact name match.
+
+    publish: optional callback invoked with each new best match as the walk
+    progresses — lets the caller keep the best result found so far even when
+    the walk is cut off by a timeout (deep browser/Electron trees).
     """
     best_result: list = [None]
     best_score:  list = [0.0]
@@ -360,6 +373,8 @@ def _walk_and_match(
                         cy = (rect.top + rect.bottom) // 2
                         best_result[0] = (cx, cy, 1.0)
                         best_score[0]  = 1.0
+                        if publish:
+                            publish(best_result[0])
                         return   # stop this branch — propagate up
 
                 elif score >= threshold and score > best_score[0]:
@@ -369,6 +384,8 @@ def _walk_and_match(
                         cy = (rect.top + rect.bottom) // 2
                         best_result[0] = (cx, cy, round(score * 0.90, 3))
                         best_score[0]  = score
+                        if publish:
+                            publish(best_result[0])
 
             for child in ctrl.GetChildren():
                 _walk(child, depth + 1)

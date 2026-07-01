@@ -32,7 +32,7 @@ from agents.reflection import ReflectionAgent
 from agents.router import RouterAgent
 from core.burst_executor import BurstExecutor, detect_burst, detect_burst_from_instruction
 from core.capture.screen_snapshot import capture_snapshot
-from core.capture.screenshot import ScreenCapture, _screen_size
+from core.capture.screenshot import OCR_THUMB, ScreenCapture, _screen_size
 from core.protocols import ActionStep, SubTask
 from memory.task_memory import TaskMemory
 
@@ -1213,7 +1213,7 @@ class TaskOrchestrator:
             return False, "Enter pressed but no command was typed first"
         try:
             img = self.capturer.capture()
-            img.thumbnail((960, 540))
+            img.thumbnail(OCR_THUMB)
             text = " ".join(
                 w.text for w in self._ocr.extract(img) if w.conf >= 0.6
             ).lower()
@@ -1377,7 +1377,7 @@ class TaskOrchestrator:
         # OCR fallback — UIA unavailable or timed out.
         try:
             img = self.capturer.capture()
-            img.thumbnail((960, 540))
+            img.thumbnail(OCR_THUMB)
             text = " ".join(
                 w.text for w in self._ocr.extract(img) if w.conf >= 0.6
             ).lower()
@@ -1489,7 +1489,7 @@ class TaskOrchestrator:
         """
         try:
             img = self.capturer.capture()
-            img.thumbnail((960, 540))
+            img.thumbnail(OCR_THUMB)
             words = self._ocr.extract(img)
             if not words:
                 return None
@@ -1551,7 +1551,7 @@ class TaskOrchestrator:
 
             # Check if page content is still changing
             img = self.capturer.capture()
-            img.thumbnail((960, 540))
+            img.thumbnail(OCR_THUMB)
             cur_text = " ".join(w.text for w in self._ocr.extract(img) if w.conf >= 0.6)
             if cur_text == prev_ocr_text and i > 0:
                 self.log("  [SCROLL-FIND] Reached end of page — stopping")
@@ -1861,7 +1861,7 @@ class TaskOrchestrator:
             # Fallback: flat token list when snapshot capture fails
             try:
                 img = self.capturer.capture()
-                img.thumbnail((960, 540))
+                img.thumbnail(OCR_THUMB)
                 words = self._ocr.extract(img)
                 visible = [
                     w.text for w in words
