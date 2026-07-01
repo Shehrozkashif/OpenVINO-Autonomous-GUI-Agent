@@ -16,12 +16,9 @@ git checkout -b my-feature
 
 ### 2. Create a virtual environment
 
-```bash
-# Linux
-python -m venv venv && source venv/bin/activate
-
-# Windows
-python -m venv venv && venv\Scripts\activate
+```powershell
+python -m venv venv
+venv\Scripts\activate
 ```
 
 ### 3. Install dependencies
@@ -49,13 +46,13 @@ python start.py                              # prepares models + starts OVMS + U
 ### 5. Run tests
 
 ```bash
-pytest                    # unit tests — fast, no backend or desktop required
-python e2e_test.py        # end-to-end — requires OVMS running + a live desktop
+pytest                              # unit tests — fast, no backend or desktop required
+python tests/e2e/test_pipeline.py   # end-to-end — requires OVMS running + a live desktop
 ```
 
-The unit suite must pass on a machine with no model server and no GPU; anything
-that needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
-`tests/unit/`.
+The unit suite (`tests/unit/`) must pass on a machine with no model server and
+no GPU; anything that needs a live backend belongs in `tests/e2e/` or
+`tests/live/` instead.
 
 ---
 
@@ -69,7 +66,7 @@ that needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
   (`list`/`dict`/`tuple` over `typing.List`/`Dict`/`Tuple`, and `X | None` over
   `Optional[X]`).
 - Agent constructors must accept `InferenceClient` (the Protocol in
-  `core/protocols/a2a.py`), not a concrete client class.
+  `core/protocols.py`), not a concrete client class.
 - Heavy or optional dependencies may be imported lazily inside functions
   (e.g. `sentence_transformers`, `ctypes` Windows calls) — everything else is
   imported at module top.
@@ -82,10 +79,10 @@ that needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
 
 | Rule | Reason |
 |------|--------|
-| All OS input goes through `tools/desktop_control/controller.py` | Single place for platform differences (XTest vs pynput) and the kill switch |
+| All OS input goes through `core/controller.py` | Single place for keyboard/mouse injection (raw Win32 SendInput via ctypes) and the kill switch |
 | Grounding coordinates are always physical screen pixels | Capture returns physical pixels; the controller expects physical pixels |
 | Agents depend on the `InferenceClient` Protocol, never on `OVMSClient` directly | Keeps the inference backend (OVMS today, anything else tomorrow) drop-in replaceable |
-| `type` steps must pass the action firewall (`core/safety/action_firewall.py`) | Deterministic protection against destructive shell commands |
+| `type` steps must pass the action firewall (`core/action_firewall.py`) | Deterministic protection against destructive shell commands |
 | Tasks completed via degraded paths must not be stored in success memory | Broken plans would otherwise poison future routing hints |
 
 ---
@@ -93,8 +90,7 @@ that needs a live backend belongs in `e2e_test.py` or `tests/` (live tests), not
 ## Submitting Changes
 
 1. Ensure `pytest` passes and `ruff check .` is clean.
-2. Update docstrings, `README.md`, and `CLAUDE.md` if you change any public API
-   or workflow.
+2. Update docstrings and `README.md` if you change any public API or workflow.
 3. Open a pull request against `main` with a clear description of what changed
    and why.
 

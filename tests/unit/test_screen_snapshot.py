@@ -15,7 +15,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from agents.grounding.grounding_agent import OCREngine, OCRWord
+from agents.grounding import OCREngine, OCRWord
 from core.capture.screen_snapshot import (
     OCRRegion,
     ScreenSnapshot,
@@ -335,7 +335,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
     """Planner receives snapshot-formatted context; background text is labeled."""
 
     def _make_planner(self):
-        from agents.planning.planning_agent import PlanningAgent
+        from agents.planning import PlanningAgent
         client = MagicMock()
         return PlanningAgent(client)
 
@@ -352,7 +352,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
 
         planner.client.query_llm = fake_query_llm
 
-        from core.protocols.a2a import SubTask
+        from core.protocols import SubTask
         subtask = SubTask(id=1, description="create a folder")
         planner.plan_next_step(subtask, screen_context="old flat context", snapshot=snap)
 
@@ -374,7 +374,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
 
         planner.client.query_llm = fake_query_llm
 
-        from core.protocols.a2a import SubTask
+        from core.protocols import SubTask
         subtask = SubTask(id=1, description="do something")
         planner.plan_next_step(subtask, snapshot=snap)
 
@@ -394,7 +394,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
 
         planner.client.query_llm = fake_query_llm
 
-        from core.protocols.a2a import SubTask
+        from core.protocols import SubTask
         subtask = SubTask(id=1, description="do something")
         planner.plan_next_step(subtask, screen_context="flat token list")
 
@@ -403,7 +403,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
     def test_snapshot_none_does_not_crash(self):
         planner = self._make_planner()
         planner.client.query_llm = MagicMock(return_value=MagicMock(content="[]"))
-        from core.protocols.a2a import SubTask
+        from core.protocols import SubTask
         subtask = SubTask(id=1, description="do something")
         result = planner.plan_next_step(subtask, snapshot=None)
         self.assertIsNone(result)

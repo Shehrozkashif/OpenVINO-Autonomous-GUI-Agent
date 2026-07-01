@@ -183,7 +183,7 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
     """
     # Avoid importing at module level to prevent circular imports.
     # OCREngine lives in agents.grounding; screen_snapshot lives in core.capture.
-    from agents.grounding.grounding_agent import OCRWord  # noqa: PLC0415
+    from agents.grounding import OCRWord  # noqa: PLC0415
 
     ts = time.time()
 
@@ -194,7 +194,7 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
     interactive: list = []
     if _IS_WINDOWS:
         try:
-            from core.grounding.windows_uia import get_interactive_elements  # noqa: PLC0415
+            from core.windows_uia import get_interactive_elements  # noqa: PLC0415
             interactive = get_interactive_elements()
         except Exception:
             interactive = []

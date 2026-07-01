@@ -130,7 +130,7 @@ class DesktopGUIAgent(QMainWindow):
             return self.orchestrator.memory
         if self._memory is None:
             try:
-                from memory.task.task_memory import TaskMemory
+                from memory.task_memory import TaskMemory
                 self._memory = TaskMemory()
             except Exception:
                 return None

@@ -1,54 +1,14 @@
 # core/capture/screenshot.py
-"""Cross-platform screen capture — auto-detects OS at startup.
-
-  Linux  → Xlib root.get_image(): reads pixels directly from the X server
-            without sending compositor events (PIL.ImageGrab causes GNOME Shell
-            to dismiss the Activities overlay mid-task).
-
-  Windows → PIL.ImageGrab: uses GDI BitBlt, safe on Windows.
-
-  macOS   → PIL.ImageGrab: uses Quartz, safe on macOS.
-"""
+"""Windows screen capture — PIL.ImageGrab uses GDI BitBlt."""
 import base64
 import io
-import platform
 
 import imagehash
 from PIL import Image
 
-_OS = platform.system()
-
-# ── Backend selection ─────────────────────────────────────────────────────────
-
-_XLIB_OK = False
-_xd = None   # set only when Xlib initialises successfully
-
-if _OS == "Linux":
-    try:
-        import os as _os
-
-        from Xlib import X as _Xconst
-        from Xlib import display as _Xdisplay
-        _xd = _Xdisplay.Display(_os.environ.get("DISPLAY", ":0"))
-        _XLIB_OK = True
-    except Exception as _xlib_err:
-        import logging as _logging
-        _logging.getLogger(__name__).debug(f"Xlib unavailable: {_xlib_err} — using PIL fallback")
-
-
-def _xlib_grab(x: int = 0, y: int = 0, w: int = 0, h: int = 0) -> Image.Image:
-    """Capture screen (or region) via Xlib — does not steal X11 focus."""
-    root = _xd.screen().root
-    geom = root.get_geometry()
-    rw, rh = geom.width, geom.height
-    if w == 0 or h == 0:
-        w, h = rw, rh
-    raw = root.get_image(x, y, w, h, _Xconst.ZPixmap, 0xFFFFFF)
-    return Image.frombytes("RGB", (w, h), raw.data, "raw", "BGRX")
-
 
 def _pil_grab(x: int = 0, y: int = 0, w: int = 0, h: int = 0) -> Image.Image:
-    """Capture screen (or region) via PIL.ImageGrab — Windows/macOS."""
+    """Capture screen (or region) via PIL.ImageGrab (GDI BitBlt)."""
     from PIL import ImageGrab
     if w and h:
         img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
@@ -58,32 +18,22 @@ def _pil_grab(x: int = 0, y: int = 0, w: int = 0, h: int = 0) -> Image.Image:
 
 
 def _grab(x: int = 0, y: int = 0, w: int = 0, h: int = 0) -> Image.Image:
-    if _XLIB_OK:
-        return _xlib_grab(x, y, w, h)
     return _pil_grab(x, y, w, h)
 
 
-def _xlib_screen_size() -> tuple:
-    s = _xd.screen()
-    return s.width_in_pixels, s.height_in_pixels
-
-
 def _screen_size() -> tuple:
-    if _XLIB_OK:
-        return _xlib_screen_size()
-    # On Windows use GetDeviceCaps to get physical pixel dimensions without
-    # doing a full screen capture (which ImageGrab.grab() would require).
-    if _OS == "Windows":
-        try:
-            import ctypes
-            hdc = ctypes.windll.user32.GetDC(0)
-            w = ctypes.windll.gdi32.GetDeviceCaps(hdc, 118)  # DESKTOPHORZRES
-            h = ctypes.windll.gdi32.GetDeviceCaps(hdc, 117)  # DESKTOPVERTRES
-            ctypes.windll.user32.ReleaseDC(0, hdc)
-            if w > 0 and h > 0:
-                return w, h
-        except Exception:
-            pass
+    # Use GetDeviceCaps to get physical pixel dimensions without doing a full
+    # screen capture (which ImageGrab.grab() would require).
+    try:
+        import ctypes
+        hdc = ctypes.windll.user32.GetDC(0)
+        w = ctypes.windll.gdi32.GetDeviceCaps(hdc, 118)  # DESKTOPHORZRES
+        h = ctypes.windll.gdi32.GetDeviceCaps(hdc, 117)  # DESKTOPVERTRES
+        ctypes.windll.user32.ReleaseDC(0, hdc)
+        if w > 0 and h > 0:
+            return w, h
+    except Exception:
+        pass
     img = _pil_grab()
     return img.width, img.height
 

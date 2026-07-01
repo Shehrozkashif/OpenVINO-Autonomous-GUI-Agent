@@ -53,7 +53,7 @@ _RX_VISUAL       = re.compile(r"\[VISUAL-REPLAN\] (.*)")
 _RX_SCROLL_FIND  = re.compile(r"\[SCROLL-FIND\] (.*)")
 _RX_SETTLE       = re.compile(r"\[SETTLE\]")
 
-# ── Deep pipeline events (loguru bridge — agents/, tools/, core/) ────────────
+# ── Deep pipeline events (loguru bridge — agents/, core/) ────────────────────
 _RX_PLANNED      = re.compile(r"\[PLANNING\] Next: \[(\w+)\] (.*)")
 _RX_LOCATED      = re.compile(
     r"\[GROUNDING\] '(.+?)' → \((\d+),(\d+)\) conf=([\d.]+) method=([\w/-]+)")

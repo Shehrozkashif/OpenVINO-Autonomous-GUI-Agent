@@ -15,7 +15,6 @@ Execution flow:
     → Router.summarize_completion()
     → return extracted_data alongside success/failure
 """
-import platform
 import re
 import subprocess
 import threading
@@ -26,22 +25,19 @@ from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
-from agents.action.action_agent import ActionExecutionAgent
-from agents.grounding.grounding_agent import GroundingResult, UIGroundingAgent
-from agents.planning.planning_agent import PlanningAgent, PlanningParseError
-from agents.reflection.reflection_agent import ReflectionAgent
-from agents.router.router_agent import RouterAgent
+from agents.action import ActionExecutionAgent
+from agents.grounding import GroundingResult, UIGroundingAgent
+from agents.planning import PlanningAgent, PlanningParseError
+from agents.reflection import ReflectionAgent
+from agents.router import RouterAgent
+from core.burst_executor import BurstExecutor, detect_burst, detect_burst_from_instruction
 from core.capture.screen_snapshot import capture_snapshot
 from core.capture.screenshot import ScreenCapture, _screen_size
-from core.executor.burst_executor import BurstExecutor, detect_burst, detect_burst_from_instruction
-from core.protocols.a2a import ActionStep, SubTask
-from memory.task.task_memory import TaskMemory
+from core.protocols import ActionStep, SubTask
+from memory.task_memory import TaskMemory
 
 if TYPE_CHECKING:
-    from agents.grounding.grounding_agent import OCREngine
-
-# Tests patch this to pin platform-specific code paths (e.g. Windows process checks).
-_OS = platform.system()
+    from agents.grounding import OCREngine
 
 
 @dataclass
@@ -113,7 +109,7 @@ class TaskOrchestrator:
         if ocr is not None:
             self._ocr = ocr
         else:
-            from agents.grounding.grounding_agent import OCREngine
+            from agents.grounding import OCREngine
             self._ocr = OCREngine()
         self._screen_w, self._screen_h = _screen_size()
         self._extracted_data: dict[str, str] = {}
@@ -131,7 +127,7 @@ class TaskOrchestrator:
         """Arm the global emergency-stop listener for the duration of a task."""
         try:
             self._disarm_kill_switch()  # clear any leaked listener first
-            from tools.desktop_control.controller import KillSwitch
+            from core.controller import KillSwitch
             controller = getattr(self.actor, "controller", None)
             self._kill_switch = KillSwitch(on_trigger=self.stop, controller=controller)
             self._kill_switch.start()
@@ -394,7 +390,7 @@ class TaskOrchestrator:
 
         goal_proc: str | None = None
         baseline_windows: int | None = None
-        if _OS == "Windows" and is_launch_goal:
+        if is_launch_goal:
             goal_proc = next(
                 (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS
                  if k in desc),
@@ -668,7 +664,7 @@ class TaskOrchestrator:
                     #   below threshold = UNCERTAIN  → see policy split below
                     #   at/above        = CLEAR FAIL → retry (if safe) or stop
                     _key = (step.key or "").lower()
-                    _is_launcher_key = step.action_type == "key_press" and _key in ("super", "enter")
+                    _is_launcher_key = step.action_type == "key_press" and _key in ("winleft", "enter")
                     fail_threshold = (
                         0.95
                         if step.action_type in ("type", "hotkey") or _is_launcher_key
@@ -708,7 +704,7 @@ class TaskOrchestrator:
                         self.log(f"  Uncertain result — retrying ({last_error})")
                         # Fast-path: if the goal process is already running after an
                         # uncertain click, skip the remaining retries.
-                        if _OS == "Windows" and _is_launch_goal and (
+                        if _is_launch_goal and (
                             step.action_type in ("click", "double_click")
                         ):
                             if self._goal_confirmed(_goal_proc, _baseline_windows):
@@ -770,7 +766,7 @@ class TaskOrchestrator:
                 # goal is achieved — return True immediately so the planner never gets a
                 # chance to generate spurious continuation steps (e.g. pressing Enter
                 # again inside a Calculator that is already open).
-                if _OS == "Windows" and _is_launch_goal and self._goal_confirmed(_goal_proc, _baseline_windows):
+                if _is_launch_goal and self._goal_confirmed(_goal_proc, _baseline_windows):
                     _label = _goal_proc.split(".")[0]
                     self.log(f"  [GOAL-CHECK] '{_label}' confirmed — goal achieved")
                     return True
@@ -833,7 +829,7 @@ class TaskOrchestrator:
                 # This handles the common case where key_press enter launches an app
                 # but the reflector times out before the app's UI is fully visible
                 # (reflection confidence 0.50 → step marked failed, yet app IS open).
-                if _OS == "Windows" and _is_launch_goal and self._goal_confirmed(_goal_proc, _baseline_windows):
+                if _is_launch_goal and self._goal_confirmed(_goal_proc, _baseline_windows):
                     _label = _goal_proc.split(".")[0]
                     self.log(
                         f"  [GOAL-CHECK] '{_label}' confirmed "
@@ -873,8 +869,6 @@ class TaskOrchestrator:
     })
 
     def _foreground_is_terminal(self) -> bool:
-        if _OS != "Windows":
-            return False
         import os
         if "PYTEST_CURRENT_TEST" in os.environ:
             return False  # tests themselves run inside a terminal
@@ -925,7 +919,7 @@ class TaskOrchestrator:
     # Keys that are safe to press even when the agent's own console is focused —
     # they navigate AWAY from it (launcher) or dismiss overlays, never inject
     # input into the console session itself.
-    _SAFE_OWN_CONSOLE_KEYS = frozenset({"winleft", "super", "win", "escape", "esc"})
+    _SAFE_OWN_CONSOLE_KEYS = frozenset({"winleft", "win", "escape", "esc"})
 
     def _keyboard_blocked_by_own_console(self, step: ActionStep) -> bool:
         """True when keyboard input must be blocked: the foreground window is the
@@ -935,8 +929,6 @@ class TaskOrchestrator:
         is never foreground, so this guard stays inert there (the new-window
         launch enforcement covers that case).
         """
-        if _OS != "Windows":
-            return False
         import os
         if "PYTEST_CURRENT_TEST" in os.environ:
             return False  # unit tests run inside a console themselves
@@ -1225,7 +1217,7 @@ class TaskOrchestrator:
         # The Windows Save-As filename field rejects forward slashes as invalid
         # characters ("The file name is not valid"). Type the native separator;
         # disk verification (_file_saved_fresh) still accepts either form.
-        typed_path = target.replace("/", "\\") if _OS == "Windows" else target
+        typed_path = target.replace("/", "\\")
 
         # Already saved (e.g. an earlier step did it) — nothing to do.
         if self._file_saved_fresh(target, started_at):
@@ -1283,7 +1275,7 @@ class TaskOrchestrator:
         when no handler is wired; MEDIUM commands are allowed but logged.
         """
         try:
-            from core.safety.action_firewall import Decision, Severity, decide, evaluate
+            from core.action_firewall import Decision, Severity, decide, evaluate
         except Exception:
             return True  # never let a safety-module import error break execution
         verdict = evaluate(text)
@@ -1429,7 +1421,7 @@ class TaskOrchestrator:
         "settings":         "SystemSettings.exe",
     }
 
-    _APP_SIGNALS_WINDOWS: dict = {
+    _APP_SIGNALS: dict = {
         "calculator":      ["Calculator", "Standard", "Scientific"],
         "notepad":         ["Notepad", "Untitled", "File"],
         "paint":           ["Paint", "Home", "Image"],
@@ -1452,28 +1444,10 @@ class TaskOrchestrator:
         "wordpad":         ["WordPad", "Home", "Document"],
     }
 
-    _APP_SIGNALS_LINUX: dict = {
-        "calculator":        ["Calculator", "AC", "DEG", "RAD"],
-        "gnome calculator":  ["Calculator", "AC", "DEG", "RAD"],
-        "terminal":          ["Terminal", "bash", "sh"],
-        "gnome-terminal":    ["Terminal", "bash"],
-        "firefox":        ["Firefox", "Mozilla", "Search"],
-        "vs code":        ["Explorer", "Extensions", "Welcome"],
-        "visual studio":  ["Explorer", "Extensions", "Welcome"],
-        "libreoffice":    ["Writer", "Calc", "Impress", "LibreOffice"],
-        "thunderbird":    ["Thunderbird", "Inbox", "Compose"],
-        "settings":       ["Settings", "Wi-Fi", "Bluetooth", "Network"],
-        "nautilus":       ["Files", "Home", "Documents"],
-    }
-
     # Generic words that don't make useful OCR signals on their own
     _GENERIC_NAME_WORDS = frozenset((
         "the", "a", "an", "app", "application", "browser", "program", "tool",
     ))
-
-    @property
-    def _APP_SIGNALS(self) -> dict:
-        return self._APP_SIGNALS_WINDOWS if _OS == "Windows" else self._APP_SIGNALS_LINUX
 
     def _derive_launch_signals(self, description: str) -> list[str]:
         """Fallback for apps absent from the curated _APP_SIGNALS table: derive OCR
@@ -1523,8 +1497,6 @@ class TaskOrchestrator:
         the app was already running before the launch subtask started (focusing
         the pre-existing window keeps the count flat; a real launch raises it).
         """
-        if _OS != "Windows":
-            return 0
         try:
             import ctypes
             import ctypes.wintypes
@@ -1600,33 +1572,32 @@ class TaskOrchestrator:
         if not _is_app_launch:
             return True
 
-        # On Windows: use process-based check (immune to GUI-text false positives)
-        if _OS == "Windows":
-            matched_proc = next(
-                (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS if k in desc),
-                None,
-            )
-            if matched_proc:
-                label = matched_proc.split(".")[0]
-                baseline = self._launch_window_baseline.get(matched_proc)
-                for attempt, wait_s in enumerate([1.5, 2.5]):
-                    time.sleep(wait_s)
-                    if baseline is not None:
-                        # App pre-existed this subtask: a bare process check is
-                        # vacuous and focusing the old window must NOT pass —
-                        # only a NEW window proves the launch.
-                        if self._count_process_windows(matched_proc) > baseline:
-                            self.log(f"  [CHECK] '{label}' NEW window confirmed")
-                            return True
-                    elif self._launch_confirmed(matched_proc):
-                        self.log(f"  [CHECK] '{label}' process confirmed running")
+        # Use process-based check (immune to GUI-text false positives)
+        matched_proc = next(
+            (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS if k in desc),
+            None,
+        )
+        if matched_proc:
+            label = matched_proc.split(".")[0]
+            baseline = self._launch_window_baseline.get(matched_proc)
+            for attempt, wait_s in enumerate([1.5, 2.5]):
+                time.sleep(wait_s)
+                if baseline is not None:
+                    # App pre-existed this subtask: a bare process check is
+                    # vacuous and focusing the old window must NOT pass —
+                    # only a NEW window proves the launch.
+                    if self._count_process_windows(matched_proc) > baseline:
+                        self.log(f"  [CHECK] '{label}' NEW window confirmed")
                         return True
-                    if attempt == 0:
-                        self.log(f"  [CHECK] '{label}' not yet confirmed — retrying in 2.5s")
-                self.log(f"  [CHECK] Launch of '{matched_proc}' not confirmed")
-                return False
+                elif self._launch_confirmed(matched_proc):
+                    self.log(f"  [CHECK] '{label}' process confirmed running")
+                    return True
+                if attempt == 0:
+                    self.log(f"  [CHECK] '{label}' not yet confirmed — retrying in 2.5s")
+            self.log(f"  [CHECK] Launch of '{matched_proc}' not confirmed")
+            return False
 
-        # Fallback: OCR-based signal check (Linux/macOS, or apps not in process map)
+        # Fallback: OCR-based signal check (apps not in the curated process map)
         matched_key = next(
             (k for k in self._APP_SIGNALS if k in desc), None
         )
@@ -1694,8 +1665,7 @@ class TaskOrchestrator:
         Falls back to a flat token list if snapshot capture fails.
         """
         try:
-            if _OS == "Windows":
-                self._refresh_own_window_mask()
+            self._refresh_own_window_mask()
             snapshot = capture_snapshot(self.capturer, self._ocr)
             return snapshot.format_for_planner()
         except Exception:

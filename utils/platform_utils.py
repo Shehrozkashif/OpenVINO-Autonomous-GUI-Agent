@@ -1,52 +1,31 @@
 # utils/platform_utils.py
-"""Shared platform detection utilities — imported by router, planner, and start."""
+"""Windows platform detection utilities — imported by router, planner, and start."""
 import os
-import platform
-import shutil
 import subprocess
 from dataclasses import dataclass
-
-_OS = platform.system()
-
 
 # ── Firefox ───────────────────────────────────────────────────────────────────
 
 def detect_firefox() -> str:
-    """Return the best available Firefox launch command for this OS."""
-    if _OS == "Windows":
-        try:
-            import winreg
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe",
-            ) as k:
-                path = winreg.QueryValue(k, None)
-                if path and os.path.exists(path):
-                    return f'"{path}"'
-        except Exception:
-            pass
-        for path in [
-            os.path.expandvars(r"%ProgramFiles%\Mozilla Firefox\firefox.exe"),
-            os.path.expandvars(r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe"),
-            os.path.expandvars(r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe"),
-        ]:
-            if os.path.exists(path):
+    """Return the best available Firefox launch command."""
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe",
+        ) as k:
+            path = winreg.QueryValue(k, None)
+            if path and os.path.exists(path):
                 return f'"{path}"'
-        return "firefox"
-
-    which = shutil.which("firefox")
-    if which:
-        return which
+    except Exception:
+        pass
     for path in [
-        os.path.expanduser("~/apps/firefox/firefox/firefox"),
-        os.path.expanduser("~/firefox/firefox"),
-        "/snap/bin/firefox",
-        "/usr/bin/firefox",
-        "/usr/local/bin/firefox",
-        "/opt/firefox/firefox",
+        os.path.expandvars(r"%ProgramFiles%\Mozilla Firefox\firefox.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe"),
     ]:
         if os.path.exists(path):
-            return path
+            return f'"{path}"'
     return "firefox"
 
 
@@ -55,30 +34,28 @@ def detect_firefox() -> str:
 def get_desktop_path() -> str:
     """Return the REAL Desktop folder path for this machine.
 
-    On Windows the Desktop is frequently redirected by OneDrive
+    The Desktop is frequently redirected by OneDrive
     (C:\\Users\\<u>\\OneDrive\\Desktop), so '%USERPROFILE%\\Desktop' and
     '$env:USERPROFILE\\Desktop' point at a directory that does not exist.
     Ask the shell for the actual known-folder location instead, and bake the
     resolved LITERAL path into prompts — it works in any shell, no expansion.
     """
-    if _OS == "Windows":
-        try:
-            import ctypes
-            buf = ctypes.create_unicode_buffer(260)
-            # CSIDL_DESKTOPDIRECTORY = 0x0010 — follows OneDrive redirection
-            if ctypes.windll.shell32.SHGetFolderPathW(None, 0x0010, None, 0, buf) == 0:
-                if buf.value and os.path.isdir(buf.value):
-                    return buf.value
-        except Exception:
-            pass
-        fallback = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
-        if os.path.isdir(fallback):
-            return fallback
-        onedrive = os.path.join(os.environ.get("OneDrive", ""), "Desktop")
-        if os.path.isdir(onedrive):
-            return onedrive
-        return fallback or "~\\Desktop"
-    return os.path.expanduser("~/Desktop")
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(260)
+        # CSIDL_DESKTOPDIRECTORY = 0x0010 — follows OneDrive redirection
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 0x0010, None, 0, buf) == 0:
+            if buf.value and os.path.isdir(buf.value):
+                return buf.value
+    except Exception:
+        pass
+    fallback = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+    if os.path.isdir(fallback):
+        return fallback
+    onedrive = os.path.join(os.environ.get("OneDrive", ""), "Desktop")
+    if os.path.isdir(onedrive):
+        return onedrive
+    return fallback or "~\\Desktop"
 
 
 # ── GPU detection ─────────────────────────────────────────────────────────────
@@ -171,40 +148,26 @@ def _detect_intel_gpus() -> list[GPUInfo]:
     informational and never required for inference to work.
     """
     gpus: list[GPUInfo] = []
-    if _OS == "Windows":
-        try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-CimInstance Win32_VideoController | "
-                 "Where-Object { $_.Name -match 'Intel' } | "
-                 "ForEach-Object { \"$($_.Name)|$($_.AdapterRAM)\" }"],
-                capture_output=True, text=True, timeout=8,
-            )
-            if r.returncode == 0:
-                for i, line in enumerate(ln.strip() for ln in r.stdout.splitlines() if ln.strip()):
-                    name, _, ram = line.partition("|")
-                    try:
-                        # AdapterRAM is bytes (and unreliable/0 for shared-memory iGPUs)
-                        vram_mb = max(int(ram), 0) // (1024 * 1024)
-                    except ValueError:
-                        vram_mb = 0
-                    gpus.append(GPUInfo(index=i, name=name.strip() or f"Intel GPU {i}",
-                                        vram_mb=vram_mb, backend="intel"))
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-    else:
-        try:
-            r = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
-            if r.returncode == 0:
-                idx = 0
-                for line in r.stdout.splitlines():
-                    if "VGA" in line and "Intel" in line:
-                        name = line.split(":", 2)[-1].strip()
-                        gpus.append(GPUInfo(index=idx, name=name or "Intel GPU",
-                                            vram_mb=0, backend="intel"))
-                        idx += 1
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_VideoController | "
+             "Where-Object { $_.Name -match 'Intel' } | "
+             "ForEach-Object { \"$($_.Name)|$($_.AdapterRAM)\" }"],
+            capture_output=True, text=True, timeout=8,
+        )
+        if r.returncode == 0:
+            for i, line in enumerate(ln.strip() for ln in r.stdout.splitlines() if ln.strip()):
+                name, _, ram = line.partition("|")
+                try:
+                    # AdapterRAM is bytes (and unreliable/0 for shared-memory iGPUs)
+                    vram_mb = max(int(ram), 0) // (1024 * 1024)
+                except ValueError:
+                    vram_mb = 0
+                gpus.append(GPUInfo(index=i, name=name.strip() or f"Intel GPU {i}",
+                                    vram_mb=vram_mb, backend="intel"))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
     return gpus
 
 

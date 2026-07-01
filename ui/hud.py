@@ -5,7 +5,7 @@ The main window minimizes during execution (it must not cover the screen the
 agent is operating), which previously left the user staring at nothing for
 minutes. The HUD keeps the agent's state visible the whole time:
 
-    ◉  Locating element          ⏱ 41.2s   ■
+    ◉  Locating element          41.2s   ■
        Looking for “Brave Browser” on screen…
 
 Safety: the HUD's own pixels are registered in the shared ScreenCapture's

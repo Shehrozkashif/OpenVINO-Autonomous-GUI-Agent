@@ -43,8 +43,5 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 # Tests insert the repo root onto sys.path before importing project modules,
-# and live tests keep compact inline helpers.
+# and live/e2e tests keep compact inline helpers.
 "tests/*" = ["E402"]
-# Root convenience scripts set up sys.path / env before importing the package.
-"e2e_test.py" = ["E402"]
-"e2e_verify.py" = ["E402"]

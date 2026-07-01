@@ -8,11 +8,11 @@ sys.path.insert(0, ".")
 
 import pytest
 
-from core.executor.burst_executor import (
+from core.action_firewall import Decision, Severity, decide, evaluate
+from core.burst_executor import (
     _instruction_has_extra_clauses,
     detect_burst_from_instruction,
 )
-from core.safety.action_firewall import Decision, Severity, decide, evaluate
 
 # ── Firewall classification ───────────────────────────────────────────────────
 

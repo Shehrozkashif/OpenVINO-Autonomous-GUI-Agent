@@ -3,76 +3,79 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tools.desktop_control.controller import DesktopController
+from core.controller import DesktopController
 
 
 @pytest.fixture(autouse=True)
-def mock_pynput(monkeypatch):
-    """Patch the module-level mouse/keyboard singletons so no real input is sent."""
-    mock_mouse = MagicMock()
-    mock_kb = MagicMock()
-    monkeypatch.setattr("tools.desktop_control.controller._mouse", mock_mouse)
-    monkeypatch.setattr("tools.desktop_control.controller._pynput_kb", mock_kb)
-    monkeypatch.setattr("tools.desktop_control.controller._XTEST_OK", False)
-    return mock_mouse, mock_kb
+def mock_winapi(monkeypatch):
+    """Patch the low-level Win32 SendInput wrappers so no real input is sent."""
+    mocks = {
+        "mouse_event": MagicMock(),
+        "key_event": MagicMock(),
+        "unicode_event": MagicMock(),
+        "set_pos": MagicMock(),
+        # VK_A..VK_Z equal ord('A')..ord('Z') on real Windows, so this mirrors
+        # VkKeyScanW's real behavior for plain ASCII letters/digits.
+        "vk_for_char": MagicMock(side_effect=lambda ch: (ord(ch.upper()), ch.isupper())),
+    }
+    monkeypatch.setattr("core.controller._mouse_event", mocks["mouse_event"])
+    monkeypatch.setattr("core.controller._key_event", mocks["key_event"])
+    monkeypatch.setattr("core.controller._unicode_key_event", mocks["unicode_event"])
+    monkeypatch.setattr("core.controller._set_cursor_pos", mocks["set_pos"])
+    monkeypatch.setattr("core.controller._vk_for_char", mocks["vk_for_char"])
+    return mocks
 
 
-def test_click(mock_pynput):
-    mouse, _ = mock_pynput
+def test_click(mock_winapi):
     controller = DesktopController()
     result = controller.click(100, 200)
     assert result is True
-    assert mouse.press.called
-    assert mouse.release.called
+    mock_winapi["set_pos"].assert_called_once_with(100, 200)
+    assert mock_winapi["mouse_event"].call_count == 2  # down + up
 
 
-def test_double_click(mock_pynput):
-    mouse, _ = mock_pynput
+def test_double_click(mock_winapi):
     controller = DesktopController()
     result = controller.double_click(300, 400)
     assert result is True
-    assert mouse.press.call_count == 2
-    assert mouse.release.call_count == 2
+    mock_winapi["set_pos"].assert_called_once_with(300, 400)
+    assert mock_winapi["mouse_event"].call_count == 4  # 2x (down + up)
 
 
-def test_type_text(mock_pynput):
-    _, kb = mock_pynput
+def test_type_text(mock_winapi):
     controller = DesktopController()
     result = controller.type_text("hi")
     assert result is True
-    assert kb.type.call_count == 2  # one call per character
+    # one keydown + one keyup per character, via Unicode injection
+    assert mock_winapi["unicode_event"].call_count == 4
 
 
-def test_press_key(mock_pynput):
-    _, kb = mock_pynput
+def test_press_key(mock_winapi):
     controller = DesktopController()
     result = controller.press_key("enter")
     assert result is True
-    kb.press.assert_called_once()
-    kb.release.assert_called_once()
+    assert mock_winapi["key_event"].call_count == 2  # down + up
 
 
-def test_hotkey(mock_pynput):
-    _, kb = mock_pynput
+def test_hotkey(mock_winapi):
     controller = DesktopController()
     result = controller.hotkey("ctrl", "s")
     assert result is True
-    assert kb.press.called
+    assert mock_winapi["key_event"].called
 
 
-def test_scroll(mock_pynput):
-    mouse, _ = mock_pynput
+def test_scroll(mock_winapi):
     controller = DesktopController()
     result = controller.scroll(150, 250, clicks=3, direction="down")
     assert result is True
-    mouse.scroll.assert_called_once_with(0, -3)
+    mock_winapi["set_pos"].assert_called_once_with(150, 250)
+    mock_winapi["mouse_event"].assert_called_once_with(0x0800, data=-360)
 
 
-def test_screenshot_base64(mock_pynput):
+def test_screenshot_base64(mock_winapi):
     import base64
     controller = DesktopController()
     result = controller.screenshot_base64()
     assert isinstance(result, str)
     # Must be valid base64
     base64.b64decode(result)
-
