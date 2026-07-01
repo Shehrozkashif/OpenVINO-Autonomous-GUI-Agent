@@ -23,9 +23,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agents.reflection.reflection_agent import ReflectionResult
-from core.executor.burst_executor import _INTER_STEP_DELAY_S, BurstExecutor, detect_burst
-from core.protocols.a2a import ActionBurst, ActionStep, BurstResult, SubTask
+from agents.reflection import ReflectionResult
+from core.burst_executor import _INTER_STEP_DELAY_S, BurstExecutor, detect_burst
+from core.protocols import ActionBurst, ActionStep, BurstResult, SubTask
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -324,7 +324,7 @@ class TestBurstExecutorRun:
 
     # ── Inter-step delay (80 ms) ──────────────────────────────────────────────
 
-    @patch("core.executor.burst_executor.time")
+    @patch("core.burst_executor.time")
     def test_sleep_called_between_steps_not_after_last(self, mock_time):
         mock_time.time.return_value = 0.0
         s1 = _step("type", value="a", step_id=1)
@@ -339,7 +339,7 @@ class TestBurstExecutorRun:
         # N-1 = 2 sleep calls (between steps 1→2 and 2→3, not after 3)
         assert mock_time.sleep.call_count == 2
 
-    @patch("core.executor.burst_executor.time")
+    @patch("core.burst_executor.time")
     def test_sleep_duration_is_80ms_for_type_steps(self, mock_time):
         """Type steps use the default 80 ms inter-step delay."""
         mock_time.time.return_value = 0.0
@@ -354,7 +354,7 @@ class TestBurstExecutorRun:
         for c in mock_time.sleep.call_args_list:
             assert c[0][0] == pytest.approx(_INTER_STEP_DELAY_S)
 
-    @patch("core.executor.burst_executor.time")
+    @patch("core.burst_executor.time")
     def test_sleep_duration_is_300ms_for_key_press(self, mock_time):
         """key_press steps use a longer 300 ms delay to allow submenu animations."""
         mock_time.time.return_value = 0.0
@@ -369,7 +369,7 @@ class TestBurstExecutorRun:
         for c in mock_time.sleep.call_args_list:
             assert c[0][0] == pytest.approx(0.30)
 
-    @patch("core.executor.burst_executor.time")
+    @patch("core.burst_executor.time")
     def test_single_step_burst_no_sleep(self, mock_time):
         mock_time.time.return_value = 0.0
         burst = ActionBurst(steps=[_step("type", value="x")], verify_at_end=False, timeout_ms=9999)
@@ -441,7 +441,7 @@ class TestBurstExecutorRun:
 
     # ── Timeout path ─────────────────────────────────────────────────────────
 
-    @patch("core.executor.burst_executor.time")
+    @patch("core.burst_executor.time")
     def test_timeout_aborts_before_first_step(self, mock_time):
         # deadline = 100.0 + 0.005 = 100.005; first check is 200.0 > 100.005 → timeout
         mock_time.time.side_effect = [100.0, 200.0]
@@ -537,7 +537,7 @@ class TestOrchestratorBurstIntegration:
     """
 
     def _make_orch(self, planner_side_effect=None):
-        from agents.reflection.reflection_agent import ReflectionResult
+        from agents.reflection import ReflectionResult
         from core.orchestrator import OrchestratorConfig, TaskOrchestrator
 
         reflector = MagicMock()

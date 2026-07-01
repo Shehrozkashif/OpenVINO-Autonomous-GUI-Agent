@@ -408,7 +408,7 @@ class MissionPage(QWidget):
 
     def _tick(self):
         if self._t0:
-            self.elapsed.setText(f"⏱ {time.time() - self._t0:5.1f}s")
+            self.elapsed.setText(f"{time.time() - self._t0:5.1f}s")
 
 
 def _stat(caption: str, value: str, stretch: bool = False):
@@ -906,7 +906,7 @@ class SettingsPage(QWidget):
 
         def worker():
             try:
-                from core.pipeline.ovms_client import OVMSClient
+                from core.ovms_client import OVMSClient
                 health = OVMSClient().check_health()
                 text = "   ".join(f"{k}: {v}" for k, v in health.items())
             except Exception as e:

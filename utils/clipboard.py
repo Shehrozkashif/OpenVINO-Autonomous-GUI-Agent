@@ -1,96 +1,35 @@
 # utils/clipboard.py
-"""Cross-platform clipboard read/write.
-
-On Linux: tries xclip then xsel (no Python deps needed).
-On Windows/macOS: uses pyperclip.
-"""
-import platform
-import subprocess
+"""Windows clipboard read/write via pyperclip."""
 import threading
 import time
-
-_OS = platform.system()
-
-# ── Availability check (done once at import) ──────────────────────────────────
-
-def _probe_linux_clipboard() -> str | None:
-    """Return the first working clipboard tool name, or None."""
-    for tool, args_write, _args_read in [
-        ("xclip",
-         ["xclip", "-selection", "clipboard"],
-         ["xclip", "-selection", "clipboard", "-out"]),
-        ("xsel",
-         ["xsel", "--clipboard", "--input"],
-         ["xsel", "--clipboard", "--output"]),
-    ]:
-        try:
-            p = subprocess.run(args_write, input=b"_probe_",
-                               capture_output=True, timeout=1)
-            if p.returncode == 0:
-                return tool
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    return None
-
-
-_LINUX_TOOL: str | None = _probe_linux_clipboard() if _OS == "Linux" else None
-
 
 # ── Write ─────────────────────────────────────────────────────────────────────
 
 def write(text: str) -> bool:
     """Set clipboard text. Returns True on success."""
-    if _OS == "Linux":
-        if _LINUX_TOOL == "xclip":
-            cmd = ["xclip", "-selection", "clipboard"]
-        elif _LINUX_TOOL == "xsel":
-            cmd = ["xsel", "--clipboard", "--input"]
-        else:
-            return False
-        try:
-            p = subprocess.run(cmd, input=text.encode(), capture_output=True, timeout=2)
-            return p.returncode == 0
-        except (subprocess.TimeoutExpired, OSError):
-            return False
-    else:
-        try:
-            import pyperclip
-            pyperclip.copy(text)
-            return True
-        except Exception:
-            return False
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return True
+    except Exception:
+        return False
 
 
 # ── Read ──────────────────────────────────────────────────────────────────────
 
 def read() -> str:
     """Get current clipboard text."""
-    if _OS == "Linux":
-        if _LINUX_TOOL == "xclip":
-            cmd = ["xclip", "-selection", "clipboard", "-out"]
-        elif _LINUX_TOOL == "xsel":
-            cmd = ["xsel", "--clipboard", "--output"]
-        else:
-            return ""
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=2)
-            return r.stdout.decode(errors="replace") if r.returncode == 0 else ""
-        except (subprocess.TimeoutExpired, OSError):
-            return ""
-    else:
-        try:
-            import pyperclip
-            return pyperclip.paste() or ""
-        except Exception:
-            return ""
+    try:
+        import pyperclip
+        return pyperclip.paste() or ""
+    except Exception:
+        return ""
 
 
 # ── Available check ───────────────────────────────────────────────────────────
 
 def available() -> bool:
     """Return True if clipboard operations are available on this system."""
-    if _OS == "Linux":
-        return _LINUX_TOOL is not None
     try:
         import pyperclip  # noqa: F401
         return True

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Desktop GUI Agent — single entry point.
+"""Desktop GUI Agent — single entry point (Windows).
 
     python start.py
 
 Does everything automatically:
-  1. Platform setup (Linux Qt libs / Windows UIA)
+  1. Check for Windows UIA (Stage 0 grounding)
   2. Detect GPU (Intel / AMD / NVIDIA)
   3. Prepare both models in the OpenVINO Model Server (OVMS) repository:
        • LLM  qwen3-8b-int4-ov        (pulled pre-converted from Hugging Face)
        • VLM  ui-tars-1.5-7b-int4-ov  (converted from UI-TARS on first run)
   4. Start OVMS serving both models on one OpenAI-compatible endpoint (port 8000)
-       using the native ovms/ovms.exe binary
+       using the native ovms.exe binary
   5. Wait for the server to be ready
   6. Launch the agent UI
 """
@@ -34,7 +34,6 @@ from config import (
     VLM_SOURCE,
 )
 
-_OS = platform.system()
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.join(_HERE, MODEL_REPOSITORY_PATH)
 _CONFIG_JSON = os.path.join(_REPO, "config.json")
@@ -61,35 +60,7 @@ def banner():
     print(_bold("╚══════════════════════════════════════════════╝\n"))
 
 
-# ── 1. Fix libxcb-cursor on Linux (no sudo needed) ───────────────────────────
-def setup_linux_libs():
-    lib_path = os.path.expanduser("~/.local_xcb/usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0")
-    if os.path.exists(lib_path):
-        return
-    print(_yellow("  [SETUP] libxcb-cursor not found — extracting (one-time)..."))
-    try:
-        import glob
-        subprocess.run(["apt-get", "download", "libxcb-cursor0"],
-                       cwd="/tmp", check=True, capture_output=True)
-        debs = glob.glob("/tmp/libxcb-cursor0*.deb")
-        if not debs:
-            raise FileNotFoundError("libxcb-cursor0 .deb not downloaded")
-        dest = os.path.expanduser("~/.local_xcb")
-        os.makedirs(dest, exist_ok=True)
-        subprocess.run(["dpkg-deb", "-x", debs[0], dest], check=True, capture_output=True)
-        print(_green("  [OK] libxcb-cursor extracted"))
-    except Exception as e:
-        print(_yellow(f"  [WARN] Could not extract libxcb-cursor: {e}"))
-
-
-def inject_linux_env():
-    lib_dir = os.path.expanduser("~/.local_xcb/usr/lib/x86_64-linux-gnu")
-    existing = os.environ.get("LD_LIBRARY_PATH", "")
-    if lib_dir not in existing:
-        os.environ["LD_LIBRARY_PATH"] = f"{lib_dir}:{existing}" if existing else lib_dir
-
-
-# ── 2. GPU detection ─────────────────────────────────────────────────────────
+# ── 1. GPU detection ──────────────────────────────────────────────────────────
 
 def check_gpus():
     """Detect GPUs, print a summary, return (gpu_type, gpus)."""
@@ -111,7 +82,7 @@ def check_gpus():
     return backend, gpus
 
 
-# ── 3. Locate OVMS (native binary) ────────────────────────────────────────────
+# ── 2. Locate OVMS (native binary) ────────────────────────────────────────────
 
 def find_ovms_binary() -> str:
     """Return the path to a native ovms executable, or '' if none is found.
@@ -119,7 +90,7 @@ def find_ovms_binary() -> str:
     Honours the OVMS_DIR / OVMS_PATH env vars (the OVMS Windows package extracts
     to a folder containing ovms.exe), then falls back to PATH.
     """
-    exe = "ovms.exe" if _OS == "Windows" else "ovms"
+    exe = "ovms.exe"
     for env in ("OVMS_PATH", "OVMS_DIR"):
         base = os.environ.get(env)
         if base:
@@ -133,7 +104,7 @@ def find_ovms_binary() -> str:
     return found or ""
 
 
-# ── 4. Model preparation (export into the OVMS repository) ────────────────────
+# ── 3. Model preparation (export into the OVMS repository) ────────────────────
 
 def _ensure_export_tool() -> str:
     """Return a path to export_model.py, downloading it once if necessary."""
@@ -169,14 +140,8 @@ def _ensure_hf_cli():
     shim_dir = os.path.join(_HERE, "tools", "ovms", "_shims")
     os.makedirs(shim_dir, exist_ok=True)
     try:
-        if _OS == "Windows":
-            with open(os.path.join(shim_dir, "huggingface-cli.bat"), "w") as f:
-                f.write("@echo off\r\nhf %*\r\n")
-        else:
-            shim = os.path.join(shim_dir, "huggingface-cli")
-            with open(shim, "w") as f:
-                f.write('#!/bin/sh\nexec hf "$@"\n')
-            os.chmod(shim, 0o755)
+        with open(os.path.join(shim_dir, "huggingface-cli.bat"), "w") as f:
+            f.write("@echo off\r\nhf %*\r\n")
     except Exception as e:
         print(_yellow(f"  [WARN] Could not create huggingface-cli shim: {e}"))
         return
@@ -250,7 +215,7 @@ def ensure_models(device: str) -> bool:
     return ok
 
 
-# ── 5. Start / check OVMS ─────────────────────────────────────────────────────
+# ── 4. Start / check OVMS ─────────────────────────────────────────────────────
 
 def check_ovms() -> bool:
     try:
@@ -288,28 +253,20 @@ def start_ovms_native(binary: str, device: str) -> bool:
     # so we run it only inside the ovms subprocess. We write a one-shot launcher
     # .bat (avoids the cmd /c inline-quoting trap around the setupvars path).
     ovms_dir = os.path.dirname(binary)
-    if _OS == "Windows":
-        setupvars = os.path.join(ovms_dir, "setupvars.bat")
-        inner = subprocess.list2cmdline([binary] + ovms_args)
-        lines = ["@echo off"]
-        if os.path.isfile(setupvars):
-            print(_green(f"  [OK] Sourcing {setupvars} for the OVMS process"))
-            lines.append(f'call "{setupvars}"')
-        else:
-            print(_yellow(f"  [WARN] setupvars.bat not found next to {binary}; "
-                          "starting ovms.exe directly (may fail to find its DLLs)"))
-        lines.append(inner)
-        launcher = os.path.join(_HERE, "_run_ovms.bat")
-        with open(launcher, "w") as f:
-            f.write("\r\n".join(lines) + "\r\n")
-        cmd = ["cmd", "/c", launcher]
+    setupvars = os.path.join(ovms_dir, "setupvars.bat")
+    inner = subprocess.list2cmdline([binary] + ovms_args)
+    lines = ["@echo off"]
+    if os.path.isfile(setupvars):
+        print(_green(f"  [OK] Sourcing {setupvars} for the OVMS process"))
+        lines.append(f'call "{setupvars}"')
     else:
-        setupvars = os.path.join(ovms_dir, "setupvars.sh")
-        if os.path.isfile(setupvars):
-            inner = subprocess.list2cmdline([binary] + ovms_args)
-            cmd = ["bash", "-c", f'. "{setupvars}" && exec {inner}']
-        else:
-            cmd = [binary] + ovms_args
+        print(_yellow(f"  [WARN] setupvars.bat not found next to {binary}; "
+                      "starting ovms.exe directly (may fail to find its DLLs)"))
+    lines.append(inner)
+    launcher = os.path.join(_HERE, "_run_ovms.bat")
+    with open(launcher, "w") as f:
+        f.write("\r\n".join(lines) + "\r\n")
+    cmd = ["cmd", "/c", launcher]
     log_path = os.path.join(_HERE, "ovms.log")
     log_file = open(log_path, "w")
     print(_yellow(f"  Log: {log_path}"))
@@ -339,33 +296,28 @@ def _wait_for_ovms(log_path: str = "") -> bool:
     return False
 
 
-# ── 6. Main ───────────────────────────────────────────────────────────────────
+# ── 5. Main ───────────────────────────────────────────────────────────────────
 
 def main():
     banner()
 
-    # ── Platform setup ────────────────────────────────────────────
-    print(_bold("Platform:"), _OS)
-    if _OS == "Linux":
-        setup_linux_libs()
-        inject_linux_env()
-        print(_green("  [OK] Linux environment configured"))
-    elif _OS == "Windows":
-        print(_green("  [OK] Windows"))
-        try:
-            import uiautomation  # noqa: F401
-            print(_green("  [OK] uiautomation — Stage 0 UIA grounding active"))
-        except ImportError:
-            print(_yellow("  [..] uiautomation not installed — installing for Stage 0 grounding..."))
-            ret = subprocess.run([sys.executable, "-m", "pip", "install", "uiautomation"],
-                                 capture_output=True)
-            if ret.returncode == 0:
-                print(_green("  [OK] uiautomation installed"))
-            else:
-                print(_yellow("  [WARN] Could not install uiautomation — Stage 0 disabled"))
-                print(_yellow("         Run manually: pip install uiautomation"))
-    elif _OS == "Darwin":
-        print(_green("  [OK] macOS — no extra setup needed"))
+    # ── Platform check ────────────────────────────────────────────
+    if platform.system() != "Windows":
+        print(_red(f"  [FAIL] This agent supports Windows only (detected: {platform.system()})"))
+        sys.exit(1)
+    print(_green("  [OK] Windows"))
+    try:
+        import uiautomation  # noqa: F401
+        print(_green("  [OK] uiautomation — Stage 0 UIA grounding active"))
+    except ImportError:
+        print(_yellow("  [..] uiautomation not installed — installing for Stage 0 grounding..."))
+        ret = subprocess.run([sys.executable, "-m", "pip", "install", "uiautomation"],
+                             capture_output=True)
+        if ret.returncode == 0:
+            print(_green("  [OK] uiautomation installed"))
+        else:
+            print(_yellow("  [WARN] Could not install uiautomation — Stage 0 disabled"))
+            print(_yellow("         Run manually: pip install uiautomation"))
 
     # ── GPU detection ─────────────────────────────────────────────
     check_gpus()

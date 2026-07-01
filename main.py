@@ -5,16 +5,16 @@ import sys
 from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from agents.action.action_agent import ActionExecutionAgent
-from agents.grounding.grounding_agent import OCREngine, UIGroundingAgent
-from agents.planning.planning_agent import PlanningAgent
-from agents.reflection.reflection_agent import ReflectionAgent
-from agents.router.router_agent import RouterAgent
+from agents.action import ActionExecutionAgent
+from agents.grounding import OCREngine, UIGroundingAgent
+from agents.planning import PlanningAgent
+from agents.reflection import ReflectionAgent
+from agents.router import RouterAgent
 from core.capture.screenshot import ScreenCapture
+from core.controller import DesktopController
 from core.orchestrator import OrchestratorConfig, TaskOrchestrator
-from core.pipeline.ovms_client import OVMSClient
-from memory.task.task_memory import TaskMemory
-from tools.desktop_control.controller import DesktopController
+from core.ovms_client import OVMSClient
+from memory.task_memory import TaskMemory
 from ui.main_window import DesktopGUIAgent
 
 
