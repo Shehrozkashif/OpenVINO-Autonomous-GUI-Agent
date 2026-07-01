@@ -457,6 +457,12 @@ class TaskOrchestrator:
         # the subtask is DONE the moment the named file appears on disk (fresh).
         _save_target = self._subtask_save_target(subtask)
 
+        # "... type: <text>" subtasks are complete the moment that text has been
+        # typed and verified. Without this, the 8B planner re-types the payload
+        # (duplicating it in the document) or drifts into ctrl+s save steps that
+        # belong to a later subtask — burning the whole subtask budget.
+        _type_payload = None if _save_target else self._subtask_type_payload(subtask)
+
         _subtask_start = time.time()
 
         # The Save-As key sequence is fixed and well-defined, but the 8B planner
@@ -658,6 +664,34 @@ class TaskOrchestrator:
                         time.sleep(0.1)
                         break
 
+                    # "Screen unchanged" after a click is a false failure when
+                    # the click's whole effect was placing the caret — verify
+                    # against the accessibility tree instead of retrying blind.
+                    if (
+                        step.action_type == "click"
+                        and "unchanged" in (reflection.error_description or "").lower()
+                        and self._click_holds_focus(step)
+                    ):
+                        self.log(
+                            "  [FOCUS-CHECK] Clicked point owns keyboard focus "
+                            "(text control) — click confirmed"
+                        )
+                        step_success = True
+                        break
+
+                    # A save hotkey that opened the Save-As dialog IS a success,
+                    # but the LLM verifier reads it as "no confirmation dialog"
+                    # and fails it — which retries ctrl+s into the open dialog
+                    # (a no-op) until the budget is gone. Check deterministically.
+                    if (
+                        step.action_type == "hotkey"
+                        and (step.key or "").lower() in ("ctrl+s", "ctrl+shift+s")
+                        and self._save_dialog_visible()
+                    ):
+                        self.log("  [SAVE-CHECK] Save-As dialog is open — hotkey confirmed")
+                        step_success = True
+                        break
+
                     # Step reported as not-confirmed by the reflector.
                     # fail_threshold splits "no clear evidence of failure" from
                     # "confidently failed":
@@ -760,6 +794,20 @@ class TaskOrchestrator:
                 else:
                     completed.append(step.description)
                 consecutive_failures = 0
+
+                # Early-exit: a "... type: <text>" subtask is DONE once that text
+                # has been typed and verified — never give the planner a chance
+                # to re-type it or drift into save steps of a later subtask.
+                if (
+                    _type_payload
+                    and step.action_type == "type"
+                    and self._texts_equivalent(step.value or "", _type_payload)
+                ):
+                    self.log(
+                        "  [TYPE-CHECK] Requested text typed and verified — "
+                        "subtask complete"
+                    )
+                    return True
 
                 # Early-exit: after each successful step in a known app-launch subtask,
                 # check the process list on Windows. If the app is already running, the
@@ -1164,6 +1212,47 @@ class TaskOrchestrator:
             return None
         return os.path.expanduser(os.path.expandvars(path))
 
+    @staticmethod
+    def _subtask_type_payload(subtask) -> str | None:
+        """Extract the literal text a "... type: <text>" subtask asks to type.
+
+        Returns the payload when the subtask ends with the text to type (the
+        router phrases typing subtasks as "click in the document area and
+        type: <text>"), else None. Lets the orchestrator complete the subtask
+        deterministically the moment that text has been typed and verified —
+        otherwise the planner re-types the text or drifts into save steps that
+        belong to a later subtask.
+        """
+        desc = subtask.description or ""
+        m = re.search(r"\btype:?\s+['\"]?(.+?)['\"]?\s*$", desc, re.IGNORECASE)
+        if not m:
+            return None
+        payload = m.group(1).strip()
+        # Too-short payloads ("type notepad") are launcher/search idioms, not a
+        # document-typing goal — don't short-circuit those.
+        return payload if len(payload) >= 6 else None
+
+    @staticmethod
+    def _texts_equivalent(a: str, b: str) -> bool:
+        """True when two strings are the same text modulo case/whitespace/quotes.
+
+        Fuzzy (difflib) because the planner re-emits the payload from the
+        subtask description and may vary punctuation slightly. Containment
+        counts only when lengths are comparable, so typing a fragment of the
+        payload never passes as the full text.
+        """
+        import difflib
+
+        def _norm(s: str) -> str:
+            return re.sub(r"\s+", " ", (s or "").strip().strip("'\"")).lower()
+
+        na, nb = _norm(a), _norm(b)
+        if not na or not nb:
+            return False
+        if (na in nb or nb in na) and min(len(na), len(nb)) / max(len(na), len(nb)) >= 0.8:
+            return True
+        return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.85
+
     def _file_saved_fresh(self, path: str, started_at: float) -> bool:
         """True if `path` exists and was written during this subtask.
 
@@ -1176,6 +1265,34 @@ class TaskOrchestrator:
                 return False
             return os.path.getmtime(path) >= started_at - 2
         except OSError:
+            return False
+
+    def _click_holds_focus(self, step: ActionStep) -> bool:
+        """True when the clicked point lies inside the control that owns
+        keyboard focus and that control accepts text input.
+
+        A click whose effect is placing the caret produces zero pixel change
+        (the caret is invisible to the phash diff), so reflection scores it as
+        a no-op and retries it forever. The accessibility tree is the ground
+        truth: if the focused control contains the clicked coordinates and is
+        a text control, the click achieved everything a click can achieve.
+        Works for any app and any task — no target-name matching involved.
+        """
+        try:
+            from core import windows_uia
+            info = windows_uia.focused_element_info()
+            if not info or info["control_type"] not in (
+                "EditControl", "DocumentControl",
+            ):
+                return False
+            # Screen is unchanged (that is why we are here), so this is a
+            # cache hit — no OCR/VLM cost.
+            loc = self.grounder.ground(step.target)
+            if not loc.found:
+                return False
+            left, top, right, bottom = info["rect"]
+            return left <= loc.x <= right and top <= loc.y <= bottom
+        except Exception:
             return False
 
     def _save_dialog_visible(self) -> bool:

@@ -216,6 +216,45 @@ def get_interactive_elements(
     return result[0]
 
 
+def focused_element_info(timeout_s: float = 1.0) -> dict | None:
+    """Describe the control that currently owns keyboard focus.
+
+    Returns {"rect": (l, t, r, b), "control_type": str, "name": str} or None.
+    Ground truth from the accessibility tree — used to verify actions whose
+    effect is invisible to pixel comparison (e.g. a click that only moves the
+    caret). Runs in a daemon thread with a hard timeout, like the other
+    queries, so it can never stall the pipeline.
+    """
+    if not _load():
+        return None
+
+    result: list = [None]
+
+    def _get():
+        _com = _thread_com_init()
+        try:
+            ctrl = _uia.GetFocusedControl()
+            if ctrl is None:
+                return
+            rect = ctrl.BoundingRectangle
+            if not _rect_valid(rect):
+                return
+            result[0] = {
+                "rect": (rect.left, rect.top, rect.right, rect.bottom),
+                "control_type": ctrl.ControlTypeName,
+                "name": (ctrl.Name or "").strip(),
+            }
+        except Exception as e:
+            logger.debug(f"[UIA] Focused-element query error: {e}")
+        finally:
+            del _com   # release per-thread COM
+
+    t = threading.Thread(target=_get, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    return result[0]
+
+
 # UIA control types a user can act on — used by get_interactive_elements().
 _INTERACTIVE_CONTROL_TYPES = frozenset({
     "ButtonControl", "MenuItemControl", "ListItemControl", "TreeItemControl",
