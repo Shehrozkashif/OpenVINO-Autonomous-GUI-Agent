@@ -111,16 +111,16 @@ def main():
     }
 
     # Wrap planner
-    _orig_plan = orch.planner.plan_next_step
+    _orig_plan = orch.planner.plan_steps
     def _timed_plan(*args, **kwargs):
         timings["planning_calls"] += 1
         t = time.perf_counter()
         result = _orig_plan(*args, **kwargs)
         timings["planning_time_ms"] += (time.perf_counter() - t) * 1000
         if result:
-            timings["total_steps"] += 1
+            timings["total_steps"] += len(result)
         return result
-    orch.planner.plan_next_step = _timed_plan
+    orch.planner.plan_steps = _timed_plan
 
     # Wrap grounder
     _orig_ground = orch.grounder.ground

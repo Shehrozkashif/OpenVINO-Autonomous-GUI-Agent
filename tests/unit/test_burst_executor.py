@@ -548,7 +548,7 @@ class TestOrchestratorBurstIntegration:
         ))
 
         planner = MagicMock()
-        planner.plan_next_step = MagicMock(
+        planner.plan_steps = MagicMock(
             side_effect=planner_side_effect if planner_side_effect else [None]
         )
 
@@ -581,7 +581,7 @@ class TestOrchestratorBurstIntegration:
 
         assert result is True
         orch.burst_executor.run.assert_called_once()
-        orch.planner.plan_next_step.assert_not_called()
+        orch.planner.plan_steps.assert_not_called()
 
     def test_burst_success_returns_true(self):
         orch = self._make_orch()
@@ -597,7 +597,7 @@ class TestOrchestratorBurstIntegration:
         result = orch._execute_subtask(SubTask(id=1, description="create new folder", depends_on=[]))
 
         assert result is True  # planner returned None → goal achieved
-        orch.planner.plan_next_step.assert_called()
+        orch.planner.plan_steps.assert_called()
 
     def test_no_burst_pattern_goes_directly_to_planner(self):
         """Subtask with no burst pattern → burst_executor.run is never called."""
@@ -605,7 +605,7 @@ class TestOrchestratorBurstIntegration:
         result = orch._execute_subtask(SubTask(id=1, description="open the file manager", depends_on=[]))
         assert result is True
         orch.burst_executor.run.assert_not_called()
-        orch.planner.plan_next_step.assert_called()
+        orch.planner.plan_steps.assert_called()
 
     def test_burst_executor_receives_correct_burst_object(self):
         """The ActionBurst passed to burst_executor.run() uses visual click steps for menu items."""

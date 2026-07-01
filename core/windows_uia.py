@@ -219,11 +219,16 @@ def get_interactive_elements(
 def focused_element_info(timeout_s: float = 1.0) -> dict | None:
     """Describe the control that currently owns keyboard focus.
 
-    Returns {"rect": (l, t, r, b), "control_type": str, "name": str} or None.
+    Returns {"rect": (l, t, r, b), "control_type": str, "name": str,
+    "value": str} or None. "value" is the control's current text (ValuePattern
+    or TextPattern), "" when the control exposes neither — e.g. password
+    fields, which deliberately hide their content.
+
     Ground truth from the accessibility tree — used to verify actions whose
-    effect is invisible to pixel comparison (e.g. a click that only moves the
-    caret). Runs in a daemon thread with a hard timeout, like the other
-    queries, so it can never stall the pipeline.
+    effect is invisible to pixel comparison (a click that only moves the
+    caret) or expensive to read back via OCR+LLM (text typed into a field).
+    Runs in a daemon thread with a hard timeout, like the other queries, so it
+    can never stall the pipeline.
     """
     if not _load():
         return None
@@ -239,10 +244,19 @@ def focused_element_info(timeout_s: float = 1.0) -> dict | None:
             rect = ctrl.BoundingRectangle
             if not _rect_valid(rect):
                 return
+            value = ""
+            try:
+                value = ctrl.GetValuePattern().Value or ""
+            except Exception:
+                try:
+                    value = ctrl.GetTextPattern().DocumentRange.GetText(-1) or ""
+                except Exception:
+                    pass
             result[0] = {
                 "rect": (rect.left, rect.top, rect.right, rect.bottom),
                 "control_type": ctrl.ControlTypeName,
                 "name": (ctrl.Name or "").strip(),
+                "value": value,
             }
         except Exception as e:
             logger.debug(f"[UIA] Focused-element query error: {e}")
@@ -250,6 +264,57 @@ def focused_element_info(timeout_s: float = 1.0) -> dict | None:
             del _com   # release per-thread COM
 
     t = threading.Thread(target=_get, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    return result[0]
+
+
+def save_dialog_open(timeout_s: float = 1.2) -> bool | None:
+    """Is a native Windows file (Save/Save-As) dialog in the foreground?
+
+    Detected structurally: the foreground window's subtree contains an Edit or
+    ComboBox control whose accessible name is the dialog's filename field
+    ("File name:"). The name comes from the accessibility tree — the same
+    field the agent types the path into — so this cannot misread pixels the
+    way OCR on a downscaled screenshot can.
+
+    Returns True/False when the tree answered, or None when UIA is
+    unavailable or the scan timed out (caller should fall back to OCR).
+    """
+    if not _load():
+        return None
+
+    result: list = [None]
+
+    def _scan():
+        _com = _thread_com_init()
+        try:
+            found = [False]
+
+            def _walk(ctrl, depth: int):
+                if depth > 8 or found[0]:
+                    return
+                try:
+                    if ctrl.ControlTypeName in ("EditControl", "ComboBoxControl"):
+                        name = (ctrl.Name or "").strip().lower()
+                        if name.startswith("file name"):
+                            found[0] = True
+                            return
+                    for child in ctrl.GetChildren():
+                        if found[0]:
+                            return
+                        _walk(child, depth + 1)
+                except Exception:
+                    pass  # controls can vanish mid-walk
+
+            _walk(_uia.GetForegroundControl(), 0)
+            result[0] = found[0]
+        except Exception as e:
+            logger.debug(f"[UIA] Save-dialog scan error: {e}")
+        finally:
+            del _com   # release per-thread COM
+
+    t = threading.Thread(target=_scan, daemon=True)
     t.start()
     t.join(timeout=timeout_s)
     return result[0]

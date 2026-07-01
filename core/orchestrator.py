@@ -434,6 +434,11 @@ class TaskOrchestrator:
         _cached_ocr: str = ""   # reuse reflection's OCR for next planning step
         _last_step_sig: tuple = ()    # (action_type, target, value, key)
         _same_step_streak: int = 0   # consecutive successes of the identical step
+        # Steps planned ahead by the last plan_steps() call. Executing from this
+        # queue skips the ~7-10 s planning call per step; it is flushed whenever
+        # a step fails or its outcome is uncertain, forcing a fresh plan against
+        # the live screen.
+        _step_queue: list[ActionStep] = []
 
         # Fast path: recognised multi-step patterns run with zero LLM calls.
         if self._try_burst(subtask):
@@ -547,12 +552,21 @@ class TaskOrchestrator:
                         self._degraded = True
                         return True
                 if not _visual_mode:
-                    step = self.planner.plan_next_step(
-                        subtask, screen_context, completed,
-                        task_context=task_context, failure_hints=failure_hints,
-                    )
-                    if step is None:
-                        return True   # planner says goal is achieved
+                    if _step_queue:
+                        step = _step_queue.pop(0)
+                        step.id = len(completed) + 1
+                        self.log(
+                            f"  [PLAN-QUEUE] Executing queued step "
+                            f"({len(_step_queue)} remaining after this)"
+                        )
+                    else:
+                        planned = self.planner.plan_steps(
+                            subtask, screen_context, completed,
+                            task_context=task_context, failure_hints=failure_hints,
+                        )
+                        if not planned:
+                            return True   # planner says goal is achieved
+                        step, _step_queue = planned[0], list(planned[1:])
             except PlanningParseError as e:
                 # Unparseable planner output is a planning FAILURE, not goal
                 # achievement. Record it and let the loop try again (or abort
@@ -624,6 +638,20 @@ class TaskOrchestrator:
                 if skip_reflection:
                     step_success = True
                     break
+
+                # Deterministic type verification: read the focused control's
+                # value from the accessibility tree. Exact, ~50 ms, and skips
+                # the ~3-4 s OCR+LLM reflection call. Falls through to normal
+                # reflection when the control exposes no readable value.
+                if step.action_type == "type":
+                    time.sleep(0.3)   # let the control commit the input
+                    if self._typed_text_in_focused_control(step.value):
+                        self.log(
+                            "  [TYPE-VERIFY] Focused control contains the typed "
+                            "text — verified via accessibility tree"
+                        )
+                        step_success = True
+                        break
 
                 # Deterministic verification for the execute-Enter of a
                 # "run: <command>" subtask — checks the filesystem / terminal
@@ -725,6 +753,10 @@ class TaskOrchestrator:
                                 f"{fail_threshold:.2f}) — action already performed; "
                                 f"accepting and letting the next step verify live"
                             )
+                            # The "next step verifies live" guarantee requires a
+                            # fresh plan against the live screen — drop any steps
+                            # planned before this uncertain outcome.
+                            _step_queue = []
                             step_success = True
                             break
                         # Idempotent action (click / scroll): safe to repeat, and a
@@ -872,6 +904,9 @@ class TaskOrchestrator:
                     if last_error else f"[FAILED] {step.description}"
                 )
                 completed.append(note)
+                # The rest of the queued plan was built on this step succeeding —
+                # flush it so the next iteration re-plans from the live screen.
+                _step_queue = []
 
                 # Even on step failure, check if the goal process is now running.
                 # This handles the common case where key_press enter launches an app
@@ -1267,6 +1302,32 @@ class TaskOrchestrator:
         except OSError:
             return False
 
+    def _typed_text_in_focused_control(self, text: str | None) -> bool:
+        """Deterministic type verification: the focused control's accessible
+        value contains the text that was just typed.
+
+        Reads the real widget content from the accessibility tree — exact and
+        ~50 ms, versus the ~3-4 s OCR+LLM reflection call it replaces. Returns
+        False (fall back to reflection) when the text is trivial, contains a
+        credential placeholder (substituted at execution time, and secrets must
+        not be read back), or the control exposes no readable value.
+        """
+        if not text or len(text.strip()) < 2 or "{{cred:" in text:
+            return False
+        try:
+            from core import windows_uia
+            info = windows_uia.focused_element_info()
+            value = (info or {}).get("value") or ""
+            if not value:
+                return False
+
+            def _norm(s: str) -> str:
+                return re.sub(r"\s+", " ", s).strip().lower()
+
+            return _norm(text) in _norm(value)
+        except Exception:
+            return False
+
     def _click_holds_focus(self, step: ActionStep) -> bool:
         """True when the clicked point lies inside the control that owns
         keyboard focus and that control accepts text input.
@@ -1303,6 +1364,17 @@ class TaskOrchestrator:
         path — so we never type a path into the document body of an already-named
         file that ctrl+s saved silently.
         """
+        # Accessibility tree first — exact control names straight from the
+        # dialog, immune to OCR misreading small labels on a downscaled
+        # screenshot (which made this check miss an open dialog entirely).
+        try:
+            from core import windows_uia
+            verdict = windows_uia.save_dialog_open()
+            if verdict is not None:
+                return verdict
+        except Exception:
+            pass
+        # OCR fallback — UIA unavailable or timed out.
         try:
             img = self.capturer.capture()
             img.thumbnail((960, 540))
