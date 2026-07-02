@@ -199,14 +199,16 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
         except Exception:
             interactive = []
 
+    from core.capture.screenshot import OCR_THUMB
+
     img = capturer.capture()
     thumb = img.copy()
-    thumb.thumbnail((960, 540))
+    thumb.thumbnail(OCR_THUMB)
     screen_hash = str(imagehash.phash(thumb))
 
     words: list[OCRWord] = ocr.extract(thumb) if ocr.is_available() else []
 
-    # OCR ran on the 960×540 thumbnail; scale word coords back to full-screen pixels
+    # OCR ran on the OCR_THUMB thumbnail; scale word coords back to full-screen pixels
     scale_x = img.width / thumb.width if thumb.width > 0 else 1.0
     scale_y = img.height / thumb.height if thumb.height > 0 else 1.0
 

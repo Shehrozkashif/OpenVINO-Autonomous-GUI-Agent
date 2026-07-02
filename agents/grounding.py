@@ -22,7 +22,7 @@ import numpy as np
 from loguru import logger
 from PIL import Image
 
-from core.capture.screenshot import ScreenCapture, _screen_size
+from core.capture.screenshot import OCR_THUMB, ScreenCapture, _screen_size
 from core.protocols import InferenceClient
 from core.windows_uia import find_element as _uia_find
 from core.windows_uia import is_available as _uia_ok
@@ -286,8 +286,10 @@ class UIGroundingAgent:
     Accepts any client that implements InferenceClient (OVMSClient, etc.).
     """
 
-    _DISPLAY_W = 960   # must match capture_snapshot() thumbnail size so OCR cache entries are shared
-    _DISPLAY_H = 540   # and element_type tags set by capture_snapshot() flow into grounding
+    # Must match every other OCR pass (OCR_THUMB) so cache entries are shared
+    # and element_type tags set by capture_snapshot() flow into grounding.
+    _DISPLAY_W = OCR_THUMB[0]
+    _DISPLAY_H = OCR_THUMB[1]
 
     def __init__(
         self,
@@ -333,7 +335,7 @@ class UIGroundingAgent:
             x, y, conf, method, element_type = cached
             # Canonical "[GROUNDING] '…' → (x,y) conf=… method=…" format — the
             # UI event bus parses these lines (ui/events.py _RX_LOCATED).
-            logger.info(f"[GROUNDING] '{target}' → ({x},{y}) "
+            logger.info(f"[GROUNDING] '{target}' -> ({x},{y}) "
                         f"conf={conf:.2f} method=cache/{method}")
             return GroundingResult(x=x, y=y, confidence=conf, found=True,
                                    latency_ms=(time.time() - start) * 1000,
@@ -355,7 +357,7 @@ class UIGroundingAgent:
                 y = max(0, min(y, self.screen_h - 1))
                 self.cache.put(target, x, y, conf, method, screen_hash, element_type)
                 logger.info(
-                    f"[GROUNDING] '{target}' → ({x},{y}) conf={conf:.2f} "
+                    f"[GROUNDING] '{target}' -> ({x},{y}) conf={conf:.2f} "
                     f"method={method} attempt={attempt+1} "
                     f"latency={1000*(time.time()-start):.0f}ms"
                 )
@@ -378,7 +380,7 @@ class UIGroundingAgent:
                 x = max(0, min(x, self.screen_w - 1))
                 y = max(0, min(y, self.screen_h - 1))
                 self.cache.put(target, x, y, conf, f"rephrase/{method}", screen_hash, element_type)
-                logger.info(f"[GROUNDING] '{target}' → ({x},{y}) "
+                logger.info(f"[GROUNDING] '{target}' -> ({x},{y}) "
                             f"conf={conf:.2f} method=rephrase/{method} "
                             f"(as '{alt}')")
                 return GroundingResult(x=x, y=y, confidence=conf,
@@ -542,6 +544,15 @@ class UIGroundingAgent:
         dw = display_w if display_w > 1 else screen_w
         dh = display_h if display_h > 1 else screen_h
 
+        # Coordinate convention of the served model. "auto" keeps the value-range
+        # heuristics below; pin to "pixels" or "norm1000" in config.py (calibrate
+        # once with tests/live/test_vlm_coordinates.py) for deterministic parsing.
+        try:
+            import config as _cfg
+            _mode = str(getattr(_cfg, "VLM_COORD_SPACE", "auto")).lower()
+        except Exception:
+            _mode = "auto"
+
         def _px_to_screen(px: float, py: float) -> tuple[int, int]:
             """Scale display-space pixels to screen pixels, clamped to screen bounds."""
             return (
@@ -562,10 +573,15 @@ class UIGroundingAgent:
         def _scale_box_coord(val: float, screen_dim: int, display_dim: int) -> int:
             """Convert a VLM coordinate to screen pixels.
 
-            If val > 1000 it must be a display-space pixel, not 0-1000.
-            If display_dim is available and val fits within it, treat as pixel.
-            Otherwise fall back to 0-1000 normalised interpretation.
+            A pinned mode ("pixels" / "norm1000") is applied deterministically.
+            In "auto": if val > 1000 it must be a display-space pixel, not
+            0-1000; if display_dim is available and val fits within it, treat
+            as pixel; otherwise fall back to 0-1000 normalised interpretation.
             """
+            if _mode == "pixels" and display_dim > 1:
+                return min(int(val / display_dim * screen_dim), screen_dim - 1)
+            if _mode == "norm1000" and val <= 1000:
+                return min(int(val / 1000 * screen_dim), screen_dim - 1)
             if val > 1000:
                 return _px_to_screen(val, 0)[0] if screen_dim == screen_w else _px_to_screen(0, val)[1]
             if display_dim > 1 and val <= display_dim:
@@ -615,6 +631,9 @@ class UIGroundingAgent:
                 if 0.0 <= xv <= 1.0 and 0.0 <= yv <= 1.0:
                     # Normalised 0-1 — most accurate
                     return (int(xv * screen_w), int(yv * screen_h), conf)
+                if _mode in ("pixels", "norm1000"):
+                    return (_scale_box_coord(xv, screen_w, dw),
+                            _scale_box_coord(yv, screen_h, dh), conf)
                 if 1.0 < xv <= 1000 and 1.0 < yv <= 1000:
                     # UI-TARS native 0-1000 scale — treat as normalised/1000
                     return (int(xv / 1000 * screen_w), int(yv / 1000 * screen_h), conf)
@@ -642,6 +661,9 @@ class UIGroundingAgent:
             px, py = float(m.group(1)), float(m.group(2))
             if px <= 1.0 and py <= 1.0:
                 return (int(px * screen_w), int(py * screen_h), 0.85)
+            if _mode in ("pixels", "norm1000"):
+                return (_scale_box_coord(px, screen_w, dw),
+                        _scale_box_coord(py, screen_h, dh), 0.85)
             if px <= 1000 and py <= 1000:
                 # Could be 0-1000 normalised or small-display pixels; treat as 0-1000.
                 return (int(px / 1000 * screen_w), int(py / 1000 * screen_h), 0.85)
@@ -658,6 +680,9 @@ class UIGroundingAgent:
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
             if cx <= 1.0 and cy <= 1.0:
                 return (int(cx * screen_w), int(cy * screen_h), 0.85)
+            if _mode in ("pixels", "norm1000"):
+                return (_scale_box_coord(cx, screen_w, dw),
+                        _scale_box_coord(cy, screen_h, dh), 0.85)
             if cx <= 1000 and cy <= 1000:
                 return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.85)
             sx, sy = _px_to_screen(cx, cy)

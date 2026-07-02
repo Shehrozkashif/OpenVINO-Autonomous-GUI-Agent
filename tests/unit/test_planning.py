@@ -493,7 +493,7 @@ def _make_orch(plan_steps, reflections, visual_replan_after=2):
         target="Btn", element_type="foreground_interactive"))
 
     planner = MagicMock()
-    planner.plan_next_step = MagicMock(side_effect=list(plan_steps) + [None] * 10)
+    planner.plan_steps = MagicMock(side_effect=[[s] for s in plan_steps] + [None] * 10)
 
     memory = MagicMock()
     memory.get_failure_hints = MagicMock(return_value=[])
@@ -575,7 +575,7 @@ class TestVisualReplanEscalation:
 
         assert result is True
         # Text planner was used for the step after the VLM error
-        assert orch.planner.plan_next_step.call_count >= 3
+        assert orch.planner.plan_steps.call_count >= 3
 
 
 class TestPlannerParseErrorInOrchestrator:
@@ -583,7 +583,7 @@ class TestPlannerParseErrorInOrchestrator:
     def test_parse_error_is_failure_not_goal_achieved(self):
         """PlanningParseError on every call → subtask FAILS (old code returned True)."""
         orch = _make_orch(plan_steps=[], reflections=[])
-        orch.planner.plan_next_step = MagicMock(
+        orch.planner.plan_steps = MagicMock(
             side_effect=PlanningParseError("unparseable"))
         # keep visual replan out of the way for this test
         orch.config.visual_replan_after = 0

@@ -4,6 +4,37 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+# ── DPI awareness ─────────────────────────────────────────────────────────────
+
+def enable_dpi_awareness() -> None:
+    """Make this process DPI-aware so every coordinate space agrees.
+
+    Without this, on displays scaled above 100% Windows virtualizes coordinates
+    for the process: UIA reports physical pixels while SetCursorPos and GDI
+    screenshots use scaled logical pixels — every grounded click lands off by
+    the scale factor. Declaring Per-Monitor-V2 awareness (with graceful
+    fallbacks for older Windows) puts screenshots, UIA rectangles, and injected
+    mouse input in one physical-pixel space at ANY display scale.
+    Must run before the first capture or Qt initialisation. No-op off Windows.
+    """
+    try:
+        import ctypes
+        try:
+            # Per-Monitor V2 (Windows 10 1703+): -4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+            if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                return
+        except Exception:
+            pass
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor (Win 8.1+)
+            return
+        except Exception:
+            pass
+        ctypes.windll.user32.SetProcessDPIAware()            # system-aware (Vista+)
+    except Exception:
+        pass   # non-Windows or restricted environment — nothing to do
+
+
 # ── Firefox ───────────────────────────────────────────────────────────────────
 
 def detect_firefox() -> str:

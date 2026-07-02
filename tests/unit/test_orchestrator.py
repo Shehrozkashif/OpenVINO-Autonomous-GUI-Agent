@@ -229,7 +229,7 @@ class TestExecuteSubtaskUsesBurstField:
 
     def test_subtask_with_burst_runs_burst_not_planning_loop(self):
         """When subtask.burst is set, _execute_subtask must use the burst executor
-        and NOT call planner.plan_next_step.
+        and NOT call planner.plan_steps.
         """
         orch = self._make_subtask_orch()
         burst = _fake_burst()
@@ -242,7 +242,7 @@ class TestExecuteSubtaskUsesBurstField:
 
         assert result is True
         mock_burst_run.assert_called_once_with(burst)
-        orch.planner.plan_next_step.assert_not_called()
+        orch.planner.plan_steps.assert_not_called()
 
     def test_subtask_without_burst_falls_back_to_planning_loop(self):
         """When subtask.burst is None and detect_burst returns None,
@@ -256,13 +256,13 @@ class TestExecuteSubtaskUsesBurstField:
             target=None, value=None, key="escape",
             description="Press Escape", verification="dialog dismissed",
         )
-        orch.planner.plan_next_step = MagicMock(side_effect=[step, None])
+        orch.planner.plan_steps = MagicMock(side_effect=[[step], None])
 
         with patch("core.orchestrator.detect_burst", return_value=None):
             result = orch._execute_subtask(subtask)
 
         assert result is True
-        orch.planner.plan_next_step.assert_called()
+        orch.planner.plan_steps.assert_called()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -419,7 +419,7 @@ class TestSubtaskIntegration:
             ocr_text="")
 
         orch = _make_orch_cmd()
-        orch.planner.plan_next_step = MagicMock(side_effect=[type_step, enter_step, None])
+        orch.planner.plan_steps = MagicMock(side_effect=[[type_step], [enter_step], None])
         orch.reflector.verify = MagicMock(return_value=ok_reflect)
 
         # Simulate the Enter actually creating the file
@@ -501,8 +501,8 @@ class TestSaveSubtaskIntegration:
         orch = _make_orch_cmd()
         # Plenty of ctrl+s steps queued — the save-check must short-circuit
         # before they are all consumed.
-        orch.planner.plan_next_step = MagicMock(
-            side_effect=[ctrls, enter, ctrls, ctrls, ctrls])
+        orch.planner.plan_steps = MagicMock(
+            side_effect=[[ctrls], [enter], [ctrls], [ctrls], [ctrls]])
         orch.reflector.verify = MagicMock(return_value=ok_reflect)
 
         def _exec(step, **kw):
@@ -517,7 +517,7 @@ class TestSaveSubtaskIntegration:
         assert result is True
         assert f.exists()
         # Confirmed shortly after the save — no long ctrl+s loop.
-        assert orch.planner.plan_next_step.call_count <= 3
+        assert orch.planner.plan_steps.call_count <= 3
 
 
 class TestDeterministicSaveAs:
@@ -599,7 +599,7 @@ class TestDeterministicSaveAs:
 
         assert result is True
         orch._try_save_as.assert_called_once()
-        orch.planner.plan_next_step.assert_not_called()
+        orch.planner.plan_steps.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -634,7 +634,7 @@ def _make_orch_idem(plan_steps, reflection):
         target="x", element_type="foreground_interactive"))
 
     planner = MagicMock()
-    planner.plan_next_step = MagicMock(side_effect=list(plan_steps) + [None] * 10)
+    planner.plan_steps = MagicMock(side_effect=[[s] for s in plan_steps] + [None] * 10)
 
     memory = MagicMock()
     memory.get_failure_hints = MagicMock(return_value=[])
@@ -741,7 +741,7 @@ def _make_orch_loop(plan_steps):
     )
 
     planner = MagicMock()
-    planner.plan_next_step = MagicMock(side_effect=list(plan_steps) + [None])
+    planner.plan_steps = MagicMock(side_effect=[[s] for s in plan_steps] + [None])
 
     memory = MagicMock()
     memory.get_failure_hints = MagicMock(return_value=[])
@@ -797,7 +797,7 @@ class TestTypeDedupLimit:
         orch = _make_orch_loop([ts, ts, ds])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 4  # all 3 steps + None
+        assert orch.planner.plan_steps.call_count == 4  # all 3 steps + None
 
     def test_type_appears_three_times_triggers(self):
         """type_step × 3 → streak reaches 2 (2 > 1) → loop guard fires after step 3.
@@ -807,7 +807,7 @@ class TestTypeDedupLimit:
         orch = _make_orch_loop([ts, ts, ts])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 3
+        assert orch.planner.plan_steps.call_count == 3
 
     def test_type_trigger_returns_true(self):
         """Loop guard always returns True (declares goal achieved, not failure)."""
@@ -831,7 +831,7 @@ class TestClickDedupLimit:
         orch = _make_orch_loop([cs, cs, cs, ds])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 5
+        assert orch.planner.plan_steps.call_count == 5
 
     def test_click_appears_four_times_triggers(self):
         """Click × 4 → streak = 3 (3 > 2) → loop guard fires after step 4.
@@ -841,7 +841,7 @@ class TestClickDedupLimit:
         orch = _make_orch_loop([cs, cs, cs, cs])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 4
+        assert orch.planner.plan_steps.call_count == 4
 
     def test_click_trigger_injects_escape(self):
         """When the click loop guard fires, actor.execute must be called with an
@@ -866,14 +866,14 @@ class TestRightClickDedupLimit:
         orch = _make_orch_loop([rc, rc, ds])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 4
+        assert orch.planner.plan_steps.call_count == 4
 
     def test_right_click_appears_three_times_triggers(self):
         rc = _step_loop("right_click", target="Desktop")
         orch = _make_orch_loop([rc, rc, rc])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 3
+        assert orch.planner.plan_steps.call_count == 3
 
     def test_right_click_trigger_injects_escape(self):
         rc = _step_loop("right_click", target="Desktop")
@@ -901,7 +901,7 @@ class TestStreakReset:
         orch = _make_orch_loop([ts, ts, cs, ts, ts])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 6
+        assert orch.planner.plan_steps.call_count == 6
 
     def test_click_streak_resets_after_type(self):
         """Click × 3 → streak = 2 (at limit, NOT triggered).
@@ -913,7 +913,7 @@ class TestStreakReset:
         orch = _make_orch_loop([cs, cs, cs, ts, cs, cs, cs])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 8  # 7 steps + None
+        assert orch.planner.plan_steps.call_count == 8  # 7 steps + None
 
     def test_different_target_same_type_resets_streak(self):
         """Two clicks on the same target, then a click on a different target,
@@ -925,7 +925,7 @@ class TestStreakReset:
         orch = _make_orch_loop([ca, ca, cb, ca, ca])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 6
+        assert orch.planner.plan_steps.call_count == 6
 
     def test_only_type_no_escape_on_trigger(self):
         """Type loop guard does NOT inject Escape (only click/right_click do)."""
@@ -985,7 +985,7 @@ class TestPreExistingAppNote:
              patch.object(orch, "_count_process_windows", return_value=1):
             orch._execute_subtask(_sub_nwl("open windows terminal"))
 
-        ctx = orch.planner.plan_next_step.call_args.kwargs.get("task_context")
+        ctx = orch.planner.plan_steps.call_args.kwargs.get("task_context")
         assert ctx, "task_context must be passed to the planner"
         joined = " ".join(ctx)
         assert "ALREADY running" in joined
@@ -999,7 +999,7 @@ class TestPreExistingAppNote:
              patch.object(orch, "_count_process_windows", return_value=0):
             orch._execute_subtask(_sub_nwl("open windows terminal"))
 
-        ctx = orch.planner.plan_next_step.call_args.kwargs.get("task_context")
+        ctx = orch.planner.plan_steps.call_args.kwargs.get("task_context")
         assert not ctx or "ALREADY running" not in " ".join(ctx)
         assert "WindowsTerminal.exe" not in orch._launch_window_baseline
 
@@ -1079,7 +1079,7 @@ class TestLoopGuardCommandSubtask:
         orch.config.max_retries_per_step = 1
         orch.config.consecutive_failures_limit = 10
         orch.config.visual_replan_after = 0
-        orch.planner.plan_next_step = MagicMock(return_value=enter)
+        orch.planner.plan_steps = MagicMock(return_value=[enter])
         # First execution fails, then the identical step "succeeds" repeatedly
         # until the loop guard fires (key_press dedup limit = 3).
         orch.reflector.verify = MagicMock(side_effect=[fail] + [ok] * 10)
@@ -1113,7 +1113,7 @@ class TestGoalCheckWithBaseline:
                               recovery_hint="", ocr_text="")
 
         orch = _make_orch_nwl()
-        orch.planner.plan_next_step = MagicMock(side_effect=[click, None])
+        orch.planner.plan_steps = MagicMock(side_effect=[[click], None])
         orch.reflector.verify = MagicMock(return_value=ok)
         orch.grounder.ground = MagicMock(return_value=GroundingResult(
             found=True, confidence=0.9, x=1, y=2, latency_ms=1.0,
@@ -1128,7 +1128,7 @@ class TestGoalCheckWithBaseline:
         # after the first step (count never rose above baseline), so the planner
         # must have been called a second time.
         assert result is True
-        assert orch.planner.plan_next_step.call_count == 2
+        assert orch.planner.plan_steps.call_count == 2
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1343,3 +1343,90 @@ class TestVerifyLaunchForegroundOCR:
             result = orch._verify_launch(_sub_vl("launch libreoffice"))
             # "LibreOffice" is only in background → not confirmed → False
             assert result is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Plan queue — plan_steps() returns the whole remaining sequence in ONE LLM
+# call; the orchestrator executes it from a queue (no per-step planning call)
+# and flushes the queue whenever a step fails or its outcome is uncertain, so
+# the next step is always planned against the live screen.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_FAILED_CLEAR = ReflectionResult(
+    success=False, confidence=0.9, observation="wrong outcome",
+    error_description="did not produce expected result", should_retry=False,
+    recovery_hint="", ocr_text="",
+)
+
+
+class TestPlanQueue:
+
+    def test_batch_executes_without_replanning(self):
+        """A 3-step batch runs on ONE planning call plus one goal-check call."""
+        a = _step_loop("click", target="A")
+        b = _step_loop("key_press", target=None, key="enter")
+        c = _step_loop("type", target=None, value="hello")
+        orch = _make_orch_loop([])
+        orch.planner.plan_steps = MagicMock(side_effect=[[a, b, c], None])
+        assert orch._execute_subtask(_subtask_loop()) is True
+        assert orch.planner.plan_steps.call_count == 2
+        assert orch.actor.execute.call_count == 3
+
+    def test_queue_flushed_on_step_failure(self):
+        """A confident failure drops the queued remainder and re-plans live."""
+        a = _step_loop("click", target="A")
+        b = _step_loop("key_press", target=None, key="enter")
+        recovery = _step_loop("click", target="B")
+        orch = _make_orch_loop([])
+        orch.planner.plan_steps = MagicMock(
+            side_effect=[[a, b], [recovery], None])
+        orch.reflector.verify = MagicMock(
+            side_effect=[_FAILED_CLEAR, _SUCCESS])
+        assert orch._execute_subtask(_subtask_loop()) is True
+        # b was queued behind the failed a and must never execute
+        assert orch.actor.execute.call_count == 2
+        assert orch.planner.plan_steps.call_count == 3
+
+    def test_queue_flushed_on_uncertain_nonidempotent(self):
+        """An uncertain-but-accepted type drops the queue: the 'next step
+        verifies live' guarantee requires a fresh plan."""
+        t = _step_loop("type", target=None, value="hello world")
+        b = _step_loop("key_press", target=None, key="enter")
+        orch = _make_orch_loop([])
+        orch.planner.plan_steps = MagicMock(side_effect=[[t, b], None])
+        orch.reflector.verify = MagicMock(return_value=_UNCERTAIN)
+        assert orch._execute_subtask(_subtask_loop()) is True
+        # only the type step ran; enter was dropped with the stale queue
+        assert orch.actor.execute.call_count == 1
+        assert orch.planner.plan_steps.call_count == 2
+
+
+class TestSaveTargetDiskGate:
+    """A "save as <path>" subtask has one ground truth: the file on disk.
+    The planner's "goal achieved" must never overrule its absence."""
+
+    def _save_subtask(self):
+        return SubTask(
+            id=3, depends_on=[],
+            description="save the document as C:/Users/x/Desktop/a.txt",
+        )
+
+    def test_planner_done_rejected_when_file_missing(self):
+        orch = _make_orch_loop([])
+        orch.planner.plan_steps = MagicMock(return_value=None)
+        orch._try_burst = MagicMock(return_value=False)
+        orch._try_save_as = MagicMock(return_value=False)
+        orch._file_saved_fresh = MagicMock(return_value=False)
+        orch.config.visual_replan_after = 0
+        assert orch._execute_subtask(self._save_subtask()) is False
+        # every "done" claim was rejected until the failure limit tripped
+        assert (orch.planner.plan_steps.call_count
+                == orch.config.consecutive_failures_limit)
+
+    def test_file_on_disk_short_circuits_before_planning(self):
+        orch = _make_orch_loop([])
+        orch.planner.plan_steps = MagicMock(return_value=None)
+        orch._try_save_as = MagicMock(return_value=False)
+        orch._file_saved_fresh = MagicMock(return_value=True)
+        assert orch._execute_subtask(self._save_subtask()) is True
+        orch.planner.plan_steps.assert_not_called()

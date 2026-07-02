@@ -523,7 +523,7 @@ def _make_orchestrator(reflection_results: list, step_override: ActionStep = Non
     # Return the step on the first planning call, then None.
     # With consecutive_failures_limit=1 the subtask aborts after the first
     # failing step — the None is never reached in failure-path tests.
-    planner.plan_next_step = MagicMock(side_effect=[step, None])
+    planner.plan_steps = MagicMock(side_effect=[[step], None])
 
     capturer = MagicMock()
     memory = MagicMock()

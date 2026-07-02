@@ -553,8 +553,31 @@ class PlanningAgent:
         failure_hints: list[str] = None,
         snapshot=None,   # Optional[ScreenSnapshot] — when provided overrides screen_context
     ) -> ActionStep | None:
-        """Dynamic planning: return the ONE next action step toward the subtask goal.
+        """Compatibility wrapper around plan_steps(): first remaining step or None."""
+        steps = self.plan_steps(
+            subtask, screen_context, completed,
+            task_context=task_context, failure_hints=failure_hints,
+            snapshot=snapshot,
+        )
+        return steps[0] if steps else None
+
+    def plan_steps(
+        self,
+        subtask: SubTask,
+        screen_context: str = None,
+        completed: list[str] = None,
+        task_context: list[str] = None,
+        failure_hints: list[str] = None,
+        snapshot=None,   # Optional[ScreenSnapshot] — when provided overrides screen_context
+    ) -> list[ActionStep] | None:
+        """Dynamic planning: return ALL remaining action steps toward the subtask goal.
         Returns None when the goal is already achieved (planner returns empty array).
+
+        One LLM call plans the whole remaining sequence; the orchestrator executes
+        it step by step and re-plans (a fresh call, live screen) only when a step
+        fails or its outcome is uncertain. This is the main latency lever: the
+        planning call is ~7-10 s on the target hardware, so paying it once per
+        sequence instead of once per step cuts most of the per-step cost.
 
         task_context:   descriptions of subtasks already completed in this overall task.
         failure_hints:  known-bad target/action patterns from episodic failure memory.
@@ -597,7 +620,10 @@ class PlanningAgent:
             user_content += f"\nText currently visible on screen: {screen_context}"
 
         user_content += (
-            "\n\nReturn the NEXT SINGLE action step needed to achieve the goal.\n"
+            "\n\nReturn ALL remaining action steps, in order, needed to achieve "
+            "the goal. The steps run in sequence exactly as given; the system "
+            "re-plans automatically if one fails, so do NOT add contingency or "
+            "just-in-case steps.\n"
             "Return [] ONLY when the goal is DEFINITIVELY complete:\n"
             "  • ‘open terminal / Windows Terminal’: a shell prompt is visible "
             "(text like ‘PS’, ‘C:\\>’, ‘$’, or a username prompt) = goal achieved.\n"
@@ -613,6 +639,10 @@ class PlanningAgent:
             "  • ‘type X and press enter’ (rename/create dialog): step 1 = type X; "
             "step 2 = key_press enter; step 3 = [] (done). "
             "Do NOT type X again after it already appears in history — go straight to enter.\n"
+            "  • ‘type/write <text>’ (document/editor): once the text has been typed "
+            "(a type step is in history) = goal achieved → return []. "
+            "Do NOT type it again, and do NOT add save/close/extra steps the goal "
+            "does not mention — those belong to LATER subtasks.\n"
             "CAUTION: An app name appearing in text does NOT mean the app is open — "
             "it may be from the task description shown in the GUI agent’s own log window, "
             "or a search result. Only return [] when the app’s active running content "
@@ -655,23 +685,30 @@ class PlanningAgent:
             logger.info("[PLANNING] Goal achieved — no more steps needed")
             return None
 
-        step = steps[0]
-
         # Deterministic right_click override — the LLM occasionally outputs "click"
         # even when the subtask description clearly says "right click".
         _sub_lower = subtask.description.lower()
-        if step.action_type == "click" and (
+        _wants_right_click = (
             _sub_lower.startswith("right click")
             or "right click on" in _sub_lower
             or _sub_lower.startswith("right-click")
             or "right-click on" in _sub_lower
-        ):
-            step.action_type = "right_click"
-            logger.info("[PLANNING] Overrode action_type to right_click (subtask says 'right click')")
+        )
+        _base_id = len(completed or []) + 1
+        for i, step in enumerate(steps):
+            step.id = _base_id + i
+            if _wants_right_click and step.action_type == "click":
+                step.action_type = "right_click"
+                logger.info(
+                    "[PLANNING] Overrode action_type to right_click "
+                    "(subtask says 'right click')"
+                )
 
-        step.id = len(completed or []) + 1
-        logger.info(f"[PLANNING] Next: [{step.action_type}] {step.description}")
-        return step
+        _queued = f" (+{len(steps) - 1} queued)" if len(steps) > 1 else ""
+        logger.info(
+            f"[PLANNING] Next: [{steps[0].action_type}] {steps[0].description}{_queued}"
+        )
+        return steps
 
     def _parse_steps(self, text: str, subtask_id: int) -> list[ActionStep]:
         if "</think>" in text:

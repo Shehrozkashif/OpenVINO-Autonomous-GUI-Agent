@@ -63,7 +63,7 @@ class MissionHUD(QWidget):
         col.setSpacing(2)
         top = QHBoxLayout()
         top.setSpacing(8)
-        self.state_label = QLabel("Working…")
+        self.state_label = QLabel("Working...")
         self.state_label.setStyleSheet(
             f"color: {C.TEXT}; font-size: 14px; font-weight: 700;")
         top.addWidget(self.state_label)
@@ -100,12 +100,12 @@ class MissionHUD(QWidget):
     # ── Mission lifecycle ─────────────────────────────────────────────────────
 
     def attach_capturer(self, capturer):
-        """Shared ScreenCapture used by the pipeline — for HUD self-masking."""
+        """Shared ScreenCapture used by the pipeline - for HUD self-masking."""
         self._capturer = capturer
 
     def show_mission(self):
         self._t0 = time.time()
-        self.detail.setText("Starting…")
+        self.detail.setText("Starting...")
         self._place_bottom_right()
         self.show()
         self._timer.start()

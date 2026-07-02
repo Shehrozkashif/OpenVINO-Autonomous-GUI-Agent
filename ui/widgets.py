@@ -381,7 +381,7 @@ class MetricTile(GlassCard):
         top.addStretch()
         top.addWidget(ic)
         lay.addLayout(top)
-        self.value_label = QLabel("—")
+        self.value_label = QLabel("-")
         self.value_label.setProperty("role", "metric")
         lay.addWidget(self.value_label)
 
@@ -392,7 +392,7 @@ class MetricTile(GlassCard):
 # ── Confidence bar ────────────────────────────────────────────────────────────
 
 class ConfidenceBar(QWidget):
-    """Thin animated bar; color follows the value (red→amber→cyan→green)."""
+    """Thin animated bar; color follows the value (red->amber->cyan->green)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -587,7 +587,7 @@ class TimelineStep(QFrame):
 
 
 class TimelineGuard(QFrame):
-    """Inline system event (firewall, vision escalation, goal check…)."""
+    """Inline system event (firewall, vision escalation, goal check...)."""
 
     KIND_STYLE = {
         "FIREWALL": (C.DANGER, "shield"),
@@ -606,7 +606,7 @@ class TimelineGuard(QFrame):
         ic = QLabel()
         ic.setPixmap(icon_pixmap(icon, QColor(color), 13))
         lay.addWidget(ic)
-        txt = QLabel(f"{kind} · {message}")
+        txt = QLabel(f"{kind} | {message}")
         txt.setWordWrap(True)
         txt.setStyleSheet(f"color: {color}; font-size: 11px;")
         lay.addWidget(txt, stretch=1)
@@ -801,7 +801,7 @@ class ScreenPreview(QWidget):
         else:
             p.setPen(QColor(C.TEXT_FAINT))
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter,
-                       "Awaiting first frame…")
+                       "Awaiting first frame...")
 
         if self._active:
             # vertical scan sweep
@@ -888,7 +888,7 @@ class ScreenPreview(QWidget):
             f.setWeight(QFont.Weight.Bold)
             p.setFont(f)
             fm = p.fontMetrics()
-            text = f"{label} · {conf:.0%}"
+            text = f"{label} | {conf:.0%}"
             tw = min(fm.horizontalAdvance(text) + 20, frame.width() - 8)
             cx_chip = max(frame.left() + 4,
                           min(cx - tw / 2, frame.right() - tw - 4))
@@ -909,14 +909,14 @@ class ScreenPreview(QWidget):
 # ── Command dock ──────────────────────────────────────────────────────────────
 
 class CommandInput(QPlainTextEdit):
-    """Auto-growing input (1–4 lines). Enter submits, Shift+Enter = newline."""
+    """Auto-growing input (1-4 lines). Enter submits, Shift+Enter = newline."""
 
     submitted = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setPlaceholderText(
-            "Tell the agent what to do…   e.g. “Open Notepad and write a haiku”")
+            "Tell the agent what to do...   e.g. 'Open Notepad and write a haiku'")
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTabChangesFocus(True)
         self.document().documentLayout().documentSizeChanged.connect(
@@ -937,7 +937,7 @@ class CommandInput(QPlainTextEdit):
 
 
 class CommandDock(GlassCard):
-    """Persistent operator bar: orb · input · stop · run."""
+    """Persistent operator bar: orb | input | stop | run."""
 
     run_requested = pyqtSignal()
     stop_requested = pyqtSignal()

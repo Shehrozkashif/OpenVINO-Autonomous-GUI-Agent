@@ -46,3 +46,12 @@ KV_CACHE_SIZE_GB = 2
 # Local directory OVMS uses as its model repository (holds the IR models and the
 # generated config.json). Relative to the project root.
 MODEL_REPOSITORY_PATH = "models"
+
+# ── Grounding ───────────────────────────────────────────────────────────────────
+# Coordinate convention of the served UI-TARS build. The prompt asks for the
+# native 0-1000 scale, but INT4 conversions sometimes emit raw pixels of the
+# input image instead — and values ≤ 1000 fit both readings, so "auto" has to
+# guess (heuristic in grounding._parse_coords). To make parsing deterministic:
+# run tests/live/test_vlm_coordinates.py on the target machine once, see which
+# convention the model actually uses, and pin this to "norm1000" or "pixels".
+VLM_COORD_SPACE = "auto"   # "auto" | "norm1000" | "pixels"

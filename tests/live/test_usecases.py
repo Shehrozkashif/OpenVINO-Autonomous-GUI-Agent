@@ -100,11 +100,11 @@ class LiveUseCaseTester:
         """Attach lightweight timing wrappers. Returns a stats dict (reset each call)."""
         stats = {"burst": False, "plan": 0, "ground": 0, "reflect": 0}
 
-        _orig_plan = self.orch.planner.plan_next_step
+        _orig_plan = self.orch.planner.plan_steps
         def _p(*a, **kw):
             stats["plan"] += 1
             return _orig_plan(*a, **kw)
-        self.orch.planner.plan_next_step = _p
+        self.orch.planner.plan_steps = _p
 
         _orig_ground = self.orch.grounder.ground
         def _g(*a, **kw):

@@ -112,6 +112,44 @@ def _get_cursor_pos() -> tuple:
     return pt.x, pt.y
 
 
+# ── Cursor glide ──────────────────────────────────────────────────────────────
+# Purely cosmetic: the physical cursor moves along a smooth eased path instead
+# of teleporting, so a human watching (or a demo recording) can follow the
+# agent's actions. The agent's own perception is unaffected — GDI screenshots
+# do not include the cursor — and coordinates/action policy are unchanged.
+
+_GLIDE_MIN_S = 0.08        # short hops still read as motion
+_GLIDE_MAX_S = 0.30        # cap so long moves never slow the pipeline
+_GLIDE_SPEED_PX_S = 3500   # duration = distance / speed, clamped to the above
+
+
+def _glide_cursor(x: int, y: int) -> None:
+    """Move the cursor to (x, y) along a smoothstep-eased path."""
+    try:
+        sx, sy = _get_cursor_pos()
+    except Exception:
+        _set_cursor_pos(x, y)   # cursor state unreadable — jump as before
+        return
+    dist = ((x - sx) ** 2 + (y - sy) ** 2) ** 0.5
+    if dist < 4:
+        _set_cursor_pos(x, y)
+        return
+    dur = max(_GLIDE_MIN_S, min(_GLIDE_MAX_S, dist / _GLIDE_SPEED_PX_S))
+    steps = max(2, int(dur / 0.01))
+    for i in range(1, steps):
+        t = i / steps
+        e = t * t * (3.0 - 2.0 * t)   # smoothstep ease-in/out
+        wx = round(sx + (x - sx) * e)
+        wy = round(sy + (y - sy) * e)
+        # A WAYPOINT must never enter the kill-switch corner (x<=2, y<=2);
+        # only a deliberate final target may land there.
+        if wx <= 2 and wy <= 2:
+            wx = 3
+        _set_cursor_pos(wx, wy)
+        time.sleep(dur / steps)
+    _set_cursor_pos(x, y)
+
+
 # ── Key name table (Windows virtual-key codes) ────────────────────────────────
 
 _VK_MAP: dict = {
@@ -240,7 +278,7 @@ class DesktopController:
         x, y = int(x), int(y)
         down = _MOUSE_DOWN_FLAG.get(button, _MOUSEEVENTF_LEFTDOWN)
         up = _MOUSE_UP_FLAG.get(button, _MOUSEEVENTF_LEFTUP)
-        _set_cursor_pos(x, y)
+        _glide_cursor(x, y)
         time.sleep(0.12)
         _mouse_event(down)
         time.sleep(0.08)
@@ -254,7 +292,7 @@ class DesktopController:
 
     def double_click(self, x: int, y: int) -> bool:
         x, y = int(x), int(y)
-        _set_cursor_pos(x, y)
+        _glide_cursor(x, y)
         time.sleep(0.12)
         _mouse_event(_MOUSEEVENTF_LEFTDOWN)
         time.sleep(0.08)
@@ -306,7 +344,7 @@ class DesktopController:
 
     def scroll(self, x: int, y: int, clicks: int = 5, direction: str = "down") -> bool:
         x, y = int(x), int(y)
-        _set_cursor_pos(x, y)
+        _glide_cursor(x, y)
         time.sleep(0.05)
         dy = clicks if direction == "up" else -clicks
         _mouse_event(_MOUSEEVENTF_WHEEL, data=dy * 120)
@@ -316,7 +354,7 @@ class DesktopController:
     def drag(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.4) -> bool:
         """Click-and-drag from (x1,y1) to (x2,y2). Used for text selection and drag-drop."""
         x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        _set_cursor_pos(x1, y1)
+        _glide_cursor(x1, y1)
         time.sleep(0.1)
         _mouse_event(_MOUSEEVENTF_LEFTDOWN)
         time.sleep(0.05)
@@ -389,7 +427,7 @@ class KillSwitch:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._thread.start()
-        logger.info("[KILL-SWITCH] Armed — triple-Esc or top-left corner to stop")
+        logger.info("[KILL-SWITCH] Armed - triple-Esc or top-left corner to stop")
 
     def _poll_loop(self) -> None:
         user32 = ctypes.windll.user32

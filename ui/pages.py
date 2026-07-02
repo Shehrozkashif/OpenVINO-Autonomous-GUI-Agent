@@ -80,7 +80,7 @@ class MissionComposer(GlassCard):
 
         self.input = CommandInput()
         self.input.setPlaceholderText(
-            "Describe a task in plain language…\n"
+            "Describe a task in plain language...\n"
             "e.g.  Open Notepad and write a haiku about automation")
         self.input.setStyleSheet(
             "background: transparent; border: none; font-size: 15px;")
@@ -89,7 +89,7 @@ class MissionComposer(GlassCard):
         lay.addWidget(self.input)
 
         row = QHBoxLayout()
-        hint = QLabel("Enter to run · Shift+Enter for a new line")
+        hint = QLabel("Enter to run | Shift+Enter for a new line")
         hint.setProperty("role", "faint")
         row.addWidget(hint)
         row.addStretch()
@@ -145,7 +145,7 @@ class HomePage(QWidget):
         hcol.addWidget(self.headline)
         try:
             from config import LLM_MODEL, VLM_MODEL
-            sub = f"{LLM_MODEL}  ·  {VLM_MODEL}  ·  OpenVINO Model Server"
+            sub = f"{LLM_MODEL}  |  {VLM_MODEL}  |  OpenVINO Model Server"
         except Exception:
             sub = "local inference"
         subtitle = QLabel(sub)
@@ -206,7 +206,7 @@ class HomePage(QWidget):
             AgentState.FAILED: "Mission needs attention.",
             AgentState.STOPPED: "Mission stopped.",
         }
-        self.headline.setText(headlines.get(state, "Agent operating…"))
+        self.headline.setText(headlines.get(state, "Agent operating..."))
 
     def showEvent(self, e):
         self.refresh()
@@ -226,7 +226,7 @@ class HomePage(QWidget):
         self.m_automations.set_value(str(len(tasks)))
         self.m_runs.set_value(str(sum(t["success_count"] for t in tasks)))
         durs = [t["avg_duration_s"] for t in tasks if t["avg_duration_s"]]
-        self.m_avg.set_value(f"{sum(durs) / len(durs):.0f}s" if durs else "—")
+        self.m_avg.set_value(f"{sum(durs) / len(durs):.0f}s" if durs else "-")
         self.m_patterns.set_value(str(patterns))
 
         # suggestion chips: 2 from memory + canned examples
@@ -237,7 +237,7 @@ class HomePage(QWidget):
         chips = [t["instruction"] for t in tasks[:2]]
         chips += [s for s in _SUGGESTIONS if s not in chips]
         for text in chips[:4]:
-            b = QPushButton(text if len(text) <= 52 else text[:50] + "…")
+            b = QPushButton(text if len(text) <= 52 else text[:50] + "...")
             b.setProperty("kind", "chip")
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(text)
@@ -252,7 +252,7 @@ class HomePage(QWidget):
         if not tasks:
             empty = EmptyState(
                 "sparkle", "No automations yet",
-                "Run your first mission below — successful runs are remembered "
+                "Run your first mission below - successful runs are remembered "
                 "and become one-click workflows.",
                 actions=("Open Calculator", "Open Notepad and write a haiku"))
             empty.action_clicked.connect(self._pick)
@@ -269,8 +269,8 @@ class HomePage(QWidget):
             name.setStyleSheet("font-size: 13px;")
             cl.addWidget(name, stretch=1)
             meta = QLabel(
-                f"{t['success_count']}× · "
-                f"{(t['avg_duration_s'] or 0):.0f}s · "
+                f"{t['success_count']}x | "
+                f"{(t['avg_duration_s'] or 0):.0f}s | "
                 f"{relative_time(t['last_used'])}")
             meta.setProperty("role", "faint")
             cl.addWidget(meta)
@@ -279,7 +279,7 @@ class HomePage(QWidget):
             self.recent_box.addWidget(card)
 
     def _pick(self, text: str):
-        """Suggestion chosen — drop it into the composer, ready to run."""
+        """Suggestion chosen - drop it into the composer, ready to run."""
         self.composer.set_text(text)
         self.suggestion_chosen.emit(text)
 
@@ -313,8 +313,8 @@ class MissionPage(QWidget):
         strip.setSpacing(S.MD)
         self.s_steps = _stat("STEPS", "0")
         self.s_fail = _stat("RECOVERIES", "0")
-        self.s_conf = _stat("LAST CONFIDENCE", "—")
-        self.s_subtask = _stat("OBJECTIVE", "—", stretch=True)
+        self.s_conf = _stat("LAST CONFIDENCE", "-")
+        self.s_subtask = _stat("OBJECTIVE", "-", stretch=True)
         strip.addWidget(self.s_subtask[0], stretch=1)
         strip.addWidget(self.s_steps[0])
         strip.addWidget(self.s_fail[0])
@@ -360,12 +360,12 @@ class MissionPage(QWidget):
         self.preview.clear_targets()
         self.preview.set_action_text(f"Mission: {instruction}")
         for w, default in ((self.s_steps, "0"), (self.s_fail, "0"),
-                           (self.s_conf, "—")):
+                           (self.s_conf, "-")):
             w[1].setText(default)
 
     def _on_subtask(self, sid: int, desc: str):
         self.timeline.add_subtask(sid, desc)
-        self.s_subtask[1].setText(desc if len(desc) < 60 else desc[:58] + "…")
+        self.s_subtask[1].setText(desc if len(desc) < 60 else desc[:58] + "...")
 
     def _on_step(self, n: int, action: str, desc: str):
         self.timeline.add_step(action, desc)
@@ -386,7 +386,7 @@ class MissionPage(QWidget):
         self.preview.mark_target(target, x / sw, y / sh, conf)
 
     def _screen_wh(self):
-        """Logical screen size — the grounder's coordinate space."""
+        """Logical screen size - the grounder's coordinate space."""
         if self._screen_dims is None:
             try:
                 from core.capture.screenshot import _screen_size
@@ -484,7 +484,7 @@ class SessionsPage(QWidget):
             lay = QHBoxLayout(card)
             lay.setContentsMargins(S.LG, S.MD, S.LG, S.MD)
             lay.setSpacing(S.MD)
-            badge = QLabel(f"{t['success_count']}×")
+            badge = QLabel(f"{t['success_count']}x")
             badge.setFixedWidth(40)
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             badge.setStyleSheet(
@@ -501,8 +501,8 @@ class SessionsPage(QWidget):
             ts = datetime.datetime.fromtimestamp(
                 t["last_used"]).strftime("%Y-%m-%d %H:%M")
             meta = QLabel(
-                f"{len(t['steps'])} subtask(s) · "
-                f"avg {(t['avg_duration_s'] or 0):.1f}s · last run {ts}")
+                f"{len(t['steps'])} subtask(s) | "
+                f"avg {(t['avg_duration_s'] or 0):.1f}s | last run {ts}")
             meta.setProperty("role", "faint")
             col.addWidget(meta)
             lay.addLayout(col, stretch=1)
@@ -552,7 +552,7 @@ class WorkflowsPage(QWidget):
         if not tasks:
             self.grid.addWidget(EmptyState(
                 "flow", "The library is empty",
-                "Every successful mission is stored as a reusable workflow —\n"
+                "Every successful mission is stored as a reusable workflow -\n"
                 "the agent reuses its plan to run faster and more reliably."),
                 0, 0)
             return
@@ -576,7 +576,7 @@ class WorkflowsPage(QWidget):
             name.setMinimumHeight(36)
             lay.addWidget(name)
             steps = QLabel(
-                f"{len(t['steps'])} step(s) · ~{(t['avg_duration_s'] or 0):.0f}s")
+                f"{len(t['steps'])} step(s) | ~{(t['avg_duration_s'] or 0):.0f}s")
             steps.setProperty("role", "faint")
             lay.addWidget(steps)
             run = QPushButton(" Run workflow")
@@ -601,7 +601,7 @@ class MemoryPage(QWidget):
         root.setSpacing(S.MD)
         root.addWidget(SectionHeader(
             "Agent Memory",
-            "What the agent has learned — successes it can reuse and failure "
+            "What the agent has learned - successes it can reuse and failure "
             "patterns it now avoids."))
 
         cap1 = QLabel("LEARNED TASKS  (semantic memory)")
@@ -653,7 +653,7 @@ class MemoryPage(QWidget):
             name = QLabel(t["instruction"])
             name.setStyleSheet("font-size: 12px;")
             lay.addWidget(name, stretch=1)
-            meta = QLabel(f"{t['success_count']}× reinforced")
+            meta = QLabel(f"{t['success_count']}x reinforced")
             meta.setProperty("role", "faint")
             lay.addWidget(meta)
             self.learned_box.addWidget(row)
@@ -667,7 +667,7 @@ class MemoryPage(QWidget):
             rows = []
         if not rows:
             self.fail_box.addWidget(QLabel(
-                "No failure patterns recorded — the agent hasn't needed to "
+                "No failure patterns recorded - the agent hasn't needed to "
                 "learn any workarounds yet."))
         for target, action, error, count, last_seen in rows:
             row = GlassCard(shadow=False)
@@ -676,7 +676,7 @@ class MemoryPage(QWidget):
             lay.addWidget(_dot(C.WARNING))
             col = QVBoxLayout()
             col.setSpacing(0)
-            head = QLabel(f"{action or 'action'} → “{target}”")
+            head = QLabel(f"{action or 'action'} -> '{target}'")
             head.setStyleSheet("font-size: 12px; font-weight: 600;")
             col.addWidget(head)
             if error:
@@ -685,7 +685,7 @@ class MemoryPage(QWidget):
                 err.setWordWrap(True)
                 col.addWidget(err)
             lay.addLayout(col, stretch=1)
-            meta = QLabel(f"{count}× · {relative_time(last_seen or 0)}")
+            meta = QLabel(f"{count}x | {relative_time(last_seen or 0)}")
             meta.setProperty("role", "faint")
             lay.addWidget(meta)
             self.fail_box.addWidget(row)
@@ -711,7 +711,7 @@ class ScreenHistoryPage(QWidget):
         root.setSpacing(S.MD)
         root.addWidget(SectionHeader(
             "Screen History",
-            "Frames captured while the agent was operating — click to inspect."))
+            "Frames captured while the agent was operating - click to inspect."))
         self.grid_host = QWidget()
         self.grid = QGridLayout(self.grid_host)
         self.grid.setSpacing(S.MD)
@@ -745,7 +745,7 @@ class ScreenHistoryPage(QWidget):
             thumb.setStyleSheet("border-radius: 8px;")
             lay.addWidget(thumb)
             t = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
-            cap = QLabel(f"{t} — {action}" if action else t)
+            cap = QLabel(f"{t} - {action}" if action else t)
             cap.setProperty("role", "faint")
             cap.setWordWrap(True)
             lay.addWidget(cap)
@@ -756,7 +756,7 @@ class ScreenHistoryPage(QWidget):
 
     def _show_full(self, pixmap: QPixmap, title: str):
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Frame · {title}")
+        dlg.setWindowTitle(f"Frame | {title}")
         lay = QVBoxLayout(dlg)
         lbl = QLabel()
         lbl.setPixmap(pixmap.scaled(
@@ -795,9 +795,9 @@ class SettingsPage(QWidget):
         try:
             from config import LLM_MODEL, OVMS_BASE_URL, TARGET_DEVICE, VLM_MODEL
             rows = [
-                ("Language model", f"{LLM_MODEL} — routing · planning · reflection"),
-                ("Vision model", f"{VLM_MODEL} — grounding · visual verification"),
-                ("Served by", f"OpenVINO Model Server ({OVMS_BASE_URL}) · device {TARGET_DEVICE}"),
+                ("Language model", f"{LLM_MODEL} - routing | planning | reflection"),
+                ("Vision model", f"{VLM_MODEL} - grounding | visual verification"),
+                ("Served by", f"OpenVINO Model Server ({OVMS_BASE_URL}) | device {TARGET_DEVICE}"),
             ]
         except Exception:
             rows = [("Configuration", "config.py could not be read")]
@@ -834,13 +834,13 @@ class SettingsPage(QWidget):
         sl.addWidget(sc)
         for icon, color, text in (
             ("shield", C.SUCCESS,
-             "Action firewall — destructive commands are classified before "
+             "Action firewall - destructive commands are classified before "
              "typing; HIGH-risk commands are blocked, MEDIUM-risk are logged."),
             ("stop", C.DANGER,
-             "Kill switch — armed for the duration of every mission; the Stop "
+             "Kill switch - armed for the duration of every mission; the Stop "
              "button halts execution immediately."),
             ("eye", C.ACCENT,
-             "Full transparency — every action is verified on-screen and "
+             "Full transparency - every action is verified on-screen and "
              "shown in Mission Control with its confidence score."),
             ("key", C.WARNING,
              "Credentials are stored in the OS keychain and redacted from all "
@@ -902,7 +902,7 @@ class SettingsPage(QWidget):
 
     def _check_health(self):
         self.health_btn.setEnabled(False)
-        self.health_result.setText("checking…")
+        self.health_result.setText("checking...")
 
         def worker():
             try:
@@ -948,7 +948,7 @@ class SettingsPage(QWidget):
             from utils.credentials import list_sites
             sites = list_sites()
             self._cred_list.setText(
-                "  ·  ".join(sites) if sites else "(no credentials stored)")
+                "  |  ".join(sites) if sites else "(no credentials stored)")
         except Exception as e:
             self._cred_list.setText(f"Error: {e}")
 

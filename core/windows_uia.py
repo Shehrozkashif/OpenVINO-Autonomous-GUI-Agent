@@ -73,16 +73,22 @@ def find_element(
     Returns (screen_x, screen_y, confidence) or None if not found.
 
     Search order (fastest → broadest):
-      1. Foreground window, depth 6  — covers 95% of cases
+      1. Foreground window, depth 12 — deep enough for browser/Electron
+         accessibility trees, where a page button can sit 10+ levels down
       2. All top-level windows, depth 4 — for taskbar / notification area
 
-    Runs in a daemon thread with `timeout_s` to never stall the pipeline.
+    Runs in a daemon thread with `timeout_s` to never stall the pipeline; the
+    walk publishes its best match as it goes, so a timeout on a very deep tree
+    still returns the best element found so far instead of nothing.
     Confidence is 1.0 for exact name match, ~0.85-0.92 for fuzzy match.
     """
     if not _load():
         return None
 
     result: list = [None]
+
+    def _publish(candidate):
+        result[0] = candidate
 
     def _search():
         _com = _thread_com_init()
@@ -93,7 +99,8 @@ def find_element(
 
             # Fast path — foreground window only
             fg = _uia.GetForegroundControl()
-            r = _walk_and_match(fg, query, fuzzy_threshold, max_depth=6)
+            r = _walk_and_match(fg, query, fuzzy_threshold, max_depth=12,
+                                publish=_publish)
             if r:
                 result[0] = r
                 return
@@ -108,7 +115,8 @@ def find_element(
                     rect = win.BoundingRectangle
                     if (rect.right - rect.left) < 10 or (rect.bottom - rect.top) < 10:
                         continue
-                    r = _walk_and_match(win, query, fuzzy_threshold, max_depth=4)
+                    r = _walk_and_match(win, query, fuzzy_threshold, max_depth=4,
+                                        publish=_publish)
                     if r:
                         result[0] = r
                         return
@@ -216,6 +224,110 @@ def get_interactive_elements(
     return result[0]
 
 
+def focused_element_info(timeout_s: float = 1.0) -> dict | None:
+    """Describe the control that currently owns keyboard focus.
+
+    Returns {"rect": (l, t, r, b), "control_type": str, "name": str,
+    "value": str} or None. "value" is the control's current text (ValuePattern
+    or TextPattern), "" when the control exposes neither — e.g. password
+    fields, which deliberately hide their content.
+
+    Ground truth from the accessibility tree — used to verify actions whose
+    effect is invisible to pixel comparison (a click that only moves the
+    caret) or expensive to read back via OCR+LLM (text typed into a field).
+    Runs in a daemon thread with a hard timeout, like the other queries, so it
+    can never stall the pipeline.
+    """
+    if not _load():
+        return None
+
+    result: list = [None]
+
+    def _get():
+        _com = _thread_com_init()
+        try:
+            ctrl = _uia.GetFocusedControl()
+            if ctrl is None:
+                return
+            rect = ctrl.BoundingRectangle
+            if not _rect_valid(rect):
+                return
+            value = ""
+            try:
+                value = ctrl.GetValuePattern().Value or ""
+            except Exception:
+                try:
+                    value = ctrl.GetTextPattern().DocumentRange.GetText(-1) or ""
+                except Exception:
+                    pass
+            result[0] = {
+                "rect": (rect.left, rect.top, rect.right, rect.bottom),
+                "control_type": ctrl.ControlTypeName,
+                "name": (ctrl.Name or "").strip(),
+                "value": value,
+            }
+        except Exception as e:
+            logger.debug(f"[UIA] Focused-element query error: {e}")
+        finally:
+            del _com   # release per-thread COM
+
+    t = threading.Thread(target=_get, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    return result[0]
+
+
+def save_dialog_open(timeout_s: float = 1.2) -> bool | None:
+    """Is a native Windows file (Save/Save-As) dialog in the foreground?
+
+    Detected structurally: the foreground window's subtree contains an Edit or
+    ComboBox control whose accessible name is the dialog's filename field
+    ("File name:"). The name comes from the accessibility tree — the same
+    field the agent types the path into — so this cannot misread pixels the
+    way OCR on a downscaled screenshot can.
+
+    Returns True/False when the tree answered, or None when UIA is
+    unavailable or the scan timed out (caller should fall back to OCR).
+    """
+    if not _load():
+        return None
+
+    result: list = [None]
+
+    def _scan():
+        _com = _thread_com_init()
+        try:
+            found = [False]
+
+            def _walk(ctrl, depth: int):
+                if depth > 8 or found[0]:
+                    return
+                try:
+                    if ctrl.ControlTypeName in ("EditControl", "ComboBoxControl"):
+                        name = (ctrl.Name or "").strip().lower()
+                        if name.startswith("file name"):
+                            found[0] = True
+                            return
+                    for child in ctrl.GetChildren():
+                        if found[0]:
+                            return
+                        _walk(child, depth + 1)
+                except Exception:
+                    pass  # controls can vanish mid-walk
+
+            _walk(_uia.GetForegroundControl(), 0)
+            result[0] = found[0]
+        except Exception as e:
+            logger.debug(f"[UIA] Save-dialog scan error: {e}")
+        finally:
+            del _com   # release per-thread COM
+
+    t = threading.Thread(target=_scan, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    return result[0]
+
+
 # UIA control types a user can act on — used by get_interactive_elements().
 _INTERACTIVE_CONTROL_TYPES = frozenset({
     "ButtonControl", "MenuItemControl", "ListItemControl", "TreeItemControl",
@@ -232,9 +344,14 @@ def _walk_and_match(
     query: str,
     threshold: float,
     max_depth: int,
+    publish=None,
 ) -> tuple[int, int, float] | None:
     """DFS walk of a UIA subtree.  Returns the best (x, y, confidence) match or None.
     Stops immediately on an exact name match.
+
+    publish: optional callback invoked with each new best match as the walk
+    progresses — lets the caller keep the best result found so far even when
+    the walk is cut off by a timeout (deep browser/Electron trees).
     """
     best_result: list = [None]
     best_score:  list = [0.0]
@@ -256,6 +373,8 @@ def _walk_and_match(
                         cy = (rect.top + rect.bottom) // 2
                         best_result[0] = (cx, cy, 1.0)
                         best_score[0]  = 1.0
+                        if publish:
+                            publish(best_result[0])
                         return   # stop this branch — propagate up
 
                 elif score >= threshold and score > best_score[0]:
@@ -265,6 +384,8 @@ def _walk_and_match(
                         cy = (rect.top + rect.bottom) // 2
                         best_result[0] = (cx, cy, round(score * 0.90, 3))
                         best_score[0]  = score
+                        if publish:
+                            publish(best_result[0])
 
             for child in ctrl.GetChildren():
                 _walk(child, depth + 1)

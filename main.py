@@ -2,6 +2,12 @@
 """Desktop GUI Agent — application entry point."""
 import sys
 
+from utils.platform_utils import enable_dpi_awareness
+
+# Must run before Qt and before the first screen capture so screenshots, UIA
+# rectangles, and mouse input all share one physical-pixel coordinate space.
+enable_dpi_awareness()
+
 from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMessageBox
 

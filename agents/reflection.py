@@ -189,8 +189,9 @@ class ReflectionAgent:
                     f"[REFLECTION] {result.error_description} | hint: {result.recovery_hint}"
                 )
                 return result
+        from core.capture.screenshot import OCR_THUMB
         thumb = screenshot.copy()
-        thumb.thumbnail((960, 540))
+        thumb.thumbnail(OCR_THUMB)
         words = self._ocr.extract(thumb)
         meaningful = [w for w in words if len(w.text) >= 3 and w.conf >= 0.65]
 

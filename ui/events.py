@@ -40,9 +40,9 @@ _RX_SUBTASK      = re.compile(r"\[SUBTASK (\d+)\] (.+)")
 _RX_STEP         = re.compile(r"^\s*Step (\d+): \[(\w+)\] (.*)")
 _RX_VERIFIED     = re.compile(r"^\s*Verified \(conf=([\d.]+)\)")
 _RX_VERIFY_FAIL  = re.compile(r"^\s*Verification failed: (.*?) \(conf=([\d.]+)\)")
-_RX_UNCERTAIN    = re.compile(r"^\s*Uncertain result — retrying")
+_RX_UNCERTAIN    = re.compile(r"^\s*Uncertain result - retrying")
 _RX_RETRY        = re.compile(r"^\s*Retry (\d+)/(\d+)")
-_RX_STEP_FAILED  = re.compile(r"^\s*Step failed — re-evaluating")
+_RX_STEP_FAILED  = re.compile(r"^\s*Step failed - re-evaluating")
 _RX_EXTRACT      = re.compile(r"\[EXTRACT\] '(.+?)' = '(.*)'")
 _RX_MEMORY       = re.compile(r"\[MEMORY\] Similar past task found \(sim=([\d.]+)\)")
 _RX_TASK_DONE    = re.compile(r"\[TASK DONE\] (.*) \(([\d.]+)s\)")
@@ -56,10 +56,10 @@ _RX_SETTLE       = re.compile(r"\[SETTLE\]")
 # ── Deep pipeline events (loguru bridge — agents/, core/) ────────────────────
 _RX_PLANNED      = re.compile(r"\[PLANNING\] Next: \[(\w+)\] (.*)")
 _RX_LOCATED      = re.compile(
-    r"\[GROUNDING\] '(.+?)' → \((\d+),(\d+)\) conf=([\d.]+) method=([\w/-]+)")
+    r"\[GROUNDING\] '(.+?)' -> \((\d+),(\d+)\) conf=([\d.]+) method=([\w/-]+)")
 _RX_EXECUTED     = re.compile(r"\[ACTION\] (\w+)")
 _RX_VLM_VERIFY   = re.compile(r"\[REFLECTION\] .*escalating to VLM")
-_RX_KILLSWITCH   = re.compile(r"\[KILL-SWITCH\] Armed — (.*)")
+_RX_KILLSWITCH   = re.compile(r"\[KILL-SWITCH\] Armed - (.*)")
 
 
 class LoguruBridge(QObject):
@@ -169,7 +169,7 @@ class AgentEventBus(QObject):
             self.instruction = m.group(1)
             self._set_state(AgentState.ROUTING)
             self.task_started.emit(self.instruction)
-            self.detail.emit("Breaking the mission into subtasks…")
+            self.detail.emit("Breaking the mission into subtasks...")
             return
 
         m = _RX_ROUTER.search(line) or _RX_BURST.search(line)
@@ -199,7 +199,7 @@ class AgentEventBus(QObject):
             # Click-family steps locate their target on screen first
             if action in ("click", "right_click", "double_click", "drag"):
                 self._set_state(AgentState.GROUNDING)
-                self.detail.emit(f"Looking for the target on screen — {desc}")
+                self.detail.emit(f"Looking for the target on screen - {desc}")
             else:
                 self._set_state(AgentState.ACTING)
                 self.detail.emit(desc)
@@ -211,7 +211,7 @@ class AgentEventBus(QObject):
             self.last_confidence = float(m.group(1))
             self._set_state(AgentState.PLANNING)
             self.step_verified.emit(self.last_confidence)
-            self.detail.emit("Step confirmed — planning the next move…")
+            self.detail.emit("Step confirmed - planning the next move...")
             return
 
         m = _RX_VERIFY_FAIL.search(line)
@@ -230,7 +230,7 @@ class AgentEventBus(QObject):
 
         if _RX_UNCERTAIN.search(line):
             self._set_state(AgentState.VERIFYING)
-            self.guard_event.emit("VERIFY", "Outcome uncertain — re-checking")
+            self.guard_event.emit("VERIFY", "Outcome uncertain - re-checking")
             return
 
         if _RX_STEP_FAILED.search(line):
@@ -290,7 +290,7 @@ class AgentEventBus(QObject):
             target, x, y = m.group(1), int(m.group(2)), int(m.group(3))
             conf, method = float(m.group(4)), m.group(5)
             self._set_state(AgentState.ACTING)
-            self.detail.emit(f"Located “{target}” ({conf:.0%} · {method})")
+            self.detail.emit(f"Located '{target}' ({conf:.0%} | {method})")
             self.element_located.emit(target, x, y, conf, method)
             return
 
@@ -298,17 +298,17 @@ class AgentEventBus(QObject):
         if m:
             if self.state in (AgentState.ACTING, AgentState.GROUNDING):
                 self._set_state(AgentState.VERIFYING)
-                self.detail.emit("Action sent — verifying the result…")
+                self.detail.emit("Action sent - verifying the result...")
             return
 
         if _RX_VLM_VERIFY.search(line):
             self._set_state(AgentState.VERIFYING)
             self.detail.emit(
-                "Double-checking with the vision model — this can take a "
-                "minute while it loads…")
+                "Double-checking with the vision model - this can take a "
+                "minute while it loads...")
             return
 
         m = _RX_KILLSWITCH.search(line)
         if m:
-            self.guard_event.emit("KILL-SWITCH", f"Armed — {m.group(1)}")
+            self.guard_event.emit("KILL-SWITCH", f"Armed - {m.group(1)}")
             return

@@ -32,7 +32,7 @@ from agents.reflection import ReflectionAgent
 from agents.router import RouterAgent
 from core.burst_executor import BurstExecutor, detect_burst, detect_burst_from_instruction
 from core.capture.screen_snapshot import capture_snapshot
-from core.capture.screenshot import ScreenCapture, _screen_size
+from core.capture.screenshot import OCR_THUMB, ScreenCapture, _screen_size
 from core.protocols import ActionStep, SubTask
 from memory.task_memory import TaskMemory
 
@@ -434,6 +434,11 @@ class TaskOrchestrator:
         _cached_ocr: str = ""   # reuse reflection's OCR for next planning step
         _last_step_sig: tuple = ()    # (action_type, target, value, key)
         _same_step_streak: int = 0   # consecutive successes of the identical step
+        # Steps planned ahead by the last plan_steps() call. Executing from this
+        # queue skips the ~7-10 s planning call per step; it is flushed whenever
+        # a step fails or its outcome is uncertain, forcing a fresh plan against
+        # the live screen.
+        _step_queue: list[ActionStep] = []
 
         # Fast path: recognised multi-step patterns run with zero LLM calls.
         if self._try_burst(subtask):
@@ -456,6 +461,12 @@ class TaskOrchestrator:
         # reflection loops on ctrl+s forever. Verify the same way as commands:
         # the subtask is DONE the moment the named file appears on disk (fresh).
         _save_target = self._subtask_save_target(subtask)
+
+        # "... type: <text>" subtasks are complete the moment that text has been
+        # typed and verified. Without this, the 8B planner re-types the payload
+        # (duplicating it in the document) or drifts into ctrl+s save steps that
+        # belong to a later subtask — burning the whole subtask budget.
+        _type_payload = None if _save_target else self._subtask_type_payload(subtask)
 
         _subtask_start = time.time()
 
@@ -541,12 +552,44 @@ class TaskOrchestrator:
                         self._degraded = True
                         return True
                 if not _visual_mode:
-                    step = self.planner.plan_next_step(
-                        subtask, screen_context, completed,
-                        task_context=task_context, failure_hints=failure_hints,
-                    )
-                    if step is None:
-                        return True   # planner says goal is achieved
+                    if _step_queue:
+                        step = _step_queue.pop(0)
+                        step.id = len(completed) + 1
+                        self.log(
+                            f"  [PLAN-QUEUE] Executing queued step "
+                            f"({len(_step_queue)} remaining after this)"
+                        )
+                    else:
+                        planned = self.planner.plan_steps(
+                            subtask, screen_context, completed,
+                            task_context=task_context, failure_hints=failure_hints,
+                        )
+                        if not planned:
+                            # A "save as <path>" subtask has ONE ground truth:
+                            # the file on disk. The planner's "goal achieved"
+                            # must not overrule its absence — that reports a
+                            # false success with no file produced.
+                            if _save_target and not self._file_saved_fresh(
+                                _save_target, _subtask_start
+                            ):
+                                self.log(
+                                    "  Planner declared done but "
+                                    f"'{_save_target}' is not on disk — rejecting"
+                                )
+                                completed.append(
+                                    "[FAILED: planner declared done but the "
+                                    "target file is not on disk]"
+                                )
+                                consecutive_failures += 1
+                                if consecutive_failures >= self.config.consecutive_failures_limit:
+                                    self.log(
+                                        f"  {self.config.consecutive_failures_limit} "
+                                        f"consecutive failures — aborting subtask"
+                                    )
+                                    return False
+                                continue
+                            return True   # planner says goal is achieved
+                        step, _step_queue = planned[0], list(planned[1:])
             except PlanningParseError as e:
                 # Unparseable planner output is a planning FAILURE, not goal
                 # achievement. Record it and let the loop try again (or abort
@@ -619,6 +662,20 @@ class TaskOrchestrator:
                     step_success = True
                     break
 
+                # Deterministic type verification: read the focused control's
+                # value from the accessibility tree. Exact, ~50 ms, and skips
+                # the ~3-4 s OCR+LLM reflection call. Falls through to normal
+                # reflection when the control exposes no readable value.
+                if step.action_type == "type":
+                    time.sleep(0.3)   # let the control commit the input
+                    if self._typed_text_in_focused_control(step.value):
+                        self.log(
+                            "  [TYPE-VERIFY] Focused control contains the typed "
+                            "text — verified via accessibility tree"
+                        )
+                        step_success = True
+                        break
+
                 # Deterministic verification for the execute-Enter of a
                 # "run: <command>" subtask — checks the filesystem / terminal
                 # output instead of LLM reflection. On confirmed effect the
@@ -658,6 +715,34 @@ class TaskOrchestrator:
                         time.sleep(0.1)
                         break
 
+                    # "Screen unchanged" after a click is a false failure when
+                    # the click's whole effect was placing the caret — verify
+                    # against the accessibility tree instead of retrying blind.
+                    if (
+                        step.action_type == "click"
+                        and "unchanged" in (reflection.error_description or "").lower()
+                        and self._click_holds_focus(step)
+                    ):
+                        self.log(
+                            "  [FOCUS-CHECK] Clicked point owns keyboard focus "
+                            "(text control) — click confirmed"
+                        )
+                        step_success = True
+                        break
+
+                    # A save hotkey that opened the Save-As dialog IS a success,
+                    # but the LLM verifier reads it as "no confirmation dialog"
+                    # and fails it — which retries ctrl+s into the open dialog
+                    # (a no-op) until the budget is gone. Check deterministically.
+                    if (
+                        step.action_type == "hotkey"
+                        and (step.key or "").lower() in ("ctrl+s", "ctrl+shift+s")
+                        and self._save_dialog_visible()
+                    ):
+                        self.log("  [SAVE-CHECK] Save-As dialog is open — hotkey confirmed")
+                        step_success = True
+                        break
+
                     # Step reported as not-confirmed by the reflector.
                     # fail_threshold splits "no clear evidence of failure" from
                     # "confidently failed":
@@ -691,6 +776,10 @@ class TaskOrchestrator:
                                 f"{fail_threshold:.2f}) — action already performed; "
                                 f"accepting and letting the next step verify live"
                             )
+                            # The "next step verifies live" guarantee requires a
+                            # fresh plan against the live screen — drop any steps
+                            # planned before this uncertain outcome.
+                            _step_queue = []
                             step_success = True
                             break
                         # Idempotent action (click / scroll): safe to repeat, and a
@@ -701,7 +790,7 @@ class TaskOrchestrator:
                             f"uncertain outcome (conf={reflection.confidence:.2f}, "
                             f"threshold={fail_threshold:.2f})"
                         )
-                        self.log(f"  Uncertain result — retrying ({last_error})")
+                        self.log(f"  Uncertain result - retrying ({last_error})")
                         # Fast-path: if the goal process is already running after an
                         # uncertain click, skip the remaining retries.
                         if _is_launch_goal and (
@@ -760,6 +849,20 @@ class TaskOrchestrator:
                 else:
                     completed.append(step.description)
                 consecutive_failures = 0
+
+                # Early-exit: a "... type: <text>" subtask is DONE once that text
+                # has been typed and verified — never give the planner a chance
+                # to re-type it or drift into save steps of a later subtask.
+                if (
+                    _type_payload
+                    and step.action_type == "type"
+                    and self._texts_equivalent(step.value or "", _type_payload)
+                ):
+                    self.log(
+                        "  [TYPE-CHECK] Requested text typed and verified — "
+                        "subtask complete"
+                    )
+                    return True
 
                 # Early-exit: after each successful step in a known app-launch subtask,
                 # check the process list on Windows. If the app is already running, the
@@ -824,6 +927,9 @@ class TaskOrchestrator:
                     if last_error else f"[FAILED] {step.description}"
                 )
                 completed.append(note)
+                # The rest of the queued plan was built on this step succeeding —
+                # flush it so the next iteration re-plans from the live screen.
+                _step_queue = []
 
                 # Even on step failure, check if the goal process is now running.
                 # This handles the common case where key_press enter launches an app
@@ -838,7 +944,7 @@ class TaskOrchestrator:
                     return True
 
                 consecutive_failures += 1
-                self.log("  Step failed — re-evaluating next action")
+                self.log("  Step failed - re-evaluating next action")
 
                 # Persist failure so future tasks can avoid this pattern
                 try:
@@ -1130,7 +1236,7 @@ class TaskOrchestrator:
             return False, "Enter pressed but no command was typed first"
         try:
             img = self.capturer.capture()
-            img.thumbnail((960, 540))
+            img.thumbnail(OCR_THUMB)
             text = " ".join(
                 w.text for w in self._ocr.extract(img) if w.conf >= 0.6
             ).lower()
@@ -1164,6 +1270,47 @@ class TaskOrchestrator:
             return None
         return os.path.expanduser(os.path.expandvars(path))
 
+    @staticmethod
+    def _subtask_type_payload(subtask) -> str | None:
+        """Extract the literal text a "... type: <text>" subtask asks to type.
+
+        Returns the payload when the subtask ends with the text to type (the
+        router phrases typing subtasks as "click in the document area and
+        type: <text>"), else None. Lets the orchestrator complete the subtask
+        deterministically the moment that text has been typed and verified —
+        otherwise the planner re-types the text or drifts into save steps that
+        belong to a later subtask.
+        """
+        desc = subtask.description or ""
+        m = re.search(r"\btype:?\s+['\"]?(.+?)['\"]?\s*$", desc, re.IGNORECASE)
+        if not m:
+            return None
+        payload = m.group(1).strip()
+        # Too-short payloads ("type notepad") are launcher/search idioms, not a
+        # document-typing goal — don't short-circuit those.
+        return payload if len(payload) >= 6 else None
+
+    @staticmethod
+    def _texts_equivalent(a: str, b: str) -> bool:
+        """True when two strings are the same text modulo case/whitespace/quotes.
+
+        Fuzzy (difflib) because the planner re-emits the payload from the
+        subtask description and may vary punctuation slightly. Containment
+        counts only when lengths are comparable, so typing a fragment of the
+        payload never passes as the full text.
+        """
+        import difflib
+
+        def _norm(s: str) -> str:
+            return re.sub(r"\s+", " ", (s or "").strip().strip("'\"")).lower()
+
+        na, nb = _norm(a), _norm(b)
+        if not na or not nb:
+            return False
+        if (na in nb or nb in na) and min(len(na), len(nb)) / max(len(na), len(nb)) >= 0.8:
+            return True
+        return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.85
+
     def _file_saved_fresh(self, path: str, started_at: float) -> bool:
         """True if `path` exists and was written during this subtask.
 
@@ -1178,6 +1325,60 @@ class TaskOrchestrator:
         except OSError:
             return False
 
+    def _typed_text_in_focused_control(self, text: str | None) -> bool:
+        """Deterministic type verification: the focused control's accessible
+        value contains the text that was just typed.
+
+        Reads the real widget content from the accessibility tree — exact and
+        ~50 ms, versus the ~3-4 s OCR+LLM reflection call it replaces. Returns
+        False (fall back to reflection) when the text is trivial, contains a
+        credential placeholder (substituted at execution time, and secrets must
+        not be read back), or the control exposes no readable value.
+        """
+        if not text or len(text.strip()) < 2 or "{{cred:" in text:
+            return False
+        try:
+            from core import windows_uia
+            info = windows_uia.focused_element_info()
+            value = (info or {}).get("value") or ""
+            if not value:
+                return False
+
+            def _norm(s: str) -> str:
+                return re.sub(r"\s+", " ", s).strip().lower()
+
+            return _norm(text) in _norm(value)
+        except Exception:
+            return False
+
+    def _click_holds_focus(self, step: ActionStep) -> bool:
+        """True when the clicked point lies inside the control that owns
+        keyboard focus and that control accepts text input.
+
+        A click whose effect is placing the caret produces zero pixel change
+        (the caret is invisible to the phash diff), so reflection scores it as
+        a no-op and retries it forever. The accessibility tree is the ground
+        truth: if the focused control contains the clicked coordinates and is
+        a text control, the click achieved everything a click can achieve.
+        Works for any app and any task — no target-name matching involved.
+        """
+        try:
+            from core import windows_uia
+            info = windows_uia.focused_element_info()
+            if not info or info["control_type"] not in (
+                "EditControl", "DocumentControl",
+            ):
+                return False
+            # Screen is unchanged (that is why we are here), so this is a
+            # cache hit — no OCR/VLM cost.
+            loc = self.grounder.ground(step.target)
+            if not loc.found:
+                return False
+            left, top, right, bottom = info["rect"]
+            return left <= loc.x <= right and top <= loc.y <= bottom
+        except Exception:
+            return False
+
     def _save_dialog_visible(self) -> bool:
         """True when a Windows Save/Save-As dialog is on screen.
 
@@ -1186,9 +1387,20 @@ class TaskOrchestrator:
         path — so we never type a path into the document body of an already-named
         file that ctrl+s saved silently.
         """
+        # Accessibility tree first — exact control names straight from the
+        # dialog, immune to OCR misreading small labels on a downscaled
+        # screenshot (which made this check miss an open dialog entirely).
+        try:
+            from core import windows_uia
+            verdict = windows_uia.save_dialog_open()
+            if verdict is not None:
+                return verdict
+        except Exception:
+            pass
+        # OCR fallback — UIA unavailable or timed out.
         try:
             img = self.capturer.capture()
-            img.thumbnail((960, 540))
+            img.thumbnail(OCR_THUMB)
             text = " ".join(
                 w.text for w in self._ocr.extract(img) if w.conf >= 0.6
             ).lower()
@@ -1245,23 +1457,53 @@ class TaskOrchestrator:
             self.log("  [SAVE-AS] Save dialog not detected — deferring to planning loop")
             return False
 
-        # 3. Replace the default filename with the full target path.
-        self._execute_step(_step("hotkey", key="ctrl+a", desc="Select filename field"))
-        if not self._execute_step(_step("type", value=typed_path, desc="Type save path")):
+        # 3. Replace the default filename with the full target path, then READ
+        #    BACK the field through the accessibility tree to confirm the paste
+        #    actually landed before pressing Enter (a too-early Enter saves
+        #    under the default name and the dialog closes silently).
+        for attempt in range(2):
+            self._execute_step(_step("hotkey", key="ctrl+a", desc="Select filename field"))
+            if not self._execute_step(_step("type", value=typed_path, desc="Type save path")):
+                return False
+            time.sleep(0.3)
+            _field_val = None
+            try:
+                from core import windows_uia
+                _field_val = (windows_uia.focused_element_info() or {}).get("value")
+            except Exception:
+                pass
+            if not _field_val:
+                break   # field value not readable — proceed optimistically
+            if typed_path.lower() in re.sub(r"\s+", " ", _field_val).strip().lower():
+                break   # read-back confirms the path landed in the field
+            self.log("  [SAVE-AS] Filename field read-back mismatch — retyping")
+        else:
+            # Wrong content twice — close the dialog so the planner starts from
+            # a clean editor, not a half-filled dialog.
+            self._execute_step(_step("key_press", key="escape", desc="Close dialog"))
+            self.log("  [SAVE-AS] Could not confirm filename field — deferring to planning loop")
             return False
 
-        # 4. Confirm. Poll the disk; a "Replace existing file?" prompt (file already
-        #    exists) needs one extra Enter, sent only while the file is still absent
-        #    so we never inject a stray newline into a saved document.
+        # 4. Confirm. Poll the disk. A "Replace existing file?" prompt appears
+        #    when the target already exists; its DEFAULT button is "No", so a
+        #    blind Enter cancels the save. Alt+Y presses the accelerated "Yes"
+        #    deterministically — sent only while the file is still absent, so a
+        #    completed save never receives stray input.
         self._execute_step(_step("key_press", key="enter", desc="Confirm save"))
-        for i in range(8):
+        for i in range(10):
             time.sleep(0.4)
             if self._file_saved_fresh(target, started_at):
                 self.log(f"  [SAVE-AS] '{target}' written to disk — confirmed")
                 return True
             if i == 2:
                 self._execute_step(
-                    _step("key_press", key="enter", desc="Confirm overwrite"))
+                    _step("hotkey", key="alt+y", desc="Confirm overwrite (Yes)"))
+            elif i == 5:
+                self._execute_step(
+                    _step("key_press", key="enter", desc="Confirm overwrite (fallback)"))
+        # Leave a CLEAN state for the planning loop: whatever dialog/prompt is
+        # still up would swallow the planner's keystrokes.
+        self._execute_step(_step("key_press", key="escape", desc="Close stale dialog"))
         self.log(f"  [SAVE-AS] '{target}' not on disk after save sequence — falling back")
         return False
 
@@ -1300,7 +1542,7 @@ class TaskOrchestrator:
         """
         try:
             img = self.capturer.capture()
-            img.thumbnail((960, 540))
+            img.thumbnail(OCR_THUMB)
             words = self._ocr.extract(img)
             if not words:
                 return None
@@ -1362,7 +1604,7 @@ class TaskOrchestrator:
 
             # Check if page content is still changing
             img = self.capturer.capture()
-            img.thumbnail((960, 540))
+            img.thumbnail(OCR_THUMB)
             cur_text = " ".join(w.text for w in self._ocr.extract(img) if w.conf >= 0.6)
             if cur_text == prev_ocr_text and i > 0:
                 self.log("  [SCROLL-FIND] Reached end of page — stopping")
@@ -1672,7 +1914,7 @@ class TaskOrchestrator:
             # Fallback: flat token list when snapshot capture fails
             try:
                 img = self.capturer.capture()
-                img.thumbnail((960, 540))
+                img.thumbnail(OCR_THUMB)
                 words = self._ocr.extract(img)
                 visible = [
                     w.text for w in words
