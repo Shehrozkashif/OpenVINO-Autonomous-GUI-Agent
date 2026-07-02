@@ -565,6 +565,29 @@ class TaskOrchestrator:
                             task_context=task_context, failure_hints=failure_hints,
                         )
                         if not planned:
+                            # A "save as <path>" subtask has ONE ground truth:
+                            # the file on disk. The planner's "goal achieved"
+                            # must not overrule its absence — that reports a
+                            # false success with no file produced.
+                            if _save_target and not self._file_saved_fresh(
+                                _save_target, _subtask_start
+                            ):
+                                self.log(
+                                    "  Planner declared done but "
+                                    f"'{_save_target}' is not on disk — rejecting"
+                                )
+                                completed.append(
+                                    "[FAILED: planner declared done but the "
+                                    "target file is not on disk]"
+                                )
+                                consecutive_failures += 1
+                                if consecutive_failures >= self.config.consecutive_failures_limit:
+                                    self.log(
+                                        f"  {self.config.consecutive_failures_limit} "
+                                        f"consecutive failures — aborting subtask"
+                                    )
+                                    return False
+                                continue
                             return True   # planner says goal is achieved
                         step, _step_queue = planned[0], list(planned[1:])
             except PlanningParseError as e:
@@ -1434,23 +1457,53 @@ class TaskOrchestrator:
             self.log("  [SAVE-AS] Save dialog not detected — deferring to planning loop")
             return False
 
-        # 3. Replace the default filename with the full target path.
-        self._execute_step(_step("hotkey", key="ctrl+a", desc="Select filename field"))
-        if not self._execute_step(_step("type", value=typed_path, desc="Type save path")):
+        # 3. Replace the default filename with the full target path, then READ
+        #    BACK the field through the accessibility tree to confirm the paste
+        #    actually landed before pressing Enter (a too-early Enter saves
+        #    under the default name and the dialog closes silently).
+        for attempt in range(2):
+            self._execute_step(_step("hotkey", key="ctrl+a", desc="Select filename field"))
+            if not self._execute_step(_step("type", value=typed_path, desc="Type save path")):
+                return False
+            time.sleep(0.3)
+            _field_val = None
+            try:
+                from core import windows_uia
+                _field_val = (windows_uia.focused_element_info() or {}).get("value")
+            except Exception:
+                pass
+            if not _field_val:
+                break   # field value not readable — proceed optimistically
+            if typed_path.lower() in re.sub(r"\s+", " ", _field_val).strip().lower():
+                break   # read-back confirms the path landed in the field
+            self.log("  [SAVE-AS] Filename field read-back mismatch — retyping")
+        else:
+            # Wrong content twice — close the dialog so the planner starts from
+            # a clean editor, not a half-filled dialog.
+            self._execute_step(_step("key_press", key="escape", desc="Close dialog"))
+            self.log("  [SAVE-AS] Could not confirm filename field — deferring to planning loop")
             return False
 
-        # 4. Confirm. Poll the disk; a "Replace existing file?" prompt (file already
-        #    exists) needs one extra Enter, sent only while the file is still absent
-        #    so we never inject a stray newline into a saved document.
+        # 4. Confirm. Poll the disk. A "Replace existing file?" prompt appears
+        #    when the target already exists; its DEFAULT button is "No", so a
+        #    blind Enter cancels the save. Alt+Y presses the accelerated "Yes"
+        #    deterministically — sent only while the file is still absent, so a
+        #    completed save never receives stray input.
         self._execute_step(_step("key_press", key="enter", desc="Confirm save"))
-        for i in range(8):
+        for i in range(10):
             time.sleep(0.4)
             if self._file_saved_fresh(target, started_at):
                 self.log(f"  [SAVE-AS] '{target}' written to disk — confirmed")
                 return True
             if i == 2:
                 self._execute_step(
-                    _step("key_press", key="enter", desc="Confirm overwrite"))
+                    _step("hotkey", key="alt+y", desc="Confirm overwrite (Yes)"))
+            elif i == 5:
+                self._execute_step(
+                    _step("key_press", key="enter", desc="Confirm overwrite (fallback)"))
+        # Leave a CLEAN state for the planning loop: whatever dialog/prompt is
+        # still up would swallow the planner's keystrokes.
+        self._execute_step(_step("key_press", key="escape", desc="Close stale dialog"))
         self.log(f"  [SAVE-AS] '{target}' not on disk after save sequence — falling back")
         return False
 

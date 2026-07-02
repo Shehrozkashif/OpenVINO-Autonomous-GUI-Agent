@@ -1399,3 +1399,34 @@ class TestPlanQueue:
         # only the type step ran; enter was dropped with the stale queue
         assert orch.actor.execute.call_count == 1
         assert orch.planner.plan_steps.call_count == 2
+
+
+class TestSaveTargetDiskGate:
+    """A "save as <path>" subtask has one ground truth: the file on disk.
+    The planner's "goal achieved" must never overrule its absence."""
+
+    def _save_subtask(self):
+        return SubTask(
+            id=3, depends_on=[],
+            description="save the document as C:/Users/x/Desktop/a.txt",
+        )
+
+    def test_planner_done_rejected_when_file_missing(self):
+        orch = _make_orch_loop([])
+        orch.planner.plan_steps = MagicMock(return_value=None)
+        orch._try_burst = MagicMock(return_value=False)
+        orch._try_save_as = MagicMock(return_value=False)
+        orch._file_saved_fresh = MagicMock(return_value=False)
+        orch.config.visual_replan_after = 0
+        assert orch._execute_subtask(self._save_subtask()) is False
+        # every "done" claim was rejected until the failure limit tripped
+        assert (orch.planner.plan_steps.call_count
+                == orch.config.consecutive_failures_limit)
+
+    def test_file_on_disk_short_circuits_before_planning(self):
+        orch = _make_orch_loop([])
+        orch.planner.plan_steps = MagicMock(return_value=None)
+        orch._try_save_as = MagicMock(return_value=False)
+        orch._file_saved_fresh = MagicMock(return_value=True)
+        assert orch._execute_subtask(self._save_subtask()) is True
+        orch.planner.plan_steps.assert_not_called()
