@@ -62,109 +62,156 @@ class ActionExecutionAgent:
 
         x, y:      screen coordinates from UIGroundingAgent (source element).
         x2, y2:    destination coordinates for drag steps.
+
+        Dispatches to the _do_<action_type> method for the step; every handler
+        shares the (step, x, y, x2, y2) signature.
         """
+        handler = getattr(self, f"_do_{step.action_type}", None)
+        if handler is None:
+            logger.error(f"[ACTION] Unknown action_type: '{step.action_type}'")
+            return False
         try:
-            if step.action_type == "click":
-                if x is None or y is None:
-                    logger.error(f"[ACTION] click step {step.id} missing coordinates")
-                    return False
-                return self.controller.click(x, y)
-
-            elif step.action_type == "right_click":
-                if x is None or y is None:
-                    logger.error(f"[ACTION] right_click step {step.id} missing coordinates")
-                    return False
-                return self.controller.right_click(x, y)
-
-            elif step.action_type == "double_click":
-                if x is None or y is None:
-                    logger.error(f"[ACTION] double_click step {step.id} missing coordinates")
-                    return False
-                return self.controller.double_click(x, y)
-
-            elif step.action_type == "drag":
-                if x is None or y is None:
-                    logger.error(f"[ACTION] drag step {step.id} missing source coordinates")
-                    return False
-                if x2 is None or y2 is None:
-                    logger.error(f"[ACTION] drag step {step.id} missing destination coordinates")
-                    return False
-                return self.controller.drag(x, y, x2, y2)
-
-            elif step.action_type == "type":
-                if not step.value:
-                    logger.error(f"[ACTION] type step {step.id} has no value")
-                    return False
-                # Substitute {{cred:site:field}} tokens before typing
-                value = step.value
-                sensitive = False
-                try:
-                    from utils.credentials import has_tokens, substitute
-                    if has_tokens(value):
-                        value = substitute(value)
-                        sensitive = True
-                        logger.info("[ACTION] credential substitution applied")
-                except Exception:
-                    pass
-                use_cb = self._should_use_clipboard(step, value)
-                return self.controller.type_text(
-                    value, use_clipboard=use_cb, sensitive=sensitive
-                )
-
-            elif step.action_type == "key_press":
-                # Tolerate models that put key in value instead of key field
-                key = (step.key or step.value or "").strip()
-                if not key:
-                    logger.error(f"[ACTION] key_press step {step.id} has no key")
-                    return False
-                return self.controller.press_key(key)
-
-            elif step.action_type == "hotkey":
-                key = (step.key or step.value or "").strip()
-                if not key:
-                    logger.error(f"[ACTION] hotkey step {step.id} has no key")
-                    return False
-                # Filter empty tokens from malformed combos like "ctrl++s"
-                keys = [k.strip() for k in key.split("+") if k.strip()]
-                if not keys:
-                    logger.error(f"[ACTION] hotkey step {step.id} produced no valid keys from '{key}'")
-                    return False
-                return self.controller.hotkey(*keys)
-
-            elif step.action_type == "scroll":
-                # Use screen center if grounding found no specific target
-                sx, sy = x or 0, y or 0
-                if sx == 0 and sy == 0:
-                    sx, sy = _screen_center()
-                direction = (step.value or "down").strip().lower()
-                # Support "down:5" notation for custom scroll amount
-                clicks = 5
-                if ":" in direction:
-                    direction, amt = direction.split(":", 1)
-                    try:
-                        clicks = int(amt)
-                    except ValueError:
-                        pass
-                return self.controller.scroll(sx, sy, clicks=clicks, direction=direction)
-
-            elif step.action_type == "wait":
-                try:
-                    duration = float(step.value or "1.0")
-                except (ValueError, TypeError):
-                    logger.warning(f"[ACTION] wait step {step.id} invalid duration '{step.value}' — using 1.0s")
-                    duration = 1.0
-                logger.info(f"[ACTION] Waiting {duration}s")
-                time.sleep(duration)
-                return True
-
-            elif step.action_type == "screenshot":
-                _ = self.controller.screenshot_base64()
-                return True
-
-            else:
-                logger.error(f"[ACTION] Unknown action_type: '{step.action_type}'")
-                return False
-
+            return handler(step, x, y, x2, y2)
         except Exception as e:
             logger.error(f"[ACTION] Step {step.id} raised exception: {e}")
             return False
+
+    # ── Pointer actions (coordinates come from the Grounding Agent) ──────────
+
+    def _do_click(self, step, x, y, x2, y2) -> bool:
+        if x is None or y is None:
+            logger.error(f"[ACTION] click step {step.id} missing coordinates")
+            return False
+        return self.controller.click(x, y)
+
+    def _do_right_click(self, step, x, y, x2, y2) -> bool:
+        if x is None or y is None:
+            logger.error(f"[ACTION] right_click step {step.id} missing coordinates")
+            return False
+        return self.controller.right_click(x, y)
+
+    def _do_double_click(self, step, x, y, x2, y2) -> bool:
+        if x is None or y is None:
+            logger.error(f"[ACTION] double_click step {step.id} missing coordinates")
+            return False
+        return self.controller.double_click(x, y)
+
+    def _do_drag(self, step, x, y, x2, y2) -> bool:
+        if x is None or y is None:
+            logger.error(f"[ACTION] drag step {step.id} missing source coordinates")
+            return False
+        if x2 is None or y2 is None:
+            logger.error(f"[ACTION] drag step {step.id} missing destination coordinates")
+            return False
+        return self.controller.drag(x, y, x2, y2)
+
+    def _do_scroll(self, step, x, y, x2, y2) -> bool:
+        # Use screen center if grounding found no specific target
+        sx, sy = x or 0, y or 0
+        if sx == 0 and sy == 0:
+            sx, sy = _screen_center()
+        direction = (step.value or "down").strip().lower()
+        # Support "down:5" notation for custom scroll amount
+        clicks = 5
+        if ":" in direction:
+            direction, amt = direction.split(":", 1)
+            try:
+                clicks = int(amt)
+            except ValueError:
+                pass
+        return self.controller.scroll(sx, sy, clicks=clicks, direction=direction)
+
+    # ── Keyboard actions ──────────────────────────────────────────────────────
+
+    def _do_type(self, step, x, y, x2, y2) -> bool:
+        if not step.value:
+            logger.error(f"[ACTION] type step {step.id} has no value")
+            return False
+        value, sensitive = self._substitute_credentials(step.value)
+        use_cb = self._should_use_clipboard(step, value)
+        return self.controller.type_text(
+            value, use_clipboard=use_cb, sensitive=sensitive
+        )
+
+    def _do_key_press(self, step, x, y, x2, y2) -> bool:
+        # Tolerate models that put key in value instead of key field
+        key = (step.key or step.value or "").strip()
+        if not key:
+            logger.error(f"[ACTION] key_press step {step.id} has no key")
+            return False
+        return self.controller.press_key(key)
+
+    def _do_hotkey(self, step, x, y, x2, y2) -> bool:
+        key = (step.key or step.value or "").strip()
+        if not key:
+            logger.error(f"[ACTION] hotkey step {step.id} has no key")
+            return False
+        # Filter empty tokens from malformed combos like "ctrl++s"
+        keys = [k.strip() for k in key.split("+") if k.strip()]
+        if not keys:
+            logger.error(f"[ACTION] hotkey step {step.id} produced no valid keys from '{key}'")
+            return False
+        return self.controller.hotkey(*keys)
+
+    # ── Passive actions ───────────────────────────────────────────────────────
+
+    def _do_wait(self, step, x, y, x2, y2) -> bool:
+        try:
+            duration = float(step.value or "1.0")
+        except (ValueError, TypeError):
+            logger.warning(f"[ACTION] wait step {step.id} invalid duration '{step.value}' — using 1.0s")
+            duration = 1.0
+        logger.info(f"[ACTION] Waiting {duration}s")
+        time.sleep(duration)
+        return True
+
+    def _do_screenshot(self, step, x, y, x2, y2) -> bool:
+        _ = self.controller.screenshot_base64()
+        return True
+
+    # ── UIA structured-control actions ────────────────────────────────────────
+    # Deterministic form-control manipulation through the accessibility
+    # tree (ValuePattern / SelectionItemPattern / InvokePattern) with
+    # read-back verification inside windows_uia. Returning False sends
+    # the planner down the click/type fallback path.
+
+    def _do_set_value(self, step, x, y, x2, y2) -> bool:
+        if not step.target or step.value is None:
+            logger.error(f"[ACTION] set_value step {step.id} needs target and value")
+            return False
+        value, _sensitive = self._substitute_credentials(step.value)
+        from core import windows_uia
+        return windows_uia.set_element_value(step.target, value)
+
+    def _do_select(self, step, x, y, x2, y2) -> bool:
+        if not step.target or not step.value:
+            logger.error(f"[ACTION] select step {step.id} needs target and value")
+            return False
+        from core import windows_uia
+        return windows_uia.select_option(step.target, step.value)
+
+    def _do_invoke(self, step, x, y, x2, y2) -> bool:
+        if not step.target:
+            logger.error(f"[ACTION] invoke step {step.id} needs a target")
+            return False
+        from core import windows_uia
+        return windows_uia.invoke_element(step.target)
+
+    # ── Shared helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _substitute_credentials(value: str) -> tuple[str, bool]:
+        """Replace {{cred:site:field}} tokens with values from the OS keyring.
+
+        Returns (text, sensitive): sensitive is True when a substitution
+        happened, so the controller can suppress logging of the typed text.
+        """
+        try:
+            from utils.credentials import has_tokens, substitute
+            if has_tokens(value):
+                value = substitute(value)
+                logger.info("[ACTION] credential substitution applied")
+                return value, True
+        except Exception:
+            pass
+        return value, False

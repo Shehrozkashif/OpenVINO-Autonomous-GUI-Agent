@@ -14,7 +14,7 @@ OpenVINO™ Model Server. No cloud. No API keys. No data ever leaves your desk.
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![Backend](https://img.shields.io/badge/inference-OpenVINO%E2%84%A2%20Model%20Server-0068b5)](https://github.com/openvinotoolkit/model_server)
 [![GUI](https://img.shields.io/badge/GUI-PyQt6-41cd52)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Tests](https://img.shields.io/badge/tests-375%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-430%20passing-brightgreen)](#running-tests)
 
 [How It Works](#how-it-works) •
 [Architecture](#architecture) •
@@ -84,6 +84,10 @@ The system is organised into five layers. Every agent depends only on the
 `InferenceClient` protocol — never on a concrete backend — so the inference
 engine is drop-in replaceable.
 
+> **New to the code?** Start with the [Code Tour](docs/CODE_TOUR.md) — a
+> guided reading order through the modules, the design principles behind
+> recurring patterns, and an end-to-end trace of a real task.
+
 ```mermaid
 flowchart TB
     USER(["User instruction — <i>'Open Firefox and go to wikipedia.org'</i>"])
@@ -125,7 +129,7 @@ flowchart TB
     subgraph INFER_LAYER["&nbsp;Inference Layer · core/ovms_client.py — 100% local&nbsp;"]
         direction LR
         CLIENT["OVMSClient<br/>implements<br/>InferenceClient"]
-        OVMS["OpenVINO™ Model Server<br/>qwen3-8b-int4-ov LLM ·<br/>ui-tars-1.5-7b-int4-ov VLM<br/>OpenAI API · :8000"]
+        OVMS["OpenVINO™ Model Server<br/>qwen3-14b-int4-ov LLM ·<br/>ui-tars-1.5-7b-int4-ov VLM<br/>OpenAI API · :8000"]
         CLIENT -- "/v3/chat/completions" --> OVMS
     end
 
@@ -158,6 +162,31 @@ protection** never blind-retries non-repeatable actions like typing or Enter,
 and tasks completed via a recovery path are quarantined from success memory
 so broken plans can't poison future routing.
 
+### Long multi-step tasks
+
+Big jobs — scheduling a meeting, multi-app file pipelines — get four extra
+mechanisms:
+
+- **Structured form control** — `set_value` / `select` / `invoke` actions
+  manipulate text fields, dropdowns, date pickers, and buttons directly
+  through the Windows UIA accessibility tree (ValuePattern /
+  SelectionItemPattern / InvokePattern) and verify by reading the control
+  state back. No pixel-guessing on forms; falls back to click+type when an
+  app draws its own widgets.
+- **Adaptive budgets** — the task deadline scales with plan size
+  (`n_subtasks × subtask budget`, floored at 10 min), so an 8-subtask task
+  gets the time it legitimately needs while a stuck 2-subtask task still
+  dies quickly.
+- **Task-level replanning** — when a subtask fails, the router is re-consulted
+  with everything already completed and produces a fresh plan for the
+  remaining work using a different approach, instead of throwing the whole
+  task away (capped at 2 replans).
+- **Checkpoint & resume** — every completed subtask is checkpointed; re-running
+  an interrupted instruction within 30 minutes plans only the remaining work.
+- **Clarifying questions** — instructions like *"schedule a Zoom meeting"*
+  that omit required details (time, invitees) trigger a dialog asking for
+  them **before** execution starts, instead of guessing.
+
 ---
 
 ## Models
@@ -166,15 +195,19 @@ Model ids live in [`config.py`](config.py) — the single source of truth.
 
 | Role | Model (OVMS servable) | Source | Purpose |
 |------|-----------------------|--------|---------|
-| **LLM** | `qwen3-8b-int4-ov` | [`OpenVINO/Qwen3-8B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3-8B-int4-ov) (pre-converted) | Routing, planning, reflection reasoning |
+| **LLM** | `qwen3-14b-int4-ov` | [`OpenVINO/Qwen3-14B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3-14B-int4-ov) (pre-converted) | Routing, planning, reflection reasoning |
 | **VLM** | `ui-tars-1.5-7b-int4-ov` | [`ByteDance-Seed/UI-TARS-1.5-7B`](https://huggingface.co/ByteDance-Seed/UI-TARS-1.5-7B) (converted to INT4 on first run) | GUI grounding, visual verification |
 
 Both models are served by a **single OpenVINO™ Model Server instance** on one
 OpenAI-compatible endpoint (`http://localhost:8000/v3/chat/completions`) and
-selected per request by the `model` field. On a 16 GB Intel® GPU both INT4
-models (~5 GB weights each) plus KV-cache (2 GB each by default) stay resident
-— no model swapping. Adjust `KV_CACHE_SIZE_GB` and `TARGET_DEVICE` (GPU / CPU
-/ NPU / AUTO) in [`config.py`](config.py) for your hardware.
+selected per request by the `model` field. The default sizing targets a
+**24 GB Intel® GPU**: 14B LLM weights (~9.7 GB) + 7B VLM weights (~5 GB) +
+KV-caches (4 GB LLM / 2 GB VLM) stay resident — no model swapping. On a
+16 GB GPU switch the LLM to `qwen3-8b-int4-ov` / `OpenVINO/Qwen3-8B-int4-ov`
+and set `LLM_KV_CACHE_GB = 2` (the swap is two lines in `config.py`;
+`start.py` re-exports and unregisters the old servable automatically).
+Adjust `LLM_KV_CACHE_GB`, `VLM_KV_CACHE_GB`, and `TARGET_DEVICE`
+(GPU / CPU / NPU / AUTO) in [`config.py`](config.py) for your hardware.
 
 ---
 
@@ -185,7 +218,7 @@ models (~5 GB weights each) plus KV-cache (2 GB each by default) stay resident
 | OS | Windows 10 | Windows 11 |
 | Python | 3.10 | 3.12 |
 | RAM | 16 GB | 32 GB |
-| GPU VRAM | 16 GB Intel Arc / iGPU (both models resident) | 24 GB+ (larger KV-cache) |
+| GPU VRAM | 16 GB Intel Arc / iGPU (with `qwen3-8b-int4-ov`) | 24 GB (default config: 14B LLM + larger KV-cache) |
 | Disk | 20 GB free | 30 GB free |
 
 ---
@@ -252,9 +285,9 @@ pip install -r requirements.txt   # includes optimum-intel[openvino] and nncf
 
 # 1. Pull / convert both models into the OVMS repository (writes models/config.json)
 python tools/ovms/export_model.py text_generation `
-  --source_model OpenVINO/Qwen3-8B-int4-ov  --model_name qwen3-8b-int4-ov `
+  --source_model OpenVINO/Qwen3-14B-int4-ov  --model_name qwen3-14b-int4-ov `
   --weight-format int4 --config_file_path models/config.json `
-  --model_repository_path models --target_device GPU --cache_size 2
+  --model_repository_path models --target_device GPU --cache_size 4
 
 python tools/ovms/export_model.py text_generation `
   --source_model ByteDance-Seed/UI-TARS-1.5-7B --model_name ui-tars-1.5-7b-int4-ov `
@@ -326,8 +359,10 @@ intel-openvino-desktop-agent/
   prompt injection.
 - **Kill switch** — press Esc three times, or slam the mouse into the
   top-left corner, to stop the agent instantly and release all held keys.
-- **Wall-clock budgets** — a stuck task aborts (default 10 min/task,
-  4 min/subtask) instead of running unbounded.
+- **Wall-clock budgets** — a stuck task aborts instead of running unbounded
+  (4 min/subtask; the task budget scales with plan size, min 10 min).
+- **Human confirmation** — destructive commands pop a yes/no dialog when the
+  GUI is attached; unattended, HIGH-severity commands are blocked outright.
 - **Credential safety** — `{{cred:site:field}}` values live in the OS keyring,
   are redacted from all logs, and are cleared from the clipboard after paste.
 - **Keyboard injection** uses raw `win32 SendInput` via `ctypes` — standard
@@ -352,6 +387,10 @@ ruff check .
 
 # End-to-end pipeline check (requires OVMS running + a live desktop)
 python tests/e2e/test_pipeline.py
+
+# Long-horizon live suite (multi-subtask chains; LIVE_ZOOM=1 enables the
+# Zoom meeting-scheduling smoke test on machines with Zoom installed)
+python tests/live/test_longhorizon.py
 ```
 
 ---
@@ -363,7 +402,7 @@ python tests/e2e/test_pipeline.py
 | `Could not connect to OpenVINO Model Server` | Run `python start.py`; check `ovms.log` and `curl localhost:8000/v1/config` |
 | Native `ovms.exe` not found | Set `OVMS_DIR` to the folder containing `ovms.exe` |
 | `ModuleNotFoundError: No module named 'config'` | You ran OVMS's `setupvars` in your agent shell — it hijacks the venv's Python. Open a fresh terminal, activate the venv, and run `python start.py` |
-| `Requested KV-cache size is larger than available memory` | Lower `KV_CACHE_SIZE_GB` in `config.py` (default: 2 GB per model). Total must satisfy: 2 × `KV_CACHE_SIZE_GB` + ~10 GB model weights < your GPU's VRAM |
+| `Requested KV-cache size is larger than available memory` | Lower `LLM_KV_CACHE_GB` / `VLM_KV_CACHE_GB` in `config.py` (defaults: 4 / 2 GB). Total must satisfy: caches + ~15 GB model weights < your GPU's VRAM |
 | Model files have `Access is denied` | Delete the model folder from an **elevated** terminal: `rd /s /q models\ui-tars-1.5-7b-int4-ov`, then re-run `python start.py` to re-export |
 | Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers |
 | Agent clicks wrong place | Lower screen scaling in Windows display settings |

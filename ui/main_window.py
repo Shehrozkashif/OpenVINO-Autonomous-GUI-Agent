@@ -53,6 +53,11 @@ class WorkerSignals(QObject):
     screenshot_update = pyqtSignal(bytes)
     task_complete = pyqtSignal(dict)
     error = pyqtSignal(str)
+    # Blocking questions from the worker thread (missing-parameter elicitation,
+    # destructive-command confirmation). ctx = {"event": threading.Event,
+    # "answer": [None]} — the UI slot fills answer and sets the event.
+    ask_user = pyqtSignal(str, object)
+    confirm_action = pyqtSignal(str, str, object)
 
 
 class Shell(QWidget):
@@ -258,6 +263,50 @@ class DesktopGUIAgent(QMainWindow):
         self.signals.screenshot_update.connect(self._show_screenshot)
         self.signals.task_complete.connect(self._on_done)
         self.signals.error.connect(self._on_error)
+        self.signals.ask_user.connect(self._on_ask_user)
+        self.signals.confirm_action.connect(self._on_confirm_action)
+
+    # ── Blocking questions from the worker thread ─────────────────────────────
+
+    def _on_ask_user(self, question: str, ctx: dict):
+        """UI-thread slot: ask the user for a missing detail (e.g. meeting time)."""
+        from PyQt6.QtWidgets import QInputDialog
+        try:
+            text, ok = QInputDialog.getText(self, "The agent needs a detail", question)
+            ctx["answer"][0] = text.strip() if ok and text.strip() else None
+        finally:
+            ctx["event"].set()
+
+    def _on_confirm_action(self, summary: str, command: str, ctx: dict):
+        """UI-thread slot: confirm a potentially destructive command."""
+        reply = QMessageBox.question(
+            self, "Confirm potentially destructive action",
+            f"{summary}\n\nCommand:\n{command}\n\nAllow the agent to run this?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        try:
+            ctx["answer"][0] = reply == QMessageBox.StandardButton.Yes
+        finally:
+            ctx["event"].set()
+
+    def _ask_blocking(self, question: str) -> str | None:
+        """Called from the worker thread. Blocks (max 180 s) until the user
+        answers in the UI thread; returns None on timeout or dismissal.
+        """
+        ctx = {"event": threading.Event(), "answer": [None]}
+        self.signals.ask_user.emit(question, ctx)
+        ctx["event"].wait(timeout=180)
+        return ctx["answer"][0]
+
+    def _confirm_blocking(self, summary: str, command: str) -> bool:
+        """Called from the worker thread. Blocks (max 120 s) for a yes/no;
+        returns False (deny) on timeout — never default-allow.
+        """
+        ctx = {"event": threading.Event(), "answer": [False]}
+        self.signals.confirm_action.emit(summary, command, ctx)
+        ctx["event"].wait(timeout=120)
+        return bool(ctx["answer"][0])
 
     def _start_screen_timer(self):
         self._screen_timer = QTimer(self)
@@ -323,6 +372,10 @@ class DesktopGUIAgent(QMainWindow):
         try:
             self.orchestrator.log = \
                 lambda msg: self.signals.log_update.emit(msg)
+            # Human-in-the-loop hooks: missing-detail questions and
+            # destructive-command confirmations pop dialogs on the UI thread.
+            self.orchestrator.on_ask = self._ask_blocking
+            self.orchestrator.on_confirm = self._confirm_blocking
             result = self.orchestrator.execute(instruction)
             self.signals.task_complete.emit(result)
         except Exception as e:

@@ -20,7 +20,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
@@ -49,12 +49,19 @@ class OrchestratorConfig:
     consecutive_failures_limit: int = 3
     # Wall-clock safety budgets (H8). A stuck task (e.g. repeated 30-50 s VLM
     # swaps) must not run unbounded. 0 disables a budget.
-    task_deadline_s: float = 600.0      # hard cap on a whole instruction
+    # task_deadline_s is a FLOOR: the effective budget scales with plan size
+    # (n_subtasks × subtask_deadline_s) so a legitimate 8-subtask task is not
+    # killed by a cap tuned for 2-subtask tasks. See _effective_task_deadline.
+    task_deadline_s: float = 600.0      # minimum budget for a whole instruction
     subtask_deadline_s: float = 240.0   # hard cap on a single subtask
     # After this many consecutive step failures, planning escalates from the
     # text path (OCR context → LLM) to the visual path (screenshot → UI-TARS),
     # which sees icons/layout the text path is blind to. 0 disables escalation.
     visual_replan_after: int = 2
+    # When a subtask fails, the router is re-consulted with the completed state
+    # to produce a fresh plan for the remaining work (different approach) this
+    # many times before the task is declared failed. 0 disables replanning.
+    max_task_replans: int = 2
 
 
 # Per-action-type limit on consecutive identical successful steps.
@@ -64,7 +71,43 @@ DEDUP_LIMIT_BY_ACTION_TYPE: dict[str, int] = {
     "click":       2,   # allow up to 2 repeats (e.g. re-focusing a window)
     "key_press":   3,   # allow up to 3 repeats (e.g. multiple Escape/arrow presses)
     "right_click": 1,   # context menu should open once
+    "invoke":      1,   # a button pressed twice → double submit
+    "set_value":   1,   # same field set to the same value twice → a loop
+    "select":      2,   # re-selecting is harmless but twice is enough
 }
+
+
+@dataclass
+class _SubtaskRun:
+    """Mutable state threaded through one _execute_subtask() step loop.
+
+    Bundling it in one object lets each phase of the loop live in its own
+    named method (_plan_next_step, _run_step_attempts, _judge_reflection,
+    _record_step_success/_failure) instead of one interleaved 500-line body.
+    """
+
+    started_at: float
+    # Ground-truth facts about the subtask, fixed at setup time.
+    is_launch_goal: bool = False           # "open <app>" — verified via process list
+    goal_proc: str = ""                    # expected process name for the launch goal
+    baseline_windows: int = 0              # window count before the launch attempt
+    is_cmd_subtask: bool = False           # "run: <cmd>" — verified on disk/terminal
+    save_target: str = ""                  # "save as <path>" — verified on disk
+    type_payload: str = ""                 # "type: <text>" — done once typed+verified
+    # Rolling execution state, updated as steps run.
+    completed: list = field(default_factory=list)   # step history shown to the planner
+    consecutive_failures: int = 0
+    cached_ocr: str = ""                   # reuse reflection's OCR for the next plan
+    screen_context: str = ""               # OCR context the current step was planned on
+    last_step_sig: tuple = ()              # (action_type, target, value, key)
+    same_step_streak: int = 0              # consecutive successes of the identical step
+    typed_ok: bool = False                 # a type step succeeded in this subtask
+    last_error: str = ""                   # most recent step failure reason
+    # Steps planned ahead by the last plan_steps() call. Executing from this
+    # queue skips the ~7-10 s planning call per step; it is flushed whenever
+    # a step fails or its outcome is uncertain, forcing a fresh plan against
+    # the live screen.
+    step_queue: list = field(default_factory=list)
 
 
 class TaskOrchestrator:
@@ -81,6 +124,7 @@ class TaskOrchestrator:
         on_step_log: Callable[[str], None] | None = None,
         ocr: Optional["OCREngine"] = None,
         on_confirm: Callable[[str, str], bool] | None = None,
+        on_ask: Callable[[str], str | None] | None = None,
     ):
         self.router    = router
         self.planner   = planner
@@ -95,6 +139,10 @@ class TaskOrchestrator:
         # Signature: on_confirm(summary, command) -> bool. When None, the action
         # firewall blocks HIGH-severity commands and allows MEDIUM ones (logged).
         self.on_confirm = on_confirm
+        # Optional question handler for missing required parameters (a meeting
+        # time, an email recipient). Signature: on_ask(question) -> answer|None.
+        # When None the agent proceeds with the instruction as given.
+        self.on_ask = on_ask
         self._stop_event = threading.Event()
         # Set when a subtask completes via a degraded path (loop-guard recovery,
         # optimistic parse-failure success, etc.). Such a task is NOT stored in
@@ -216,6 +264,11 @@ class TaskOrchestrator:
         start_time = time.time()
         self._arm_kill_switch()
 
+        # Ask the user for required details the instruction omits (a meeting
+        # time, a recipient) BEFORE any planning — guessing them wastes the
+        # whole run. No-op when no question handler is wired.
+        instruction = self._elicit_missing_parameters(instruction)
+
         # Memory hint for the router
         memory_hint = None
         try:
@@ -229,6 +282,25 @@ class TaskOrchestrator:
                 self.log(f"[MEMORY] Similar past task found (sim={similar['similarity']:.2f})")
         except Exception:
             pass
+
+        # Resume hint — a recent interrupted run of this exact instruction left
+        # a checkpoint of what already completed; the router plans the rest.
+        try:
+            resume_descs = self.memory.load_checkpoint(instruction)
+        except Exception:
+            resume_descs = None
+        if resume_descs:
+            done = "; ".join(resume_descs)
+            resume_hint = (
+                f"RESUME: an earlier run of this exact task was interrupted after "
+                f"completing these sub-tasks (their effects are already on the "
+                f"machine — do NOT repeat them): {done}. Plan ONLY the remaining work."
+            )
+            memory_hint = f"{memory_hint}\n{resume_hint}" if memory_hint else resume_hint
+            self.log(
+                f"[RESUME] Checkpoint found — {len(resume_descs)} subtask(s) "
+                f"already completed in a previous run"
+            )
 
         screen_context = self._get_screen_context()
 
@@ -249,52 +321,85 @@ class TaskOrchestrator:
             )
         self.log(f"[ROUTER] {len(subtasks)} sub-task(s)")
 
+        queue: list[SubTask] = self._topological_sort(subtasks)
+        # H8, adaptive: budget scales with plan size so long multi-step tasks
+        # are not killed by a cap tuned for short ones.
+        task_deadline_s = self._effective_task_deadline(len(queue))
+        if task_deadline_s:
+            self.log(
+                f"[BUDGET] Task deadline {task_deadline_s:.0f}s "
+                f"for {len(queue)} subtask(s)"
+            )
+
         completed_subtask_ids = []
         completed_subtask_descs: list[str] = []   # for inter-subtask context
+        executed_subtasks: list[SubTask] = []     # what actually ran (incl. replans)
         failed = False
+        replans_used = 0
 
-        for subtask in self._topological_sort(subtasks):
+        while queue:
+            subtask = queue.pop(0)
             if self._stop_event.is_set():
                 self.log("[TASK] Stopped by user.")
                 failed = True
                 break
 
-            # H8: enforce the task-level wall-clock budget.
-            if self.config.task_deadline_s and (
-                time.time() - start_time > self.config.task_deadline_s
-            ):
+            # H8: enforce the (adaptive) task-level wall-clock budget.
+            if task_deadline_s and (time.time() - start_time > task_deadline_s):
                 self.log(
-                    f"[TASK] Deadline ({self.config.task_deadline_s:.0f}s) exceeded "
+                    f"[TASK] Deadline ({task_deadline_s:.0f}s) exceeded "
                     f"— aborting before subtask {subtask.id}"
                 )
                 failed = True
                 break
 
             self.log(f"\n[SUBTASK {subtask.id}] {subtask.description}")
-            success = self._execute_subtask(subtask, task_context=completed_subtask_descs)
+            success = self._run_subtask_with_launch_retry(
+                subtask, completed_subtask_descs
+            )
 
-            if success:
-                success = self._verify_launch(subtask)
-                if not success:
-                    # Planner returned "goal achieved" but the app is not actually running.
-                    # Retry with an explicit hint: the icon-click approach failed, use the
-                    # search launcher instead. This prevents repeating the same wrong strategy.
-                    self.log(f"  [RETRY] Launch not confirmed — re-running subtask {subtask.id}")
-                    retry_ctx = completed_subtask_descs + [
-                        f"[RETRY NOTE] Clicking the icon or taskbar entry for "
-                        f"'{subtask.description}' did NOT launch the app. "
-                        f"Use the search launcher instead: "
-                        f"key_press winleft → type app name → key_press enter."
-                    ]
-                    success = self._execute_subtask(subtask, task_context=retry_ctx)
-                    if success:
-                        success = self._verify_launch(subtask)
+            if not success and not self._stop_event.is_set() and (
+                replans_used < self.config.max_task_replans
+            ):
+                # Task-level recovery: hand the completed state back to the
+                # router for a fresh plan of the remaining work, instead of
+                # throwing away everything done so far.
+                replans_used += 1
+                self.log(
+                    f"[REPLAN] Subtask {subtask.id} failed — re-planning remaining "
+                    f"work ({replans_used}/{self.config.max_task_replans})"
+                )
+                new_queue = self._replan_remaining(
+                    instruction, list(completed_subtask_descs), subtask,
+                    executed_subtasks, queue,
+                )
+                if new_queue:
+                    queue = new_queue
+                    # Extend the budget to cover the replanned remainder.
+                    if task_deadline_s and self.config.subtask_deadline_s:
+                        task_deadline_s = max(
+                            task_deadline_s,
+                            (time.time() - start_time)
+                            + len(queue) * self.config.subtask_deadline_s,
+                        )
+                    self.log(
+                        f"[REPLAN] Continuing with {len(new_queue)} recovery subtask(s)"
+                    )
+                    continue
+                self.log("[REPLAN] Router could not produce a recovery plan")
 
             if success:
                 completed_subtask_ids.append(subtask.id)
                 completed_subtask_descs.append(subtask.description)
+                executed_subtasks.append(subtask)
                 self.log(f"[SUBTASK {subtask.id}] Complete")
-                if subtask != subtasks[-1]:
+                # Checkpoint after every completed subtask so an interrupted or
+                # failed long task resumes here instead of starting over.
+                try:
+                    self.memory.save_checkpoint(instruction, list(completed_subtask_descs))
+                except Exception:
+                    pass
+                if queue:
                     self._wait_for_settle(min_s=0.5, max_s=3.0)
             else:
                 self.log(f"[SUBTASK {subtask.id}] Failed — stopping task")
@@ -317,10 +422,22 @@ class TaskOrchestrator:
         # AND no subtask finished via a degraded path (loop-guard recovery,
         # optimistic parse-failure success). Storing degraded runs would poison
         # future routing hints with plans that did not actually work.
+        # executed_subtasks (not the original decomposition) is stored — after a
+        # replan they are the plan that actually worked.
         if not failed and not self._degraded:
-            self.memory.store_successful_task(instruction, subtasks, elapsed)
+            self.memory.store_successful_task(
+                instruction, executed_subtasks or subtasks, elapsed
+            )
         elif not failed and self._degraded:
             self.log("[MEMORY] Task completed via a degraded path — not stored as a reusable success")
+
+        # A finished task needs no resume checkpoint; a failed one keeps it so
+        # the next run of the same instruction continues from here.
+        if not failed:
+            try:
+                self.memory.clear_checkpoint(instruction)
+            except Exception:
+                pass
 
         return {
             "task_id": task_id,
@@ -330,6 +447,117 @@ class TaskOrchestrator:
             "summary": summary,
             "extracted_data": dict(self._extracted_data),
         }
+
+    # ── Long-task support: budgets, replanning, resume, clarification ─────────
+
+    def _effective_task_deadline(self, n_subtasks: int) -> float:
+        """Task budget scaled to plan size.
+
+        task_deadline_s acts as a floor; each subtask brings its own
+        subtask_deadline_s of budget, so an 8-subtask meeting-scheduling task
+        gets the time it legitimately needs while a stuck 2-subtask task still
+        dies quickly. Returns 0 when budgets are disabled.
+        """
+        if not self.config.task_deadline_s:
+            return 0.0
+        if not self.config.subtask_deadline_s:
+            return self.config.task_deadline_s
+        return max(
+            self.config.task_deadline_s,
+            n_subtasks * self.config.subtask_deadline_s,
+        )
+
+    def _run_subtask_with_launch_retry(
+        self, subtask: SubTask, completed_subtask_descs: list[str]
+    ) -> bool:
+        """Execute one subtask; on an unconfirmed app launch, retry once with an
+        explicit use-the-search-launcher hint (the icon-click route failed).
+        """
+        success = self._execute_subtask(subtask, task_context=completed_subtask_descs)
+        if success:
+            success = self._verify_launch(subtask)
+            if not success:
+                self.log(f"  [RETRY] Launch not confirmed — re-running subtask {subtask.id}")
+                retry_ctx = completed_subtask_descs + [
+                    f"[RETRY NOTE] Clicking the icon or taskbar entry for "
+                    f"'{subtask.description}' did NOT launch the app. "
+                    f"Use the search launcher instead: "
+                    f"key_press winleft → type app name → key_press enter."
+                ]
+                success = self._execute_subtask(subtask, task_context=retry_ctx)
+                if success:
+                    success = self._verify_launch(subtask)
+        return success
+
+    def _replan_remaining(
+        self,
+        instruction: str,
+        completed_descs: list[str],
+        failed_subtask: SubTask,
+        executed_subtasks: list[SubTask],
+        old_queue: list[SubTask],
+    ) -> list[SubTask]:
+        """Ask the router for a fresh plan covering only the remaining work.
+
+        Returns the new subtask queue (ids renumbered above every id used so
+        far, so logs and dependency references never collide), or [] when the
+        router cannot help — the caller then fails the task as before.
+        """
+        try:
+            screen_context = self._get_screen_context()
+            fresh = self.router.replan(
+                instruction, completed_descs, failed_subtask.description,
+                screen_context=screen_context,
+            )
+        except Exception as e:
+            self.log(f"  [REPLAN] Router error: {e}")
+            return []
+        if not fresh:
+            return []
+        watermark = max(
+            [s.id for s in executed_subtasks]
+            + [s.id for s in old_queue]
+            + [failed_subtask.id, 0]
+        )
+        renumbered = [
+            SubTask(
+                id=watermark + st.id,
+                description=st.description,
+                depends_on=[watermark + d for d in st.depends_on],
+            )
+            for st in fresh
+        ]
+        return self._topological_sort(renumbered)
+
+    def _elicit_missing_parameters(self, instruction: str) -> str:
+        """Ask the user (via on_ask) for required details the instruction omits,
+        and fold the answers back into the instruction. Proceeds unchanged when
+        no handler is wired, nothing is missing, or the user declines to answer.
+        """
+        if self.on_ask is None:
+            return instruction
+        try:
+            questions = self.router.missing_parameters(instruction)
+        except Exception:
+            return instruction
+        if not questions:
+            return instruction
+        answers = []
+        for q in questions:
+            self.log(f"[CLARIFY] {q}")
+            try:
+                ans = self.on_ask(q)
+            except Exception:
+                ans = None
+            if ans and ans.strip():
+                answers.append(f"{q} -> {ans.strip()}")
+        if answers:
+            instruction = (
+                f"{instruction} (details provided by the user: "
+                + "; ".join(answers) + ")"
+            )
+            self.log(f"[CLARIFY] Instruction enriched with {len(answers)} detail(s)")
+        return instruction
 
     # ── Subtask execution loop ────────────────────────────────────────────────
 
@@ -428,18 +656,14 @@ class TaskOrchestrator:
 
         task_context: summaries of subtasks completed before this one in the same task.
         Each step planner sees: goal + inter-subtask context + within-subtask history + screen.
-        """
-        completed: list[str] = []
-        consecutive_failures = 0
-        _cached_ocr: str = ""   # reuse reflection's OCR for next planning step
-        _last_step_sig: tuple = ()    # (action_type, target, value, key)
-        _same_step_streak: int = 0   # consecutive successes of the identical step
-        # Steps planned ahead by the last plan_steps() call. Executing from this
-        # queue skips the ~7-10 s planning call per step; it is flushed whenever
-        # a step fails or its outcome is uncertain, forcing a fresh plan against
-        # the live screen.
-        _step_queue: list[ActionStep] = []
 
+        This method is only the skeleton; each phase of the loop is a named
+        method so it can be read (and tested) in isolation:
+          _plan_next_step        → pick the next action (queue / text / visual)
+          _run_step_attempts     → execute it under the retry + verification policy
+          _record_step_success   → history, early-exit checks, loop guard
+          _record_step_failure   → history, failure memory, abort threshold
+        """
         # Fast path: recognised multi-step patterns run with zero LLM calls.
         if self._try_burst(subtask):
             return True
@@ -447,35 +671,36 @@ class TaskOrchestrator:
         _is_launch_goal, _goal_proc, _baseline_windows, task_context = (
             self._setup_launch_goal(subtask, task_context)
         )
-
-        # Terminal-command subtasks get DETERMINISTIC verification: a successful
-        # shell command prints nothing (new empty prompt), which OCR-based
-        # reflection systematically mis-reads as "no change → failed". Check the
-        # real world instead: file created/deleted on disk, or error text in
-        # the terminal output.
-        _is_cmd_subtask = "run:" in subtask.description.lower()
-        _typed_ok = False   # a type step succeeded in this subtask
-
-        # "Save the document as <path>" subtasks are ALSO file-producing, but
-        # through a GUI dialog. Editors give no OCR-readable "saved" signal, so
-        # reflection loops on ctrl+s forever. Verify the same way as commands:
-        # the subtask is DONE the moment the named file appears on disk (fresh).
-        _save_target = self._subtask_save_target(subtask)
-
+        run = _SubtaskRun(
+            started_at=time.time(),
+            is_launch_goal=_is_launch_goal,
+            goal_proc=_goal_proc,
+            baseline_windows=_baseline_windows,
+            # Terminal-command subtasks get DETERMINISTIC verification: a
+            # successful shell command prints nothing (new empty prompt), which
+            # OCR-based reflection systematically mis-reads as "no change →
+            # failed". Check the real world instead: file created/deleted on
+            # disk, or error text in the terminal output.
+            is_cmd_subtask="run:" in subtask.description.lower(),
+            # "Save the document as <path>" subtasks are ALSO file-producing,
+            # but through a GUI dialog. Editors give no OCR-readable "saved"
+            # signal, so reflection loops on ctrl+s forever. Verify the same
+            # way as commands: the subtask is DONE the moment the named file
+            # appears on disk (fresh).
+            save_target=self._subtask_save_target(subtask),
+        )
         # "... type: <text>" subtasks are complete the moment that text has been
-        # typed and verified. Without this, the 8B planner re-types the payload
+        # typed and verified. Without this, the planner re-types the payload
         # (duplicating it in the document) or drifts into ctrl+s save steps that
         # belong to a later subtask — burning the whole subtask budget.
-        _type_payload = None if _save_target else self._subtask_type_payload(subtask)
+        run.type_payload = None if run.save_target else self._subtask_type_payload(subtask)
 
-        _subtask_start = time.time()
-
-        # The Save-As key sequence is fixed and well-defined, but the 8B planner
+        # The Save-As key sequence is fixed and well-defined, but the planner
         # is unreliable at threading the dialog (it loops on ctrl+s and never
         # types the path). Run it deterministically first and confirm on disk;
         # only the key sequence is fixed — the path is model-chosen. On any
         # failure, fall through to the normal planning loop.
-        if _save_target and self._try_save_as(_save_target, _subtask_start):
+        if run.save_target and self._try_save_as(run.save_target, run.started_at):
             return True
 
         for step_idx in range(self.config.max_steps_per_subtask):
@@ -484,7 +709,7 @@ class TaskOrchestrator:
 
             # H8: enforce the per-subtask wall-clock budget.
             if self.config.subtask_deadline_s and (
-                time.time() - _subtask_start > self.config.subtask_deadline_s
+                time.time() - run.started_at > self.config.subtask_deadline_s
             ):
                 self.log(
                     f"  Subtask deadline ({self.config.subtask_deadline_s:.0f}s) "
@@ -495,477 +720,551 @@ class TaskOrchestrator:
             # A "save as <path>" subtask is COMPLETE the instant the file lands on
             # disk. Check before planning so a successful save short-circuits the
             # ctrl+s retry loop (editors show no readable confirmation).
-            if _save_target and self._file_saved_fresh(_save_target, _subtask_start):
+            if run.save_target and self._file_saved_fresh(run.save_target, run.started_at):
                 self.log(
-                    f"  [SAVE-CHECK] '{_save_target}' on disk (fresh) — save confirmed"
+                    f"  [SAVE-CHECK] '{run.save_target}' on disk (fresh) — save confirmed"
                 )
                 return True
 
-            screen_context = _cached_ocr if _cached_ocr else self._get_screen_context()
-            _cached_ocr = ""   # consume — will be refreshed after reflection
-
-            # Pass failure hints so planner avoids repeating known-bad patterns
-            failure_hints = []
-            try:
-                failure_hints = self.memory.get_failure_hints(subtask.description)
-            except Exception:
-                pass
-
-            # Escalate to visual planning (screenshot → UI-TARS) once the text
-            # path has failed visual_replan_after times in a row — the text
-            # planner is blind to icons/layout, which is usually why it's stuck.
-            # Exception: terminals. A failing terminal subtask needs a corrected
-            # COMMAND, not a click — visual clicking inside a console wastes a
-            # 30-60s VLM swap and can never fix the error.
-            _visual_mode = (
-                self.config.visual_replan_after > 0
-                and consecutive_failures >= self.config.visual_replan_after
-            )
-            # A "run: <cmd>" subtask is fixed by a CORRECTED COMMAND, never by the
-            # VLM clicking/typing into the console. Escalating it to visual mode
-            # re-types the command (corrupting the prompt line) and burns a 30-60s
-            # model swap. Block it deterministically on _is_cmd_subtask — do not
-            # rely on foreground-process detection, which can misfire right after
-            # an Enter press and let the destructive re-type through.
-            if _visual_mode and (_is_cmd_subtask or self._foreground_is_terminal()):
-                self.log(
-                    "  [VISUAL-REPLAN] Skipped — terminal command subtask "
-                    "(clicks/re-typing can't fix command errors)"
-                )
-                _visual_mode = False
-            try:
-                if _visual_mode:
-                    self.log("  [VISUAL-REPLAN] Text planning stuck — asking VLM with screenshot")
-                    try:
-                        step = self._plan_visual(subtask, completed)
-                    except PlanningParseError:
-                        raise
-                    except Exception as e:
-                        # VLM infrastructure error (timeout, model swap failure):
-                        # degrade gracefully to the text planner for this step.
-                        self.log(f"  [VISUAL-REPLAN] VLM error ({e}) — using text planner")
-                        _visual_mode = False
-                    if _visual_mode and step is None:
-                        # VLM says finished() — plausible (earlier failures may
-                        # have been reflection false-negatives), but don't store
-                        # this run as a clean reusable success.
-                        self._degraded = True
-                        return True
-                if not _visual_mode:
-                    if _step_queue:
-                        step = _step_queue.pop(0)
-                        step.id = len(completed) + 1
-                        self.log(
-                            f"  [PLAN-QUEUE] Executing queued step "
-                            f"({len(_step_queue)} remaining after this)"
-                        )
-                    else:
-                        planned = self.planner.plan_steps(
-                            subtask, screen_context, completed,
-                            task_context=task_context, failure_hints=failure_hints,
-                        )
-                        if not planned:
-                            # A "save as <path>" subtask has ONE ground truth:
-                            # the file on disk. The planner's "goal achieved"
-                            # must not overrule its absence — that reports a
-                            # false success with no file produced.
-                            if _save_target and not self._file_saved_fresh(
-                                _save_target, _subtask_start
-                            ):
-                                self.log(
-                                    "  Planner declared done but "
-                                    f"'{_save_target}' is not on disk — rejecting"
-                                )
-                                completed.append(
-                                    "[FAILED: planner declared done but the "
-                                    "target file is not on disk]"
-                                )
-                                consecutive_failures += 1
-                                if consecutive_failures >= self.config.consecutive_failures_limit:
-                                    self.log(
-                                        f"  {self.config.consecutive_failures_limit} "
-                                        f"consecutive failures — aborting subtask"
-                                    )
-                                    return False
-                                continue
-                            return True   # planner says goal is achieved
-                        step, _step_queue = planned[0], list(planned[1:])
-            except PlanningParseError as e:
-                # Unparseable planner output is a planning FAILURE, not goal
-                # achievement. Record it and let the loop try again (or abort
-                # via the consecutive-failures limit).
-                self.log(f"  Planning failed: {e}")
-                completed.append("[FAILED: planner produced unparseable output]")
-                consecutive_failures += 1
-                if consecutive_failures >= self.config.consecutive_failures_limit:
-                    self.log(
-                        f"  {self.config.consecutive_failures_limit} consecutive failures"
-                        f" — aborting subtask"
-                    )
-                    return False
+            outcome, step = self._plan_next_step(run, subtask, task_context)
+            if outcome == "done":
+                return True
+            if outcome == "abort":
+                return False
+            if outcome == "retry":
                 continue
 
             self.log(f"  Step {step_idx + 1}: [{step.action_type}] {step.description}")
 
-            # Terminal-command subtasks verify the typed command DETERMINISTICALLY
-            # at the Enter press (file-on-disk / shell-error check in
-            # _verify_command_effect). OCR-reading a dark console to confirm a type
-            # step systematically misfires ("FAILED" on correct typing) and used to
-            # trigger a destructive re-type. Defer to the authoritative Enter check.
-            _cmd_type_step = _is_cmd_subtask and step.action_type == "type"
-            skip_reflection = step.action_type in ("wait", "extract") or _cmd_type_step
-            if _cmd_type_step:
-                self.log(
-                    "  [CMD-TYPE] Command typed — deferring verification to the "
-                    "Enter/disk check (skipping unreliable OCR reflection)"
-                )
-            step_success = False
-            last_error = ""
+            attempt_outcome = self._run_step_attempts(run, subtask, step)
+            if attempt_outcome == "subtask_done":
+                return True
 
-            # Fix C5: classify whether re-executing this exact step is safe.
-            # Non-idempotent actions change state every time they run: typing
-            # appends text again ("hellohello"), Enter submits/creates twice,
-            # ctrl+v pastes twice. For these, once the action has physically
-            # executed we must NOT blind-retry on an uncertain/failed verdict —
-            # we hand control back to the planner, which sees the live screen and
-            # decides the next action (it can tell the text is already there).
-            # Idempotent actions (click same coords, scroll, escape, nav keys)
-            # are safe to repeat, so they keep the normal retry behaviour.
-            _key_l = (step.key or "").lower()
-            _non_idempotent = (
-                step.action_type == "type"
-                or (step.action_type == "key_press" and _key_l in ("enter", "return", "space"))
-                or (step.action_type == "hotkey" and "v" in _key_l.split("+") and "ctrl" in _key_l)
+            decision = (
+                self._record_step_success(run, subtask, step)
+                if attempt_outcome == "step_ok"
+                else self._record_step_failure(run, step)
             )
-
-            for attempt in range(self.config.max_retries_per_step):
-                if attempt > 0:
-                    self.log(f"  Retry {attempt}/{self.config.max_retries_per_step}…")
-
-                # Capture pre-action hash for click steps BEFORE the action fires.
-                # The reflection agent's internal "before" capture runs AFTER execute(),
-                # so instant UI changes (menus opening) make before==after → false delta=0.
-                _pre_click_hash = None
-                if step.action_type in ("click", "right_click", "double_click"):
-                    try:
-                        from core.capture.screenshot import frame_phash
-                        _pre_click_hash = frame_phash(self.capturer.capture())
-                    except Exception:
-                        pass
-
-                exec_ok = self._execute_step(step)
-                if not exec_ok:
-                    last_error = "execution failed (element not found or action error)"
-                    continue
-
-                if skip_reflection:
-                    step_success = True
-                    break
-
-                # Deterministic type verification: read the focused control's
-                # value from the accessibility tree. Exact, ~50 ms, and skips
-                # the ~3-4 s OCR+LLM reflection call. Falls through to normal
-                # reflection when the control exposes no readable value.
-                if step.action_type == "type":
-                    time.sleep(0.3)   # let the control commit the input
-                    if self._typed_text_in_focused_control(step.value):
-                        self.log(
-                            "  [TYPE-VERIFY] Focused control contains the typed "
-                            "text — verified via accessibility tree"
-                        )
-                        step_success = True
-                        break
-
-                # Deterministic verification for the execute-Enter of a
-                # "run: <command>" subtask — checks the filesystem / terminal
-                # output instead of LLM reflection. On confirmed effect the
-                # whole subtask is done (command typed + executed + verified).
-                if (
-                    _is_cmd_subtask
-                    and step.action_type == "key_press"
-                    and (step.key or "").lower() == "enter"
-                ):
-                    _ok, _why = self._verify_command_effect(
-                        subtask, _subtask_start, _typed_ok
-                    )
-                    if _ok:
-                        self.log(f"  [CMD-CHECK] {_why} — command effect confirmed")
-                        return True
-                    last_error = _why
-                    self.log(f"  [CMD-CHECK] {_why}")
-                    break   # never blind-retry Enter; planner corrects the command
-
-                try:
-                    # Give apps extra time to open after a launcher Enter press.
-                    # 0.5 s is too short for Calculator/Notepad to show their UI.
-                    _is_launch_enter = (
-                        step.action_type == "key_press"
-                        and (step.key or "").lower() == "enter"
-                        and any(kw in step.description.lower()
-                                for kw in ("launch", "open", "start", "run"))
-                    )
-                    _reflect_wait = 1.5 if _is_launch_enter else self.config.reflection_wait_s
-                    reflection = self.reflector.verify(step, _reflect_wait,
-                                                       pre_hash=_pre_click_hash)
-                    _cached_ocr = reflection.ocr_text   # reuse for next planning call
-
-                    if reflection.success:
-                        step_success = True
-                        self.log(f"  Verified (conf={reflection.confidence:.2f})")
-                        time.sleep(0.1)
-                        break
-
-                    # "Screen unchanged" after a click is a false failure when
-                    # the click's whole effect was placing the caret — verify
-                    # against the accessibility tree instead of retrying blind.
-                    if (
-                        step.action_type == "click"
-                        and "unchanged" in (reflection.error_description or "").lower()
-                        and self._click_holds_focus(step)
-                    ):
-                        self.log(
-                            "  [FOCUS-CHECK] Clicked point owns keyboard focus "
-                            "(text control) — click confirmed"
-                        )
-                        step_success = True
-                        break
-
-                    # A save hotkey that opened the Save-As dialog IS a success,
-                    # but the LLM verifier reads it as "no confirmation dialog"
-                    # and fails it — which retries ctrl+s into the open dialog
-                    # (a no-op) until the budget is gone. Check deterministically.
-                    if (
-                        step.action_type == "hotkey"
-                        and (step.key or "").lower() in ("ctrl+s", "ctrl+shift+s")
-                        and self._save_dialog_visible()
-                    ):
-                        self.log("  [SAVE-CHECK] Save-As dialog is open — hotkey confirmed")
-                        step_success = True
-                        break
-
-                    # Step reported as not-confirmed by the reflector.
-                    # fail_threshold splits "no clear evidence of failure" from
-                    # "confidently failed":
-                    #   below threshold = UNCERTAIN  → see policy split below
-                    #   at/above        = CLEAR FAIL → retry (if safe) or stop
-                    _key = (step.key or "").lower()
-                    _is_launcher_key = step.action_type == "key_press" and _key in ("winleft", "enter")
-                    fail_threshold = (
-                        0.95
-                        if step.action_type in ("type", "hotkey") or _is_launcher_key
-                        else self.reflector.min_confidence
-                    )
-
-                    if reflection.confidence < fail_threshold:
-                        # UNCERTAIN — no CLEAR evidence the step failed. How we treat
-                        # this depends on whether re-doing the action is safe:
-                        if _non_idempotent:
-                            # type / Enter / Ctrl-V already physically fired and we
-                            # have NO reliable signal they failed (the reflector just
-                            # couldn't *read* the result — a dark console, an OCR
-                            # miss, a field it can't see). Re-doing them is exactly
-                            # what caused the double-typing, double-submits, retry
-                            # loops and slow runs. Accept and move on: the NEXT
-                            # planning step reads the LIVE screen and corrects course
-                            # if anything is actually wrong. Backstops remain —
-                            # _verify_command_effect checks commands on disk,
-                            # _verify_launch checks app launches, and the loop-guard
-                            # stops genuine repeats.
-                            self.log(
-                                f"  Uncertain (conf={reflection.confidence:.2f} < "
-                                f"{fail_threshold:.2f}) — action already performed; "
-                                f"accepting and letting the next step verify live"
-                            )
-                            # The "next step verifies live" guarantee requires a
-                            # fresh plan against the live screen — drop any steps
-                            # planned before this uncertain outcome.
-                            _step_queue = []
-                            step_success = True
-                            break
-                        # Idempotent action (click / scroll): safe to repeat, and a
-                        # dead click is caught RELIABLY by the screen-delta (phash)
-                        # check as a high-confidence failure — so retrying here costs
-                        # nothing and recovers genuinely-missed clicks.
-                        last_error = (
-                            f"uncertain outcome (conf={reflection.confidence:.2f}, "
-                            f"threshold={fail_threshold:.2f})"
-                        )
-                        self.log(f"  Uncertain result - retrying ({last_error})")
-                        # Fast-path: if the goal process is already running after an
-                        # uncertain click, skip the remaining retries.
-                        if _is_launch_goal and (
-                            step.action_type in ("click", "double_click")
-                        ):
-                            if self._goal_confirmed(_goal_proc, _baseline_windows):
-                                self.log(
-                                    f"  [GOAL-CHECK-EARLY] "
-                                    f"'{_goal_proc.split('.')[0]}' confirmed "
-                                    f"— accepting step"
-                                )
-                                step_success = True
-                                break
-                    else:
-                        # Reflector is confident the step failed.
-                        last_error = (
-                            reflection.error_description
-                            or "action did not produce expected result"
-                        )
-                        self.log(
-                            f"  Verification failed: {last_error} "
-                            f"(conf={reflection.confidence:.2f})"
-                        )
-                        # A confidently-failed non-idempotent action must also not
-                        # be blind-retried (Fix C5) — same double-execution risk.
-                        if not reflection.should_retry or _non_idempotent:
-                            # Definitive failure (or unsafe to retry) — stop here.
-                            break
-                except (ValueError, KeyError, AttributeError) as e:
-                    # Fix C2: a verifier parse error means the outcome is UNKNOWN,
-                    # not that the step succeeded. The old code set step_success=True
-                    # here, wiring "the verifier broke" to "the action worked" — a
-                    # systematic source of false successes. Treat it as an uncertain
-                    # result and let the retry loop re-verify; if retries are
-                    # exhausted the step is left failed so the planner can recover.
-                    self.log(
-                        f"  Reflection parse error ({type(e).__name__}) — "
-                        f"outcome uncertain, will re-verify"
-                    )
-                    last_error = f"verifier parse error ({type(e).__name__})"
-                    # fall through to next attempt without marking success
-                except Exception as e:
-                    # Infrastructure failure — retry with back-off
-                    self.log(f"  Reflection error ({type(e).__name__}: {e}) — retry")
-                    last_error = str(e)
-                    time.sleep(1.0)
-
-            if step_success:
-                if step.action_type == "type":
-                    _typed_ok = True
-                # Append extract result to step description for context
-                if step.action_type == "extract":
-                    key = step.target or step.description or f"item_{step.id}"
-                    val = self._extracted_data.get(key, "")
-                    completed.append(f"{step.description} → extracted: '{val}'")
-                else:
-                    completed.append(step.description)
-                consecutive_failures = 0
-
-                # Early-exit: a "... type: <text>" subtask is DONE once that text
-                # has been typed and verified — never give the planner a chance
-                # to re-type it or drift into save steps of a later subtask.
-                if (
-                    _type_payload
-                    and step.action_type == "type"
-                    and self._texts_equivalent(step.value or "", _type_payload)
-                ):
-                    self.log(
-                        "  [TYPE-CHECK] Requested text typed and verified — "
-                        "subtask complete"
-                    )
-                    return True
-
-                # Early-exit: after each successful step in a known app-launch subtask,
-                # check the process list on Windows. If the app is already running, the
-                # goal is achieved — return True immediately so the planner never gets a
-                # chance to generate spurious continuation steps (e.g. pressing Enter
-                # again inside a Calculator that is already open).
-                if _is_launch_goal and self._goal_confirmed(_goal_proc, _baseline_windows):
-                    _label = _goal_proc.split(".")[0]
-                    self.log(f"  [GOAL-CHECK] '{_label}' confirmed — goal achieved")
-                    return True
-
-                sig = (step.action_type, step.target, step.value, step.key)
-                if sig == _last_step_sig:
-                    _same_step_streak += 1
-                    _dedup_limit = DEDUP_LIMIT_BY_ACTION_TYPE.get(step.action_type, 2)
-                    if _same_step_streak > _dedup_limit:
-                        self.log(
-                            f"  [LOOP-GUARD] '{step.action_type}' repeated "
-                            f"{_same_step_streak + 1}× (limit={_dedup_limit}) — "
-                            f"loop detected, stopping subtask"
-                        )
-                        # Fix C4: a loop is a strong signal the plan is not working.
-                        # We still return True so a benign "planner won't emit done"
-                        # loop doesn't abort an otherwise-complete task, but we mark
-                        # the run degraded so it is NEVER stored as a reusable
-                        # success (which would poison future routing with a plan
-                        # that actually looped). See execute()'s memory gate.
-                        self._degraded = True
-                        # Exception: a terminal-command subtask ("run: <cmd>") that
-                        # looped AND has failed steps in its history almost
-                        # certainly never ran its command successfully. Declaring
-                        # it complete poisons every dependent subtask (they build
-                        # on a file/state that doesn't exist) — fail it honestly.
-                        if "run:" in subtask.description.lower() and any(
-                            c.startswith("[FAILED") for c in completed
-                        ):
-                            self.log(
-                                "  [LOOP-GUARD] Command subtask looped after "
-                                "failures — marking subtask FAILED"
-                            )
-                            return False
-                        if step.action_type in ("click", "right_click"):
-                            try:
-                                _esc = ActionStep(
-                                    id=0, subtask_id=step.subtask_id,
-                                    action_type="key_press",
-                                    target=None, value=None, key="escape",
-                                    description="Escape to dismiss stray menu",
-                                    verification="",
-                                )
-                                self._execute_step(_esc)
-                                self.log("  [LOOP-GUARD] Recovery Escape sent")
-                            except Exception:
-                                pass
-                        return True
-                else:
-                    _same_step_streak = 0
-                    _last_step_sig = sig
-            else:
-                note = (
-                    f"[FAILED: {last_error}] {step.description}"
-                    if last_error else f"[FAILED] {step.description}"
-                )
-                completed.append(note)
-                # The rest of the queued plan was built on this step succeeding —
-                # flush it so the next iteration re-plans from the live screen.
-                _step_queue = []
-
-                # Even on step failure, check if the goal process is now running.
-                # This handles the common case where key_press enter launches an app
-                # but the reflector times out before the app's UI is fully visible
-                # (reflection confidence 0.50 → step marked failed, yet app IS open).
-                if _is_launch_goal and self._goal_confirmed(_goal_proc, _baseline_windows):
-                    _label = _goal_proc.split(".")[0]
-                    self.log(
-                        f"  [GOAL-CHECK] '{_label}' confirmed "
-                        f"despite step failure — goal achieved"
-                    )
-                    return True
-
-                consecutive_failures += 1
-                self.log("  Step failed - re-evaluating next action")
-
-                # Persist failure so future tasks can avoid this pattern
-                try:
-                    self.memory.store_failure_pattern(
-                        target=step.target or step.description or "",
-                        action_type=step.action_type,
-                        error=last_error[:200] if last_error else "",
-                        app_context=screen_context[:100],
-                    )
-                except Exception:
-                    pass
-
-                if consecutive_failures >= self.config.consecutive_failures_limit:
-                    self.log(
-                        f"  {self.config.consecutive_failures_limit} consecutive failures"
-                        f" — aborting subtask"
-                    )
-                    return False
+            if decision is not None:
+                return decision
 
         self.log(f"  MAX_STEPS ({self.config.max_steps_per_subtask}) reached")
         return False
+
+    def _note_planning_failure(self, run: "_SubtaskRun") -> str:
+        """Count a planning failure; abort once the consecutive limit is hit."""
+        run.consecutive_failures += 1
+        if run.consecutive_failures >= self.config.consecutive_failures_limit:
+            self.log(
+                f"  {self.config.consecutive_failures_limit} consecutive failures"
+                f" — aborting subtask"
+            )
+            return "abort"
+        return "retry"
+
+    def _plan_next_step(
+        self, run: "_SubtaskRun", subtask: SubTask, task_context: list[str],
+    ) -> tuple[str, ActionStep | None]:
+        """Choose the next action: queued step, fresh text plan, or visual escalation.
+
+        Returns (outcome, step):
+          ("step", step)  — an action to execute now
+          ("done", None)  — planner/VLM says the goal is achieved
+          ("retry", None) — planning failed; the loop may try again
+          ("abort", None) — consecutive planning failures exhausted the budget
+        """
+        run.screen_context = run.cached_ocr if run.cached_ocr else self._get_screen_context()
+        run.cached_ocr = ""   # consume — will be refreshed after reflection
+
+        # Pass failure hints so planner avoids repeating known-bad patterns
+        failure_hints = []
+        try:
+            failure_hints = self.memory.get_failure_hints(subtask.description)
+        except Exception:
+            pass
+
+        # Escalate to visual planning (screenshot → UI-TARS) once the text
+        # path has failed visual_replan_after times in a row — the text
+        # planner is blind to icons/layout, which is usually why it's stuck.
+        # Exception: terminals. A failing terminal subtask needs a corrected
+        # COMMAND, not a click — visual clicking inside a console wastes a
+        # 30-60s VLM swap and can never fix the error.
+        _visual_mode = (
+            self.config.visual_replan_after > 0
+            and run.consecutive_failures >= self.config.visual_replan_after
+        )
+        # A "run: <cmd>" subtask is fixed by a CORRECTED COMMAND, never by the
+        # VLM clicking/typing into the console. Escalating it to visual mode
+        # re-types the command (corrupting the prompt line) and burns a 30-60s
+        # model swap. Block it deterministically on is_cmd_subtask — do not
+        # rely on foreground-process detection, which can misfire right after
+        # an Enter press and let the destructive re-type through.
+        if _visual_mode and (run.is_cmd_subtask or self._foreground_is_terminal()):
+            self.log(
+                "  [VISUAL-REPLAN] Skipped — terminal command subtask "
+                "(clicks/re-typing can't fix command errors)"
+            )
+            _visual_mode = False
+        try:
+            if _visual_mode:
+                self.log("  [VISUAL-REPLAN] Text planning stuck — asking VLM with screenshot")
+                try:
+                    step = self._plan_visual(subtask, run.completed)
+                except PlanningParseError:
+                    raise
+                except Exception as e:
+                    # VLM infrastructure error (timeout, model swap failure):
+                    # degrade gracefully to the text planner for this step.
+                    self.log(f"  [VISUAL-REPLAN] VLM error ({e}) — using text planner")
+                    _visual_mode = False
+                if _visual_mode and step is None:
+                    # VLM says finished() — plausible (earlier failures may
+                    # have been reflection false-negatives), but don't store
+                    # this run as a clean reusable success.
+                    self._degraded = True
+                    return "done", None
+            if not _visual_mode:
+                if run.step_queue:
+                    step = run.step_queue.pop(0)
+                    step.id = len(run.completed) + 1
+                    self.log(
+                        f"  [PLAN-QUEUE] Executing queued step "
+                        f"({len(run.step_queue)} remaining after this)"
+                    )
+                else:
+                    planned = self.planner.plan_steps(
+                        subtask, run.screen_context, run.completed,
+                        task_context=task_context, failure_hints=failure_hints,
+                    )
+                    if not planned:
+                        # A "save as <path>" subtask has ONE ground truth:
+                        # the file on disk. The planner's "goal achieved"
+                        # must not overrule its absence — that reports a
+                        # false success with no file produced.
+                        if run.save_target and not self._file_saved_fresh(
+                            run.save_target, run.started_at
+                        ):
+                            self.log(
+                                "  Planner declared done but "
+                                f"'{run.save_target}' is not on disk — rejecting"
+                            )
+                            run.completed.append(
+                                "[FAILED: planner declared done but the "
+                                "target file is not on disk]"
+                            )
+                            return self._note_planning_failure(run), None
+                        return "done", None   # planner says goal is achieved
+                    step, run.step_queue = planned[0], list(planned[1:])
+        except PlanningParseError as e:
+            # Unparseable planner output is a planning FAILURE, not goal
+            # achievement. Record it and let the loop try again (or abort
+            # via the consecutive-failures limit).
+            self.log(f"  Planning failed: {e}")
+            run.completed.append("[FAILED: planner produced unparseable output]")
+            return self._note_planning_failure(run), None
+        return "step", step
+
+    def _run_step_attempts(
+        self, run: "_SubtaskRun", subtask: SubTask, step: ActionStep,
+    ) -> str:
+        """Execute one planned step under the retry + verification policy.
+
+        Returns:
+          "subtask_done" — a deterministic check proved the WHOLE subtask done
+          "step_ok"      — the step succeeded (verified, or safely assumed)
+          "step_failed"  — every attempt failed, or verification said stop
+        """
+        # Terminal-command subtasks verify the typed command DETERMINISTICALLY
+        # at the Enter press (file-on-disk / shell-error check in
+        # _verify_command_effect). OCR-reading a dark console to confirm a type
+        # step systematically misfires ("FAILED" on correct typing) and used to
+        # trigger a destructive re-type. Defer to the authoritative Enter check.
+        _cmd_type_step = run.is_cmd_subtask and step.action_type == "type"
+        # set_value verifies itself by reading the control back through the
+        # accessibility tree — LLM reflection would only add latency.
+        skip_reflection = (
+            step.action_type in ("wait", "extract", "set_value") or _cmd_type_step
+        )
+        if _cmd_type_step:
+            self.log(
+                "  [CMD-TYPE] Command typed — deferring verification to the "
+                "Enter/disk check (skipping unreliable OCR reflection)"
+            )
+        run.last_error = ""
+
+        # Fix C5: classify whether re-executing this exact step is safe.
+        # Non-idempotent actions change state every time they run: typing
+        # appends text again ("hellohello"), Enter submits/creates twice,
+        # ctrl+v pastes twice. For these, once the action has physically
+        # executed we must NOT blind-retry on an uncertain/failed verdict —
+        # we hand control back to the planner, which sees the live screen and
+        # decides the next action (it can tell the text is already there).
+        # Idempotent actions (click same coords, scroll, escape, nav keys)
+        # are safe to repeat, so they keep the normal retry behaviour.
+        _key_l = (step.key or "").lower()
+        non_idempotent = (
+            step.action_type == "type"
+            # invoke presses a real button — invoking twice double-submits.
+            or step.action_type == "invoke"
+            or (step.action_type == "key_press" and _key_l in ("enter", "return", "space"))
+            or (step.action_type == "hotkey" and "v" in _key_l.split("+") and "ctrl" in _key_l)
+        )
+
+        for attempt in range(self.config.max_retries_per_step):
+            if attempt > 0:
+                self.log(f"  Retry {attempt}/{self.config.max_retries_per_step}…")
+
+            # Capture pre-action hash for click steps BEFORE the action fires.
+            # The reflection agent's internal "before" capture runs AFTER execute(),
+            # so instant UI changes (menus opening) make before==after → false delta=0.
+            pre_click_hash = None
+            if step.action_type in ("click", "right_click", "double_click"):
+                try:
+                    from core.capture.screenshot import frame_phash
+                    pre_click_hash = frame_phash(self.capturer.capture())
+                except Exception:
+                    pass
+
+            if not self._execute_step(step):
+                run.last_error = "execution failed (element not found or action error)"
+                continue
+
+            if skip_reflection:
+                return "step_ok"
+
+            # Deterministic type verification: read the focused control's
+            # value from the accessibility tree. Exact, ~50 ms, and skips
+            # the ~3-4 s OCR+LLM reflection call. Falls through to normal
+            # reflection when the control exposes no readable value.
+            if step.action_type == "type":
+                time.sleep(0.3)   # let the control commit the input
+                if self._typed_text_in_focused_control(step.value):
+                    self.log(
+                        "  [TYPE-VERIFY] Focused control contains the typed "
+                        "text — verified via accessibility tree"
+                    )
+                    return "step_ok"
+
+            # Deterministic verification for the execute-Enter of a
+            # "run: <command>" subtask — checks the filesystem / terminal
+            # output instead of LLM reflection. On confirmed effect the
+            # whole subtask is done (command typed + executed + verified).
+            if (
+                run.is_cmd_subtask
+                and step.action_type == "key_press"
+                and (step.key or "").lower() == "enter"
+            ):
+                _ok, _why = self._verify_command_effect(
+                    subtask, run.started_at, run.typed_ok
+                )
+                if _ok:
+                    self.log(f"  [CMD-CHECK] {_why} — command effect confirmed")
+                    return "subtask_done"
+                run.last_error = _why
+                self.log(f"  [CMD-CHECK] {_why}")
+                # Never blind-retry Enter; the planner corrects the command.
+                return "step_failed"
+
+            verdict = self._judge_reflection(run, step, non_idempotent, pre_click_hash)
+            if verdict == "success":
+                return "step_ok"
+            if verdict == "stop":
+                return "step_failed"
+            # "retry" → next attempt
+
+        return "step_failed"
+
+    def _judge_reflection(
+        self, run: "_SubtaskRun", step: ActionStep,
+        non_idempotent: bool, pre_click_hash,
+    ) -> str:
+        """One verification round for a step that has physically executed.
+
+        Returns "success", "retry" (safe to run the step again), or "stop"
+        (definitive failure — hand control back to the planner).
+        """
+        try:
+            # Give apps extra time to open after a launcher Enter press.
+            # 0.5 s is too short for Calculator/Notepad to show their UI.
+            _is_launch_enter = (
+                step.action_type == "key_press"
+                and (step.key or "").lower() == "enter"
+                and any(kw in step.description.lower()
+                        for kw in ("launch", "open", "start", "run"))
+            )
+            _reflect_wait = 1.5 if _is_launch_enter else self.config.reflection_wait_s
+            reflection = self.reflector.verify(step, _reflect_wait,
+                                               pre_hash=pre_click_hash)
+            run.cached_ocr = reflection.ocr_text   # reuse for next planning call
+
+            if reflection.success:
+                self.log(f"  Verified (conf={reflection.confidence:.2f})")
+                time.sleep(0.1)
+                return "success"
+
+            # "Screen unchanged" after a click is a false failure when
+            # the click's whole effect was placing the caret — verify
+            # against the accessibility tree instead of retrying blind.
+            if (
+                step.action_type == "click"
+                and "unchanged" in (reflection.error_description or "").lower()
+                and self._click_holds_focus(step)
+            ):
+                self.log(
+                    "  [FOCUS-CHECK] Clicked point owns keyboard focus "
+                    "(text control) — click confirmed"
+                )
+                return "success"
+
+            # A save hotkey that opened the Save-As dialog IS a success,
+            # but the LLM verifier reads it as "no confirmation dialog"
+            # and fails it — which retries ctrl+s into the open dialog
+            # (a no-op) until the budget is gone. Check deterministically.
+            if (
+                step.action_type == "hotkey"
+                and (step.key or "").lower() in ("ctrl+s", "ctrl+shift+s")
+                and self._save_dialog_visible()
+            ):
+                self.log("  [SAVE-CHECK] Save-As dialog is open — hotkey confirmed")
+                return "success"
+
+            # Step reported as not-confirmed by the reflector.
+            # fail_threshold splits "no clear evidence of failure" from
+            # "confidently failed":
+            #   below threshold = UNCERTAIN  → see policy split below
+            #   at/above        = CLEAR FAIL → retry (if safe) or stop
+            _key = (step.key or "").lower()
+            _is_launcher_key = step.action_type == "key_press" and _key in ("winleft", "enter")
+            fail_threshold = (
+                0.95
+                if step.action_type in ("type", "hotkey") or _is_launcher_key
+                else self.reflector.min_confidence
+            )
+
+            if reflection.confidence < fail_threshold:
+                # UNCERTAIN — no CLEAR evidence the step failed. How we treat
+                # this depends on whether re-doing the action is safe:
+                if non_idempotent:
+                    # type / Enter / Ctrl-V already physically fired and we
+                    # have NO reliable signal they failed (the reflector just
+                    # couldn't *read* the result — a dark console, an OCR
+                    # miss, a field it can't see). Re-doing them is exactly
+                    # what caused the double-typing, double-submits, retry
+                    # loops and slow runs. Accept and move on: the NEXT
+                    # planning step reads the LIVE screen and corrects course
+                    # if anything is actually wrong. Backstops remain —
+                    # _verify_command_effect checks commands on disk,
+                    # _verify_launch checks app launches, and the loop-guard
+                    # stops genuine repeats.
+                    self.log(
+                        f"  Uncertain (conf={reflection.confidence:.2f} < "
+                        f"{fail_threshold:.2f}) — action already performed; "
+                        f"accepting and letting the next step verify live"
+                    )
+                    # The "next step verifies live" guarantee requires a
+                    # fresh plan against the live screen — drop any steps
+                    # planned before this uncertain outcome.
+                    run.step_queue = []
+                    return "success"
+                # Idempotent action (click / scroll): safe to repeat, and a
+                # dead click is caught RELIABLY by the screen-delta (phash)
+                # check as a high-confidence failure — so retrying here costs
+                # nothing and recovers genuinely-missed clicks.
+                run.last_error = (
+                    f"uncertain outcome (conf={reflection.confidence:.2f}, "
+                    f"threshold={fail_threshold:.2f})"
+                )
+                self.log(f"  Uncertain result - retrying ({run.last_error})")
+                # Fast-path: if the goal process is already running after an
+                # uncertain click, skip the remaining retries.
+                if run.is_launch_goal and (
+                    step.action_type in ("click", "double_click")
+                ):
+                    if self._goal_confirmed(run.goal_proc, run.baseline_windows):
+                        self.log(
+                            f"  [GOAL-CHECK-EARLY] "
+                            f"'{run.goal_proc.split('.')[0]}' confirmed "
+                            f"— accepting step"
+                        )
+                        return "success"
+                return "retry"
+
+            # Reflector is confident the step failed.
+            run.last_error = (
+                reflection.error_description
+                or "action did not produce expected result"
+            )
+            self.log(
+                f"  Verification failed: {run.last_error} "
+                f"(conf={reflection.confidence:.2f})"
+            )
+            # A confidently-failed non-idempotent action must also not
+            # be blind-retried (Fix C5) — same double-execution risk.
+            if not reflection.should_retry or non_idempotent:
+                # Definitive failure (or unsafe to retry) — stop here.
+                return "stop"
+            return "retry"
+        except (ValueError, KeyError, AttributeError) as e:
+            # Fix C2: a verifier parse error means the outcome is UNKNOWN,
+            # not that the step succeeded. The old code set step_success=True
+            # here, wiring "the verifier broke" to "the action worked" — a
+            # systematic source of false successes. Treat it as an uncertain
+            # result and let the retry loop re-verify; if retries are
+            # exhausted the step is left failed so the planner can recover.
+            self.log(
+                f"  Reflection parse error ({type(e).__name__}) — "
+                f"outcome uncertain, will re-verify"
+            )
+            run.last_error = f"verifier parse error ({type(e).__name__})"
+            return "retry"
+        except Exception as e:
+            # Infrastructure failure — retry with back-off
+            self.log(f"  Reflection error ({type(e).__name__}: {e}) — retry")
+            run.last_error = str(e)
+            time.sleep(1.0)
+            return "retry"
+
+    def _record_step_success(
+        self, run: "_SubtaskRun", subtask: SubTask, step: ActionStep,
+    ) -> bool | None:
+        """Bookkeeping + early-exit checks after a successful step.
+
+        Returns True/False to finish the whole subtask, or None to keep looping.
+        """
+        if step.action_type == "type":
+            run.typed_ok = True
+        # Append extract result to step description for context
+        if step.action_type == "extract":
+            key = step.target or step.description or f"item_{step.id}"
+            val = self._extracted_data.get(key, "")
+            run.completed.append(f"{step.description} → extracted: '{val}'")
+        else:
+            run.completed.append(step.description)
+        run.consecutive_failures = 0
+
+        # Early-exit: a "... type: <text>" subtask is DONE once that text
+        # has been typed and verified — never give the planner a chance
+        # to re-type it or drift into save steps of a later subtask.
+        if (
+            run.type_payload
+            and step.action_type == "type"
+            and self._texts_equivalent(step.value or "", run.type_payload)
+        ):
+            self.log(
+                "  [TYPE-CHECK] Requested text typed and verified — "
+                "subtask complete"
+            )
+            return True
+
+        # Early-exit: after each successful step in a known app-launch subtask,
+        # check the process list on Windows. If the app is already running, the
+        # goal is achieved — return True immediately so the planner never gets a
+        # chance to generate spurious continuation steps (e.g. pressing Enter
+        # again inside a Calculator that is already open).
+        if run.is_launch_goal and self._goal_confirmed(run.goal_proc, run.baseline_windows):
+            _label = run.goal_proc.split(".")[0]
+            self.log(f"  [GOAL-CHECK] '{_label}' confirmed — goal achieved")
+            return True
+
+        sig = (step.action_type, step.target, step.value, step.key)
+        if sig != run.last_step_sig:
+            run.same_step_streak = 0
+            run.last_step_sig = sig
+            return None
+
+        run.same_step_streak += 1
+        _dedup_limit = DEDUP_LIMIT_BY_ACTION_TYPE.get(step.action_type, 2)
+        if run.same_step_streak <= _dedup_limit:
+            return None
+        self.log(
+            f"  [LOOP-GUARD] '{step.action_type}' repeated "
+            f"{run.same_step_streak + 1}× (limit={_dedup_limit}) — "
+            f"loop detected, stopping subtask"
+        )
+        # Fix C4: a loop is a strong signal the plan is not working.
+        # We still return True so a benign "planner won't emit done"
+        # loop doesn't abort an otherwise-complete task, but we mark
+        # the run degraded so it is NEVER stored as a reusable
+        # success (which would poison future routing with a plan
+        # that actually looped). See execute()'s memory gate.
+        self._degraded = True
+        # Exception: a terminal-command subtask ("run: <cmd>") that
+        # looped AND has failed steps in its history almost
+        # certainly never ran its command successfully. Declaring
+        # it complete poisons every dependent subtask (they build
+        # on a file/state that doesn't exist) — fail it honestly.
+        if "run:" in subtask.description.lower() and any(
+            c.startswith("[FAILED") for c in run.completed
+        ):
+            self.log(
+                "  [LOOP-GUARD] Command subtask looped after "
+                "failures — marking subtask FAILED"
+            )
+            return False
+        if step.action_type in ("click", "right_click"):
+            try:
+                _esc = ActionStep(
+                    id=0, subtask_id=step.subtask_id,
+                    action_type="key_press",
+                    target=None, value=None, key="escape",
+                    description="Escape to dismiss stray menu",
+                    verification="",
+                )
+                self._execute_step(_esc)
+                self.log("  [LOOP-GUARD] Recovery Escape sent")
+            except Exception:
+                pass
+        return True
+
+    def _record_step_failure(
+        self, run: "_SubtaskRun", step: ActionStep,
+    ) -> bool | None:
+        """Bookkeeping after a failed step; abort once failures exhaust the budget.
+
+        Returns True/False to finish the whole subtask, or None to keep looping.
+        """
+        note = (
+            f"[FAILED: {run.last_error}] {step.description}"
+            if run.last_error else f"[FAILED] {step.description}"
+        )
+        run.completed.append(note)
+        # The rest of the queued plan was built on this step succeeding —
+        # flush it so the next iteration re-plans from the live screen.
+        run.step_queue = []
+
+        # Even on step failure, check if the goal process is now running.
+        # This handles the common case where key_press enter launches an app
+        # but the reflector times out before the app's UI is fully visible
+        # (reflection confidence 0.50 → step marked failed, yet app IS open).
+        if run.is_launch_goal and self._goal_confirmed(run.goal_proc, run.baseline_windows):
+            _label = run.goal_proc.split(".")[0]
+            self.log(
+                f"  [GOAL-CHECK] '{_label}' confirmed "
+                f"despite step failure — goal achieved"
+            )
+            return True
+
+        run.consecutive_failures += 1
+        self.log("  Step failed - re-evaluating next action")
+
+        # Persist failure so future tasks can avoid this pattern
+        try:
+            self.memory.store_failure_pattern(
+                target=step.target or step.description or "",
+                action_type=step.action_type,
+                error=run.last_error[:200] if run.last_error else "",
+                app_context=run.screen_context[:100],
+            )
+        except Exception:
+            pass
+
+        if run.consecutive_failures >= self.config.consecutive_failures_limit:
+            self.log(
+                f"  {self.config.consecutive_failures_limit} consecutive failures"
+                f" — aborting subtask"
+            )
+            return False
+        return None
 
     # Foreground processes where visual replanning can't help: command errors
     # need corrected text, not clicks.
@@ -1153,8 +1452,8 @@ class TaskOrchestrator:
                 self.log(f"  [EXTRACT] nothing found for '{key}' — marked incomplete")
             return True   # extraction never blocks the step sequence
 
-        # ── Type — run through the destructive-action firewall ─────────────────
-        elif step.action_type == "type":
+        # ── Type / set_value — run through the destructive-action firewall ─────
+        elif step.action_type in ("type", "set_value"):
             if not self._firewall_allows(step.value):
                 self.log(
                     "  [FIREWALL] Blocked typing a destructive command — "
@@ -1661,6 +1960,11 @@ class TaskOrchestrator:
         "snipping tool":    "SnippingTool.exe",
         "wordpad":          "wordpad.exe",
         "settings":         "SystemSettings.exe",
+        "zoom":             "Zoom.exe",
+        "teams":            "ms-teams.exe",
+        "slack":            "slack.exe",
+        "skype":            "Skype.exe",
+        "thunderbird":      "thunderbird.exe",
     }
 
     _APP_SIGNALS: dict = {
@@ -1684,6 +1988,9 @@ class TaskOrchestrator:
         "task manager":    ["Task Manager", "Processes", "CPU"],
         "snipping tool":   ["Snipping Tool", "New", "Mode"],
         "wordpad":         ["WordPad", "Home", "Document"],
+        "zoom":            ["Zoom", "New Meeting", "Schedule", "Join"],
+        "teams":           ["Teams", "Chat", "Calendar", "Meet"],
+        "slack":           ["Slack", "Channels", "Direct messages"],
     }
 
     # Generic words that don't make useful OCR signals on their own

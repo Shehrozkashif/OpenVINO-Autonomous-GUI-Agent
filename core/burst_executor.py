@@ -64,17 +64,41 @@ class BurstExecutor:
     def run(self, burst: ActionBurst) -> BurstResult:
         """Execute burst.steps in order.
 
+        Three phases, each a method below:
+          _preground_targets  — resolve click coordinates before starting
+          _execute_steps      — run the steps with action-aware delays
+          _verify_final_step  — optional reflection on the last step
+
         Returns BurstResult with success=False as soon as any phase fails so
         the orchestrator can fall back to the planning loop without side effects
         propagating from partial execution.
         """
-        # ── Phase 1: pre-ground targets visible before the burst begins ────────
-        # Steps with explicit "x,y" in their value field bypass grounding.
-        # Targets that are not yet visible (e.g., context-menu items) are flagged
-        # for late grounding — they will be resolved during Phase 2, just before
-        # their step executes, once the preceding interaction has made them visible.
-        coords: dict = {}        # step_index → (x, y)
-        late_ground: set = set() # step indices that need grounding at runtime
+        coords, late_ground, failure = self._preground_targets(burst)
+        if failure is None:
+            failure = self._execute_steps(burst, coords, late_ground)
+        if failure is None:
+            failure = self._verify_final_step(burst)
+        if failure is not None:
+            return failure
+        return BurstResult(success=True, failed_at_step=None, reason="burst completed")
+
+    def _preground_targets(
+        self, burst: ActionBurst,
+    ) -> tuple[dict, set, BurstResult | None]:
+        """Phase 1: pre-ground targets visible before the burst begins.
+
+        Steps with explicit "x,y" in their value field bypass grounding.
+        Targets that are not yet visible (e.g., context-menu items) are flagged
+        for late grounding — they will be resolved during Phase 2, just before
+        their step executes, once the preceding interaction has made them visible.
+
+        Returns (coords, late_ground, failure):
+          coords      — step_index → (x, y)
+          late_ground — step indices that need grounding at runtime
+          failure     — a BurstResult to return immediately, or None
+        """
+        coords: dict = {}
+        late_ground: set = set()
 
         for i, step in enumerate(burst.steps):
             if step.action_type not in ("click", "right_click", "double_click"):
@@ -125,7 +149,7 @@ class BurstExecutor:
                         f"[BURST] Pre-ground failed for '{step.target}' "
                         f"(conf={result.confidence:.2f}) — aborting burst"
                     )
-                    return BurstResult(
+                    return coords, late_ground, BurstResult(
                         success=False,
                         failed_at_step=i,
                         reason=(
@@ -139,8 +163,15 @@ class BurstExecutor:
                     f"[BURST] Pre-grounded step {i}: '{step.target}' -> "
                     f"({result.x},{result.y})"
                 )
+        return coords, late_ground, None
 
-        # ── Phase 2: execute with action-aware inter-step delay ───────────────
+    def _execute_steps(
+        self, burst: ActionBurst, coords: dict, late_ground: set,
+    ) -> BurstResult | None:
+        """Phase 2: execute the steps with an action-aware inter-step delay.
+
+        Returns a failure BurstResult, or None when every step executed.
+        """
         deadline = time.time() + burst.timeout_ms / 1000
         for i, step in enumerate(burst.steps):
             if time.time() > deadline:
@@ -186,40 +217,47 @@ class BurstExecutor:
                 )
 
             if i < len(burst.steps) - 1:
-                # Action-aware inter-step delay:
-                #   right_click →  350 ms — wait for context menu to render
-                #   click       →  300 ms — wait for submenu / dialog to open
-                #   key_press   →  300 ms — wait for submenu animation to settle
-                #   other       →   80 ms — default
-                if step.action_type == "right_click":
-                    step_delay = 0.35
-                elif step.action_type in ("click", "key_press", "double_click"):
-                    step_delay = 0.30
-                else:
-                    step_delay = self.delay
-                time.sleep(step_delay)
+                time.sleep(self._inter_step_delay(step))
+        return None
 
-        # ── Phase 3: optional final reflection ────────────────────────────────
-        if burst.verify_at_end and self.reflector is not None:
-            final_step = burst.steps[-1]
-            try:
-                reflection = self.reflector.verify(final_step, wait_s=1.0)
-                if not reflection.success:
-                    return BurstResult(
-                        success=False,
-                        failed_at_step=len(burst.steps) - 1,
-                        reason=(
-                            reflection.error_description
-                            or "final burst reflection failed"
-                        ),
-                    )
-            except Exception as exc:
-                # Infrastructure failure in reflection — treat burst as succeeded
-                # (same policy as the main orchestrator loop)
-                logger.warning(f"[BURST] Reflection error: {exc} — treating burst as succeeded")
+    def _inter_step_delay(self, step) -> float:
+        """Action-aware inter-step delay:
+          right_click →  350 ms — wait for context menu to render
+          click       →  300 ms — wait for submenu / dialog to open
+          key_press   →  300 ms — wait for submenu animation to settle
+          other       →   80 ms — default
+        """
+        if step.action_type == "right_click":
+            return 0.35
+        if step.action_type in ("click", "key_press", "double_click"):
+            return 0.30
+        return self.delay
 
-        return BurstResult(success=True, failed_at_step=None, reason="burst completed")
+    def _verify_final_step(self, burst: ActionBurst) -> BurstResult | None:
+        """Phase 3: optional reflection on the last step.
 
+        Returns a failure BurstResult, or None when verification passed
+        (or was skipped / hit an infrastructure error).
+        """
+        if not (burst.verify_at_end and self.reflector is not None):
+            return None
+        final_step = burst.steps[-1]
+        try:
+            reflection = self.reflector.verify(final_step, wait_s=1.0)
+            if not reflection.success:
+                return BurstResult(
+                    success=False,
+                    failed_at_step=len(burst.steps) - 1,
+                    reason=(
+                        reflection.error_description
+                        or "final burst reflection failed"
+                    ),
+                )
+        except Exception as exc:
+            # Infrastructure failure in reflection — treat burst as succeeded
+            # (same policy as the main orchestrator loop)
+            logger.warning(f"[BURST] Reflection error: {exc} — treating burst as succeeded")
+        return None
 
 # ── Burst detection ───────────────────────────────────────────────────────────
 

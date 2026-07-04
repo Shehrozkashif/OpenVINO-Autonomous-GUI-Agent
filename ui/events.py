@@ -55,11 +55,13 @@ _RX_SETTLE       = re.compile(r"\[SETTLE\]")
 
 # ── Deep pipeline events (loguru bridge — agents/, core/) ────────────────────
 _RX_PLANNED      = re.compile(r"\[PLANNING\] Next: \[(\w+)\] (.*)")
+# Arrow/dash variants: source code logs ASCII ("->", "- ") but loguru sinks and
+# terminals may render or re-emit the Unicode forms ("→", "—") — accept both.
 _RX_LOCATED      = re.compile(
-    r"\[GROUNDING\] '(.+?)' -> \((\d+),(\d+)\) conf=([\d.]+) method=([\w/-]+)")
+    r"\[GROUNDING\] '(.+?)' (?:->|→) \((\d+),(\d+)\) conf=([\d.]+) method=([\w/-]+)")
 _RX_EXECUTED     = re.compile(r"\[ACTION\] (\w+)")
 _RX_VLM_VERIFY   = re.compile(r"\[REFLECTION\] .*escalating to VLM")
-_RX_KILLSWITCH   = re.compile(r"\[KILL-SWITCH\] Armed - (.*)")
+_RX_KILLSWITCH   = re.compile(r"\[KILL-SWITCH\] Armed [-—] (.*)")
 
 
 class LoguruBridge(QObject):
@@ -163,6 +165,25 @@ class AgentEventBus(QObject):
                 self._parse(sub)
 
     def _parse(self, line: str):
+        """Match one log line against the known pipeline patterns.
+
+        Handlers are grouped by lifecycle area and tried in order; each
+        returns True when its pattern matched (first match wins, same as
+        the original single cascade).
+        """
+        for handle in (
+            self._parse_task_events,       # mission start / plan ready / subtasks
+            self._parse_step_events,       # step start / verify / retry / fail
+            self._parse_data_events,       # extracted values, memory hints
+            self._parse_guard_events,      # firewall, visual replan, loop guards
+            self._parse_task_end_events,   # mission complete / stopped
+            self._parse_pipeline_events,   # grounding, execution, VLM (loguru bridge)
+        ):
+            if handle(line):
+                return
+
+    def _parse_task_events(self, line: str) -> bool:
+        """Mission start, router plan, and per-subtask lifecycle lines."""
         m = _RX_TASK_START.search(line)
         if m:
             self.reset()
@@ -170,13 +191,13 @@ class AgentEventBus(QObject):
             self._set_state(AgentState.ROUTING)
             self.task_started.emit(self.instruction)
             self.detail.emit("Breaking the mission into subtasks...")
-            return
+            return True
 
         m = _RX_ROUTER.search(line) or _RX_BURST.search(line)
         if m:
             self._set_state(AgentState.PLANNING)
             self.plan_ready.emit(int(m.group(1)))
-            return
+            return True
 
         m = _RX_SUBTASK.search(line)
         if m:
@@ -189,8 +210,11 @@ class AgentEventBus(QObject):
                 self.current_subtask = rest
                 self._set_state(AgentState.PLANNING)
                 self.subtask_started.emit(sid, rest)
-            return
+            return True
+        return False
 
+    def _parse_step_events(self, line: str) -> bool:
+        """Step execution lines: start, verification verdicts, retries."""
         m = _RX_STEP.search(line)
         if m:
             n, action, desc = int(m.group(1)), m.group(2), m.group(3).strip()
@@ -204,7 +228,7 @@ class AgentEventBus(QObject):
                 self._set_state(AgentState.ACTING)
                 self.detail.emit(desc)
             self.step_started.emit(n, action, desc)
-            return
+            return True
 
         m = _RX_VERIFIED.search(line)
         if m:
@@ -212,78 +236,88 @@ class AgentEventBus(QObject):
             self._set_state(AgentState.PLANNING)
             self.step_verified.emit(self.last_confidence)
             self.detail.emit("Step confirmed - planning the next move...")
-            return
+            return True
 
         m = _RX_VERIFY_FAIL.search(line)
         if m:
             self.last_confidence = float(m.group(2))
             self._set_state(AgentState.RECOVERING)
             self.step_failed.emit(m.group(1), self.last_confidence)
-            return
+            return True
 
         m = _RX_RETRY.search(line)
         if m:
             self.retries += 1
             self._set_state(AgentState.RECOVERING)
             self.retrying.emit(int(m.group(1)), int(m.group(2)))
-            return
+            return True
 
         if _RX_UNCERTAIN.search(line):
             self._set_state(AgentState.VERIFYING)
             self.guard_event.emit("VERIFY", "Outcome uncertain - re-checking")
-            return
+            return True
 
         if _RX_STEP_FAILED.search(line):
             self.steps_failed += 1
             self._set_state(AgentState.RECOVERING)
-            return
+            return True
+        return False
 
+    def _parse_data_events(self, line: str) -> bool:
+        """Extracted values and memory-recall hints."""
         m = _RX_EXTRACT.search(line)
         if m:
             self.extracted.emit(m.group(1), m.group(2))
-            return
+            return True
 
         m = _RX_MEMORY.search(line)
         if m:
             self.memory_hint.emit(float(m.group(1)))
-            return
+            return True
+        return False
 
+    def _parse_guard_events(self, line: str) -> bool:
+        """Safety and recovery signals: firewall, visual replan, loop guards."""
         m = _RX_FIREWALL.search(line)
         if m:
             self.guard_event.emit("FIREWALL", m.group(1).strip())
-            return
+            return True
 
         m = _RX_VISUAL.search(line)
         if m:
             self._set_state(AgentState.RECOVERING)
             self.guard_event.emit("VISION", m.group(1).strip())
-            return
+            return True
 
         m = _RX_SCROLL_FIND.search(line)
         if m:
             self.guard_event.emit("SEARCH", m.group(1).strip())
-            return
+            return True
 
         m = _RX_GUARD.search(line)
         if m:
             self.guard_event.emit(m.group(1), m.group(2).strip())
-            return
+            return True
+        return False
 
+    def _parse_task_end_events(self, line: str) -> bool:
+        """Mission completion and kill-switch stop lines."""
         m = _RX_TASK_DONE.search(line)
         if m:
             self.task_done.emit(m.group(1).strip(), float(m.group(2)))
-            return
+            return True
 
         if _RX_STOPPED.search(line):
             self._set_state(AgentState.STOPPED)
-            return
+            return True
+        return False
 
-        # ── Deep pipeline events (loguru bridge) ──────────────────────────────
-
+    def _parse_pipeline_events(self, line: str) -> bool:
+        """Deep pipeline events (loguru bridge): grounding, execution, VLM."""
         m = _RX_PLANNED.search(line)
         if m:
             self.detail.emit(f"Planned: {m.group(2).strip()}")
-            return
+            return True
 
         m = _RX_LOCATED.search(line)
         if m:
@@ -292,23 +326,24 @@ class AgentEventBus(QObject):
             self._set_state(AgentState.ACTING)
             self.detail.emit(f"Located '{target}' ({conf:.0%} | {method})")
             self.element_located.emit(target, x, y, conf, method)
-            return
+            return True
 
         m = _RX_EXECUTED.search(line)
         if m:
             if self.state in (AgentState.ACTING, AgentState.GROUNDING):
                 self._set_state(AgentState.VERIFYING)
                 self.detail.emit("Action sent - verifying the result...")
-            return
+            return True
 
         if _RX_VLM_VERIFY.search(line):
             self._set_state(AgentState.VERIFYING)
             self.detail.emit(
                 "Double-checking with the vision model - this can take a "
                 "minute while it loads...")
-            return
+            return True
 
         m = _RX_KILLSWITCH.search(line)
         if m:
             self.guard_event.emit("KILL-SWITCH", f"Armed - {m.group(1)}")
-            return
+            return True
+        return False

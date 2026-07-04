@@ -16,8 +16,8 @@ Run:
 
 Requirements:
     - OpenVINO Model Server running: python start.py
-    - qwen3-8b-int4-ov         served (LLM)
-    - ui-tars-1.5-7b-int4-ov   served (VLM)
+    - config.LLM_MODEL served (LLM)
+    - config.VLM_MODEL served (VLM)
     - Real Windows display, desktop visible, no fullscreen app
 """
 import os

@@ -24,6 +24,15 @@ _SUBTASK_SCHEMA = {
     },
 }
 
+def _today_line() -> str:
+    """Current date, injected per request so 'tomorrow at 3pm' resolves to a
+    concrete date even in a long-running session.
+    """
+    from datetime import datetime
+    now = datetime.now()
+    return f"Today is {now.strftime('%A')}, {now.strftime('%m/%d/%Y')} {now.strftime('%I:%M %p')}."
+
+
 # ── Runtime machine identity ───────────────────────────────────────────────────
 _USER = os.getenv("USERNAME") or "user"
 _SHELL_PROMPT = _USER  # username only — hostnames can be too long for OCR
@@ -94,13 +103,31 @@ covering the user's FULL intent with the fewest steps that leave nothing out.
   System settings     →  SETTINGS_APP_PLACEHOLDER
   Screenshot          →  Print Screen key (one sub-task, no app needed)
   Simple text files   →  echo command in terminal (single line) or nano (multi-line)
+  Meetings / calls    →  the app the user names (Zoom, Teams, Skype, …), else the
+                         browser. Launch it → open its New/Schedule form → fill the
+                         form → confirm. See FORM FILLING below.
+
+━━━ FORM FILLING (schedule a meeting, compose an email, create an event) ━━━
+  Decompose form work into exactly THREE kinds of sub-task:
+    1. one sub-task to OPEN the form ("with Zoom already open, click the
+       Schedule button to open the schedule-meeting form")
+    2. ONE sub-task that fills ALL the fields, listing each field and its exact
+       value ("with the schedule form open, set Topic to 'Weekly Sync', set
+       Date to 07/10/2026, set Start time to 3:00 PM, set Duration to 30 min")
+       — related fields of one form always belong in ONE sub-task, never one
+       sub-task per field.
+    3. one sub-task to CONFIRM ("with the details filled, click Save") and, if
+       the user asked to invite people, one more to send/copy the invitation.
+  Use concrete values: resolve "tomorrow" to the actual date, "3pm" to 3:00 PM.
 
 ━━━ AVAILABLE APPS ━━━
-Trust the app name the user gives you (browsers, games, utilities — anything
-installed). When the instruction names no specific app for a generic task, default to:
+Trust the app name the user gives you (browsers, meeting apps, games,
+utilities — anything installed): an app the user NAMES is always allowed.
+When the instruction names no specific app for a generic task, default to:
 Firefox, VS Code, LibreOffice Writer/Calc/Impress, Thunderbird,
 TERMINAL_APP_PLACEHOLDER, CALC_APP_PLACEHOLDER, SETTINGS_APP_PLACEHOLDER, FILES_APP_PLACEHOLDER.
-NEVER suggest: gedit, mousepad, kate, VLC, GIMP, or anything not listed above.
+NEVER invent an app the user did not name and that is not in the defaults
+(no gedit, mousepad, kate, VLC, GIMP, …).
 For text editing → nano (simple) or LibreOffice Writer (formatted docs).
 
 ━━━ OUTPUT ━━━
@@ -177,6 +204,12 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 → [{"id":1,"description":"open Thunderbird","depends_on":[]},
    {"id":2,"description":"with Thunderbird open, click the Write new message button","depends_on":[1]}]
 
+"schedule a zoom meeting titled Weekly Sync tomorrow at 3pm for 30 minutes" (today = 07/09/2026)
+→ [{"id":1,"description":"open Zoom","depends_on":[]},
+   {"id":2,"description":"with Zoom already open, click the Schedule button to open the schedule-meeting form","depends_on":[1]},
+   {"id":3,"description":"with the schedule-meeting form open, set Topic to 'Weekly Sync', set the date to 07/10/2026, set the start time to 3:00 PM, set the duration to 30 minutes","depends_on":[2]},
+   {"id":4,"description":"with the meeting details filled in, click Save to create the meeting","depends_on":[3]}]
+
 "take a screenshot"
 → [{"id":1,"description":"take a screenshot using the Print Screen keyboard shortcut","depends_on":[]}]
 
@@ -223,7 +256,7 @@ class RouterAgent:
         task_id = str(uuid.uuid4())[:8]
         logger.info(f"[ROUTER] Task {task_id}: '{instruction}'")
 
-        user_content = f"Instruction: {instruction}"
+        user_content = f"Instruction: {instruction}\n{_today_line()}"
         if memory_hint:
             user_content += f"\n\n{memory_hint}"
         if screen_context:
@@ -263,6 +296,106 @@ class RouterAgent:
             logger.info(f"  [{st.id}] {st.description} (depends on: {st.depends_on})")
 
         return task_id, subtasks
+
+    # ── Task-level replanning (mid-task recovery) ────────────────────────────────
+
+    def replan(
+        self,
+        instruction: str,
+        completed_descs: list[str],
+        failed_desc: str,
+        screen_context: str | None = None,
+    ) -> list[SubTask]:
+        """Produce a fresh sub-task list covering ONLY the remaining work after a
+        subtask failed mid-task.
+
+        The router sees what already succeeded (never repeated), which subtask
+        failed (a different approach is required), and the live screen. Returns
+        [] when re-decomposition fails — the caller then aborts as before.
+        """
+        done_block = (
+            "\n".join(f"  - {d}" for d in completed_descs)
+            if completed_descs else "  (none)"
+        )
+        user_content = (
+            f"Instruction: {instruction}\n{_today_line()}\n\n"
+            f"This task is ALREADY IN PROGRESS. Sub-tasks completed successfully "
+            f"(do NOT repeat them, their effects are already on the machine):\n"
+            f"{done_block}\n\n"
+            f"This sub-task FAILED: '{failed_desc}'\n"
+            f"Re-plan the REMAINING work as a fresh JSON array of sub-tasks that "
+            f"still achieves the user's full intent. Use a DIFFERENT approach for "
+            f"the failed part (different app, method, or route — e.g. GUI instead "
+            f"of terminal, search launcher instead of icon, browser instead of a "
+            f"desktop app). depends_on may only reference ids inside this new array."
+        )
+        if screen_context:
+            user_content += f"\n\nCurrently visible on screen: {screen_context}"
+
+        messages = [
+            {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+        try:
+            resp = self.client.query_llm(
+                messages, max_tokens=768, temperature=0.2,
+                response_schema=_SUBTASK_SCHEMA,
+            )
+            subtasks = self._parse_subtasks(resp.content)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"[ROUTER] Replan parse failed: {e}")
+            return []
+
+        logger.info(f"[ROUTER] Replanned remaining work into {len(subtasks)} sub-task(s):")
+        for st in subtasks:
+            logger.info(f"  [{st.id}] {st.description} (depends on: {st.depends_on})")
+        return subtasks
+
+    # ── Missing-parameter detection (asked BEFORE execution starts) ─────────────
+
+    # Instructions that involve composing/scheduling something for other people
+    # commonly omit details the task cannot proceed without (a time, a recipient).
+    # Deterministic trigger — the LLM is only consulted for instructions in this
+    # class, so simple tasks pay zero extra latency.
+    _PARAM_TRIGGER = re.compile(
+        r"\b(meeting|schedule|invite|appointment|event|remind(?:er)?|"
+        r"e-?mail|send|compose|book|call)\b",
+        re.IGNORECASE,
+    )
+
+    def missing_parameters(self, instruction: str) -> list[str]:
+        """Return up to 3 short questions about details the instruction omits
+        but the task cannot be completed without. [] when nothing is missing.
+        """
+        if not self._PARAM_TRIGGER.search(instruction):
+            return []
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You check a desktop-automation instruction for missing "
+                    "REQUIRED details before an agent executes it. Output ONLY a "
+                    "JSON array of short questions (strings), at most 3. Ask only "
+                    "about details the task genuinely cannot be completed without "
+                    "(a meeting needs a date/time; an email needs a recipient). "
+                    "Never ask about details already given, optional settings, or "
+                    "anything the agent can sensibly default. Output [] when "
+                    "nothing essential is missing."
+                ),
+            },
+            {"role": "user", "content": f"Instruction: {instruction}"},
+        ]
+        try:
+            resp = self.client.query_llm(messages, max_tokens=200, temperature=0.0)
+            text = re.sub(r"<think>.*?</think>", "", resp.content, flags=re.DOTALL)
+            start, end = text.find("["), text.rfind("]")
+            if start == -1 or end == -1:
+                return []
+            questions = json.loads(text[start:end + 1])
+            return [q.strip() for q in questions if isinstance(q, str) and q.strip()][:3]
+        except Exception as e:
+            logger.debug(f"[ROUTER] missing_parameters check skipped: {e}")
+            return []
 
     # ── Completeness backstop (deterministic detection, LLM correction) ─────────
 

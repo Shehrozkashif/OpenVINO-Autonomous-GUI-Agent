@@ -7,8 +7,8 @@ Does everything automatically:
   1. Check for Windows UIA (Stage 0 grounding)
   2. Detect GPU (Intel / AMD / NVIDIA)
   3. Prepare both models in the OpenVINO Model Server (OVMS) repository:
-       • LLM  qwen3-8b-int4-ov        (pulled pre-converted from Hugging Face)
-       • VLM  ui-tars-1.5-7b-int4-ov  (converted from UI-TARS on first run)
+       • LLM  config.LLM_MODEL  (pulled pre-converted from Hugging Face)
+       • VLM  config.VLM_MODEL  (converted from UI-TARS on first run)
   4. Start OVMS serving both models on one OpenAI-compatible endpoint (port 8000)
        using the native ovms.exe binary
   5. Wait for the server to be ready
@@ -23,13 +23,14 @@ import sys
 import time
 
 from config import (
-    KV_CACHE_SIZE_GB,
+    LLM_KV_CACHE_GB,
     LLM_MODEL,
     LLM_SOURCE,
     MODEL_REPOSITORY_PATH,
     OVMS_BASE_URL,
     OVMS_REST_PORT,
     TARGET_DEVICE,
+    VLM_KV_CACHE_GB,
     VLM_MODEL,
     VLM_SOURCE,
 )
@@ -164,8 +165,66 @@ def _model_already_exported(model_name: str) -> bool:
     return model_name in names
 
 
+def _prune_stale_servables():
+    """Unregister servables that config.py no longer names.
+
+    OVMS loads EVERY entry in the repository config.json into device memory.
+    After a model swap (e.g. qwen3-8b → qwen3-14b) the old entry would still
+    be loaded alongside the new one and overflow VRAM. Remove stale entries
+    from config.json only — the exported weights stay on disk, so switching
+    back is instant.
+    """
+    if not os.path.isfile(_CONFIG_JSON):
+        return
+    keep = {LLM_MODEL, VLM_MODEL}
+    try:
+        with open(_CONFIG_JSON) as f:
+            cfg = json.load(f)
+        removed = []
+        for key, name_of in (
+            ("mediapipe_config_list", lambda e: e.get("name")),
+            ("model_config_list", lambda e: e.get("config", {}).get("name")),
+        ):
+            entries = cfg.get(key, [])
+            kept = [e for e in entries if name_of(e) in keep]
+            removed += [name_of(e) for e in entries if name_of(e) not in keep]
+            if key in cfg:
+                cfg[key] = kept
+        if removed:
+            with open(_CONFIG_JSON, "w") as f:
+                json.dump(cfg, f, indent=4)
+            for name in removed:
+                print(_yellow(f"  [OK] {name}: unregistered (weights kept on disk)"))
+    except Exception as e:
+        print(_yellow(f"  [WARN] Could not prune stale servables: {e}"))
+
+
+def _ensure_cache_size(model_name: str, cache_gb: int):
+    """Sync an already-exported servable's KV-cache budget with config.py.
+
+    export_model.py bakes `cache_size: N` into the servable's graph.pbtxt at
+    export time, and exports are skipped once the model is in the repository —
+    so a later config change would silently never apply. Patch the text
+    protobuf in place instead of forcing a multi-GB re-export.
+    """
+    import re
+    graph = os.path.join(_REPO, model_name, "graph.pbtxt")
+    if not os.path.isfile(graph):
+        return
+    try:
+        with open(graph) as f:
+            text = f.read()
+        patched, n = re.subn(r"cache_size:\s*\d+", f"cache_size: {cache_gb}", text)
+        if n and patched != text:
+            with open(graph, "w") as f:
+                f.write(patched)
+            print(_green(f"  [OK] {model_name:<24} KV cache updated to {cache_gb} GB"))
+    except Exception as e:
+        print(_yellow(f"  [WARN] Could not update KV cache for {model_name}: {e}"))
+
+
 def _export_model(export_tool: str, source_model: str, model_name: str,
-                  device: str) -> bool:
+                  device: str, cache_gb: int) -> bool:
     """Run export_model.py to convert/pull a model into the OVMS repository.
 
     The `text_generation` subcommand handles both plain LLMs and vision-language
@@ -174,6 +233,7 @@ def _export_model(export_tool: str, source_model: str, model_name: str,
     """
     if _model_already_exported(model_name):
         print(_green(f"  [OK] {model_name:<24} already in repository"))
+        _ensure_cache_size(model_name, cache_gb)
         return True
 
     print(_yellow(f"  [..] {model_name:<24} preparing from {source_model} (first run is slow)..."))
@@ -185,7 +245,7 @@ def _export_model(export_tool: str, source_model: str, model_name: str,
         "--config_file_path", _CONFIG_JSON,
         "--model_repository_path", _REPO,
         "--target_device", device,
-        "--cache_size", str(KV_CACHE_SIZE_GB),
+        "--cache_size", str(cache_gb),
     ]
     ret = subprocess.run(cmd, cwd=_HERE).returncode
     if ret == 0 and _model_already_exported(model_name):
@@ -198,13 +258,14 @@ def _export_model(export_tool: str, source_model: str, model_name: str,
 def ensure_models(device: str) -> bool:
     """Make sure both servables exist in the OVMS repository / config.json."""
     os.makedirs(_REPO, exist_ok=True)
+    _prune_stale_servables()
     _ensure_hf_cli()
     export_tool = _ensure_export_tool()
     if not export_tool:
         return False
 
-    ok = _export_model(export_tool, LLM_SOURCE, LLM_MODEL, device)
-    ok = _export_model(export_tool, VLM_SOURCE, VLM_MODEL, device) and ok
+    ok = _export_model(export_tool, LLM_SOURCE, LLM_MODEL, device, LLM_KV_CACHE_GB)
+    ok = _export_model(export_tool, VLM_SOURCE, VLM_MODEL, device, VLM_KV_CACHE_GB) and ok
     if not ok:
         print(_yellow("  Model export failed. Check the output above for the specific error."))
         print(_yellow("  Common causes:"))
@@ -326,9 +387,17 @@ def main():
 
     # ── OVMS already running? ─────────────────────────────────────
     print(_bold("\nOpenVINO Model Server:"))
-    if check_ovms():
+    if check_ovms() and _both_servables_ready():
         print(_green(f"  [OK] OVMS already running on {OVMS_BASE_URL}"))
     else:
+        if check_ovms():
+            # Server is up but serving a stale model set (e.g. after a model
+            # swap in config.py) — restart it so it reloads config.json.
+            print(_yellow(f"  [..] OVMS is running but not serving "
+                          f"{LLM_MODEL} + {VLM_MODEL} — restarting it"))
+            subprocess.run(["taskkill", "/F", "/IM", "ovms.exe"],
+                           capture_output=True, timeout=10)
+            time.sleep(2.0)
         # ── Prepare models ────────────────────────────────────────
         print(_bold("\nModels:"))
         if not ensure_models(device):
