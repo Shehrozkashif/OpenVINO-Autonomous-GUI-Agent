@@ -6,7 +6,7 @@ Run:
     python tests/live/test_folder.py
 
 Requirements:
-    - OpenVINO Model Server serving qwen3-8b-int4-ov (LLM) and ui-tars-1.5-7b-int4-ov (VLM)
+    - OpenVINO Model Server serving config.LLM_MODEL (LLM) and config.VLM_MODEL (VLM)
     - Real Windows display (desktop visible, no fullscreen apps)
     - Write permission to %USERPROFILE%\\Desktop
 """

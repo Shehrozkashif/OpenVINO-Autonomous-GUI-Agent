@@ -328,6 +328,235 @@ def save_dialog_open(timeout_s: float = 1.2) -> bool | None:
     return result[0]
 
 
+# ── Structured-control actions (UIA patterns) ────────────────────────────────
+# Deterministic, app-agnostic manipulation of form controls through the same
+# accessibility tree used for grounding. Where a mouse click on a dropdown or
+# date picker is a pixel guess, ValuePattern / SelectionItemPattern /
+# ExpandCollapsePattern / InvokePattern act on the control object itself and
+# can be verified by reading the control state straight back — no OCR, no VLM.
+
+
+def _find_control(query: str, timeout_s: float, control_types: frozenset | None = None):
+    """Locate the best-matching UIA control object for `query`.
+
+    Same matching rules as find_element(), but returns the live control object
+    (valid only on the calling thread's COM context) instead of coordinates.
+    MUST be called from a thread that has already initialized COM.
+    """
+    query = _strip_roles(query).lower().strip()
+    if not query:
+        return None
+
+    best: list = [None, 0.0]   # control, score
+
+    def _walk(ctrl, depth: int, max_depth: int):
+        if depth > max_depth or best[1] >= 1.0:
+            return
+        try:
+            type_ok = control_types is None or ctrl.ControlTypeName in control_types
+            if type_ok:
+                for text in _control_texts(ctrl):
+                    score = _match_score(query, text)
+                    if score > best[1] and score >= 0.65:
+                        rect = ctrl.BoundingRectangle
+                        if _rect_valid(rect):
+                            best[0], best[1] = ctrl, score
+                            if score >= 1.0:
+                                return
+            for child in ctrl.GetChildren():
+                _walk(child, depth + 1, max_depth)
+                if best[1] >= 1.0:
+                    return
+        except Exception:
+            pass   # controls can vanish mid-walk
+
+    _walk(_uia.GetForegroundControl(), 0, 12)
+    return best[0]
+
+
+def _run_uia_action(label: str, fn, timeout_s: float) -> bool:
+    """Run `fn` (a COM-touching callable returning bool) on a daemon thread with
+    per-thread COM init and a hard timeout, mirroring the query helpers above.
+    Returns False on timeout or any exception — callers fall back to the
+    click/type path, so a UIA miss can never block a task.
+    """
+    if not _load():
+        return False
+    result = [False]
+
+    def _act():
+        _com = _thread_com_init()
+        try:
+            result[0] = bool(fn())
+        except Exception as e:
+            logger.debug(f"[UIA] {label} failed: {e}")
+        finally:
+            del _com
+
+    t = threading.Thread(target=_act, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    return result[0]
+
+
+def _norm_text(s: str) -> str:
+    return " ".join((s or "").split()).strip().lower()
+
+
+def set_element_value(target: str, value: str, timeout_s: float = 3.0) -> bool:
+    """Set a text control's content via ValuePattern and verify by read-back.
+
+    Ground truth end to end: the value lands in the control object itself
+    (no focus race, no keystroke loss) and success means the control now
+    reports that exact content. Returns False when the control is missing,
+    read-only, or the read-back does not match — callers then fall back to
+    click+type.
+    """
+    def _do():
+        ctrl = _find_control(target, timeout_s, frozenset({
+            "EditControl", "ComboBoxControl", "DocumentControl",
+            "SpinnerControl",
+        }))
+        if ctrl is None:
+            return False
+        vp = ctrl.GetValuePattern()
+        if getattr(vp, "IsReadOnly", False):
+            return False
+        vp.SetValue(value)
+        readback = vp.Value or ""
+        ok = _norm_text(readback) == _norm_text(value)
+        if ok:
+            logger.info(f"[UIA] set_value '{target}' = '{value[:60]}' (verified)")
+        else:
+            logger.debug(
+                f"[UIA] set_value read-back mismatch on '{target}': "
+                f"'{readback[:60]}' != '{value[:60]}'"
+            )
+        return ok
+
+    return _run_uia_action(f"set_value('{target}')", _do, timeout_s)
+
+
+def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
+    """Select `option` inside the dropdown/list/tab control named `target`.
+
+    Mechanism (general — works on any app exposing standard UIA patterns):
+      1. Find the container control by name.
+      2. If it is collapsed (ComboBox, expander), expand it via
+         ExpandCollapsePattern so its items materialize in the tree.
+      3. Find the item matching `option` inside it and select it via
+         SelectionItemPattern (or InvokePattern as fallback).
+      4. Verify: the item reports IsSelected, or the container's value now
+         reads as the option.
+    Returns False on any miss so the caller can fall back to click-based steps.
+    """
+    def _do():
+        ctrl = _find_control(target, timeout_s, None)
+        if ctrl is None:
+            return False
+
+        # Expand collapsed containers so items exist in the tree.
+        expanded_here = False
+        try:
+            ecp = ctrl.GetExpandCollapsePattern()
+            if getattr(ecp, "ExpandCollapseState", 1) == 0:   # 0 = Collapsed
+                ecp.Expand()
+                expanded_here = True
+                import time as _t
+                _t.sleep(0.25)   # let the popup list materialize
+        except Exception:
+            pass
+
+        want = _norm_text(option)
+        item_best: list = [None, 0.0]
+
+        def _walk_items(c, depth: int):
+            if depth > 8 or item_best[1] >= 1.0:
+                return
+            try:
+                if c.ControlTypeName in (
+                    "ListItemControl", "TreeItemControl", "TabItemControl",
+                    "RadioButtonControl", "MenuItemControl",
+                ):
+                    name = _norm_text(c.Name)
+                    score = _match_score(want, name)
+                    if score > item_best[1] and score >= 0.65:
+                        item_best[0], item_best[1] = c, score
+                        if score >= 1.0:
+                            return
+                for ch in c.GetChildren():
+                    _walk_items(ch, depth + 1)
+                    if item_best[1] >= 1.0:
+                        return
+            except Exception:
+                pass
+
+        _walk_items(ctrl, 0)
+        if item_best[0] is None and expanded_here:
+            # ComboBox popups can be hosted in a separate top-level window —
+            # search the whole foreground tree once more.
+            _walk_items(_uia.GetForegroundControl(), 0)
+        if item_best[0] is None:
+            return False
+        item = item_best[0]
+
+        try:
+            item.GetSelectionItemPattern().Select()
+        except Exception:
+            try:
+                item.GetInvokePattern().Invoke()
+            except Exception:
+                return False
+
+        # Verify selection against the tree — item state or container value.
+        try:
+            if item.GetSelectionItemPattern().IsSelected:
+                logger.info(f"[UIA] select '{option}' in '{target}' (verified)")
+                return True
+        except Exception:
+            pass
+        try:
+            if want in _norm_text(ctrl.GetValuePattern().Value):
+                logger.info(f"[UIA] select '{option}' in '{target}' (value verified)")
+                return True
+        except Exception:
+            pass
+        # Selection fired without a readable state — count the action as done;
+        # the orchestrator's reflection still verifies the visible outcome.
+        logger.info(f"[UIA] select '{option}' in '{target}' (state unreadable)")
+        return True
+
+    return _run_uia_action(f"select('{option}' in '{target}')", _do, timeout_s)
+
+
+def invoke_element(target: str, timeout_s: float = 3.0) -> bool:
+    """Press the button/menu-item/link named `target` via InvokePattern.
+
+    Works even when the element is occluded or off-screen (where a mouse
+    click cannot land) and never mis-clicks a lookalike pixel region.
+    TogglePattern is used for checkboxes, which expose Toggle, not Invoke.
+    """
+    def _do():
+        ctrl = _find_control(target, timeout_s, frozenset({
+            "ButtonControl", "MenuItemControl", "HyperlinkControl",
+            "ListItemControl", "SplitButtonControl", "CheckBoxControl",
+            "TabItemControl",
+        }))
+        if ctrl is None:
+            return False
+        if ctrl.ControlTypeName == "CheckBoxControl":
+            ctrl.GetTogglePattern().Toggle()
+        else:
+            try:
+                ctrl.GetInvokePattern().Invoke()
+            except Exception:
+                ctrl.GetSelectionItemPattern().Select()
+        logger.info(f"[UIA] invoke '{target}' ({ctrl.ControlTypeName})")
+        return True
+
+    return _run_uia_action(f"invoke('{target}')", _do, timeout_s)
+
+
 # UIA control types a user can act on — used by get_interactive_elements().
 _INTERACTIVE_CONTROL_TYPES = frozenset({
     "ButtonControl", "MenuItemControl", "ListItemControl", "TreeItemControl",

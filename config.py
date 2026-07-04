@@ -11,15 +11,22 @@
 # These names must match the servable names registered in the OVMS config.json
 # that start.py generates (model_repository_path below).
 
-LLM_MODEL = "qwen3-8b-int4-ov"          # text reasoning — routing, planning, reflection
+LLM_MODEL = "qwen3-14b-int4-ov"         # text reasoning — routing, planning, reflection
 VLM_MODEL = "ui-tars-1.5-7b-int4-ov"    # GUI grounding & visual verification (UI-TARS)
+
+# Sized for a 24 GB GPU: 14B LLM weights (~9.7 GB) + 7B VLM weights (~5 GB)
+# + KV caches (4 + 2 GB) + runtime overhead ≈ 22 GB.
+# On a 16 GB GPU use the smaller LLM instead:
+#   LLM_MODEL  = "qwen3-8b-int4-ov"
+#   LLM_SOURCE = "OpenVINO/Qwen3-8B-int4-ov"
+#   LLM_KV_CACHE_GB = 2
 
 # ── Model sources (where start.py fetches / converts them from) ─────────────────
 # LLM_SOURCE is a pre-converted OpenVINO IR repo on Hugging Face — OVMS pulls it
 # directly. VLM_SOURCE is the upstream UI-TARS checkpoint; start.py converts it to
 # OpenVINO INT4 IR with optimum-cli on first run (no pre-built OV build exists).
 
-LLM_SOURCE = "OpenVINO/Qwen3-8B-int4-ov"
+LLM_SOURCE = "OpenVINO/Qwen3-14B-int4-ov"
 VLM_SOURCE = "ByteDance-Seed/UI-TARS-1.5-7B"
 
 # ── Endpoint ────────────────────────────────────────────────────────────────────
@@ -37,11 +44,15 @@ OVMS_REST_PORT = 8000
 #   "AUTO" → let OpenVINO pick the best available device
 TARGET_DEVICE = "GPU"
 
-# KV-cache budget PER MODEL (GB).  Both models share the same GPU memory, so the
-# total KV-cache allocation is 2 × this value.  On a 16 GB GPU with two INT4 7–8 B
-# models (~5 GB weights each), 2 GB per model is a safe default.  Increase on GPUs
-# with more VRAM (e.g. 4–6 on a 24 GB card) for longer context windows.
-KV_CACHE_SIZE_GB = 2
+# KV-cache budget per model (GB). Both models share the same GPU memory, so the
+# total allocation is the SUM of the two values plus the model weights.
+# The LLM gets the bigger cache: router decomposition, task replanning, and
+# batch planning carry the longest prompts. The VLM only ever sees one
+# screenshot + a short instruction per request, so 2 GB is plenty.
+# start.py applies changes here to already-exported models automatically
+# (it patches the baked cache_size in each servable's graph.pbtxt).
+LLM_KV_CACHE_GB = 4
+VLM_KV_CACHE_GB = 2
 
 # Local directory OVMS uses as its model repository (holds the IR models and the
 # generated config.json). Relative to the project root.

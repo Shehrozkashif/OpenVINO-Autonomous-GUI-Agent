@@ -47,6 +47,15 @@ class TaskMemory:
                 last_seen REAL
             )
         """)
+        # In-flight task progress — lets an interrupted/failed long task resume
+        # from its last completed subtask instead of starting over.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS task_checkpoints (
+                instruction TEXT PRIMARY KEY,
+                completed_json TEXT NOT NULL,
+                updated_at REAL
+            )
+        """)
         self.conn.commit()
 
     @property
@@ -112,6 +121,42 @@ class TaskMemory:
                 "avg_duration_s": avg_duration_s,
             })
         return result
+
+    # ── Task checkpoints (resume support for long tasks) ─────────────────────
+
+    def save_checkpoint(self, instruction: str, completed_descs: list[str]):
+        """Persist the descriptions of subtasks completed so far for `instruction`."""
+        self.conn.execute(
+            "INSERT INTO task_checkpoints (instruction, completed_json, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(instruction) DO UPDATE SET completed_json = excluded.completed_json, "
+            "updated_at = excluded.updated_at",
+            (instruction, json.dumps(completed_descs), time.time()),
+        )
+        self.conn.commit()
+
+    def load_checkpoint(self, instruction: str, max_age_s: float = 1800.0) -> list[str] | None:
+        """Return the completed-subtask descriptions of a recent interrupted run
+        of this exact instruction, or None. Stale checkpoints (older than
+        max_age_s) are ignored — the desktop state they describe is gone.
+        """
+        row = self.conn.execute(
+            "SELECT completed_json, updated_at FROM task_checkpoints WHERE instruction = ?",
+            (instruction,),
+        ).fetchone()
+        if not row:
+            return None
+        completed_json, updated_at = row
+        if time.time() - updated_at > max_age_s:
+            return None
+        completed = json.loads(completed_json)
+        return completed or None
+
+    def clear_checkpoint(self, instruction: str):
+        self.conn.execute(
+            "DELETE FROM task_checkpoints WHERE instruction = ?", (instruction,)
+        )
+        self.conn.commit()
 
     # ── Failure memory ────────────────────────────────────────────────────────
 

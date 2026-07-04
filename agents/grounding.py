@@ -277,6 +277,64 @@ class ElementCache:
         self._cache.clear()
 
 
+# Bracket styles UI-TARS uses around click(start_box=...) coordinates:
+# '[[', '[[[', '(', '[(', etc.
+_BOX_OPEN = r"[\[\(]{0,4}"
+_BOX_CLOSE = r"[\]\)]{0,4}"
+
+
+class _VLMSaysNotFound(Exception):
+    """VLM answered found=false — stop parsing, the element is not on screen."""
+
+
+@dataclass
+class _CoordSpace:
+    """Maps coordinate values from one VLM answer to screen pixels.
+
+    UI-TARS may answer in three different value scales (normalised 0-1,
+    its native 0-1000 grid, or raw pixels of the image it was shown).
+    This object carries the dimensions + configured convention so every
+    parser applies the exact same conversion rules.
+    """
+
+    screen_w: int
+    screen_h: int
+    display_w: int   # size of the image sent to the VLM (fallback: screen)
+    display_h: int
+    mode: str        # config.VLM_COORD_SPACE: "auto" | "pixels" | "norm1000"
+
+    def px_to_screen(self, px: float, py: float) -> tuple[int, int]:
+        """Scale display-space pixels to screen pixels, clamped to screen bounds."""
+        return (
+            min(int(px / self.display_w * self.screen_w), self.screen_w - 1),
+            min(int(py / self.display_h * self.screen_h), self.screen_h - 1),
+        )
+
+    def scale_x(self, val: float) -> int:
+        return self._scale(val, self.screen_w, self.display_w)
+
+    def scale_y(self, val: float) -> int:
+        return self._scale(val, self.screen_h, self.display_h)
+
+    def _scale(self, val: float, screen_dim: int, display_dim: int) -> int:
+        """Convert a single VLM coordinate to screen pixels.
+
+        A pinned mode ("pixels" / "norm1000") is applied deterministically.
+        In "auto": if val > 1000 it must be a display-space pixel, not
+        0-1000; if display_dim is available and val fits within it, treat
+        as pixel; otherwise fall back to 0-1000 normalised interpretation.
+        """
+        if self.mode == "pixels" and display_dim > 1:
+            return min(int(val / display_dim * screen_dim), screen_dim - 1)
+        if self.mode == "norm1000" and val <= 1000:
+            return min(int(val / 1000 * screen_dim), screen_dim - 1)
+        if val > 1000:
+            return min(int(val / display_dim * screen_dim), screen_dim - 1)
+        if display_dim > 1 and val <= display_dim:
+            return min(int(val / display_dim * screen_dim), screen_dim - 1)
+        return int(val / 1000 * screen_dim)
+
+
 class UIGroundingAgent:
     """Locates UI elements by natural language description.
 
@@ -527,169 +585,188 @@ class UIGroundingAgent:
             screen_x = (pixel_x / display_w) * screen_w
         If display dims are not provided, pixel coords are used as-is (clipped).
 
-        Handles the formats UI-TARS may emit:
-          action: click(start_box='[[x1,y1,x2,y2]]')   0-1000 scale
-          JSON:   {"x": 0.5, "y": 0.3, ...}            normalised 0-1
-          JSON:   {"x": 423, "y": 706, ...}             display pixels
-          Point:  <point>500 300</point>                 0-1000 or display pixels
-          BBox:   (x1,y1),(x2,y2)                       same scale rules
+        Handles the formats UI-TARS may emit — one parser method per format:
+          action: click(start_box='[[x1,y1,x2,y2]]')   → _parse_click_box
+          JSON:   {"x": 0.5, "y": 0.3, ...}            → _parse_json_coords
+          Point:  <point>500 300</point>               → _parse_point_tag
+          BBox:   (x1,y1),(x2,y2)                      → _parse_paren_bbox
+        Value-scale interpretation (0-1 / 0-1000 / display pixels) is shared:
+        see _CoordSpace and _xy_to_screen.
         """
         # Explicit not-found answer — fast, clean exit (no format warning)
         if "not_found" in text.lower():
             logger.debug("[GROUNDING/S2] VLM reports element not visible")
             return None
 
-        # Effective display dimensions for pixel-to-screen scaling.
-        # Fall back to screen dims (identity scale) when not provided.
-        dw = display_w if display_w > 1 else screen_w
-        dh = display_h if display_h > 1 else screen_h
+        space = self._vlm_coord_space(screen_w, screen_h, display_w, display_h)
+        try:
+            for parse in (
+                self._parse_click_box,
+                self._parse_json_coords,
+                self._parse_point_tag,
+                self._parse_paren_bbox,
+            ):
+                result = parse(text, space)
+                if result:
+                    return result
+        except _VLMSaysNotFound:
+            return None
 
-        # Coordinate convention of the served model. "auto" keeps the value-range
-        # heuristics below; pin to "pixels" or "norm1000" in config.py (calibrate
-        # once with tests/live/test_vlm_coordinates.py) for deterministic parsing.
+        logger.debug(f"[GROUNDING/S2] Unrecognised VLM format: '{text[:100]}'")
+        return None
+
+    @staticmethod
+    def _vlm_coord_space(
+        screen_w: int, screen_h: int, display_w: int, display_h: int,
+    ) -> "_CoordSpace":
+        """Build the coordinate-mapping context for one VLM answer.
+
+        The coordinate convention of the served model comes from config.
+        "auto" keeps the value-range heuristics in _CoordSpace/_xy_to_screen;
+        pin to "pixels" or "norm1000" in config.py (calibrate once with
+        tests/live/test_vlm_coordinates.py) for deterministic parsing.
+        """
         try:
             import config as _cfg
-            _mode = str(getattr(_cfg, "VLM_COORD_SPACE", "auto")).lower()
+            mode = str(getattr(_cfg, "VLM_COORD_SPACE", "auto")).lower()
         except Exception:
-            _mode = "auto"
+            mode = "auto"
+        # Effective display dimensions for pixel-to-screen scaling.
+        # Fall back to screen dims (identity scale) when not provided.
+        return _CoordSpace(
+            screen_w=screen_w, screen_h=screen_h,
+            display_w=display_w if display_w > 1 else screen_w,
+            display_h=display_h if display_h > 1 else screen_h,
+            mode=mode,
+        )
 
-        def _px_to_screen(px: float, py: float) -> tuple[int, int]:
-            """Scale display-space pixels to screen pixels, clamped to screen bounds."""
+    @staticmethod
+    def _xy_to_screen(
+        space: "_CoordSpace", xv: float, yv: float,
+        conf: float, conf_px: float, *,
+        strict_1000: bool, honor_pinned: bool = True,
+    ) -> tuple[int, int, float]:
+        """Map one (x, y) pair to screen pixels via the value-range tiers.
+
+        Tier order (first match wins):
+          1. both values in 0-1     → normalised floats (most accurate)
+          2. pinned config mode     → deterministic per-axis scaling
+          3. both values in 0-1000  → UI-TARS native 0-1000 scale
+          4. anything larger        → raw display pixels (conf_px applies)
+        strict_1000: the 0-1000 tier additionally requires values > 1
+        (used by the JSON parser, whose 0-1 tier is exact).
+        honor_pinned: the salvaged-numbers JSON fallback skips tier 2,
+        matching the original behaviour of that path.
+        """
+        if 0.0 <= xv <= 1.0 and 0.0 <= yv <= 1.0:
+            return (int(xv * space.screen_w), int(yv * space.screen_h), conf)
+        if honor_pinned and space.mode in ("pixels", "norm1000"):
+            return (space.scale_x(xv), space.scale_y(yv), conf)
+        in_thousand = (
+            (1.0 < xv <= 1000 and 1.0 < yv <= 1000) if strict_1000
+            else (xv <= 1000 and yv <= 1000)
+        )
+        if in_thousand:
             return (
-                min(int(px / dw * screen_w), screen_w - 1),
-                min(int(py / dh * screen_h), screen_h - 1),
+                int(xv / 1000 * space.screen_w),
+                int(yv / 1000 * space.screen_h),
+                conf,
             )
+        sx, sy = space.px_to_screen(xv, yv)
+        return (sx, sy, conf_px)
 
-        # UI-TARS native action format:
-        #   click(start_box='[[x1, y1, x2, y2]]')
-        # Bracket style varies wildly: '[[', '[[[', '(', '[(', etc.
-        # Scale interpretation: the prompt asks for 0-1000 but the OVMS-served
-        # INT4 UI-TARS often emits coordinates in the screenshot's pixel space
-        # instead.  Heuristic: if any coordinate exceeds 1000, treat ALL values
-        # as display-space pixels; otherwise use the 0-1000 convention.
-        _OPEN = r"[\[\(]{0,4}"
-        _CLOSE = r"[\]\)]{0,4}"
+    def _parse_click_box(
+        self, text: str, space: "_CoordSpace",
+    ) -> tuple[int, int, float] | None:
+        """UI-TARS native action format: click(start_box='[[x1, y1, x2, y2]]').
 
-        def _scale_box_coord(val: float, screen_dim: int, display_dim: int) -> int:
-            """Convert a VLM coordinate to screen pixels.
-
-            A pinned mode ("pixels" / "norm1000") is applied deterministically.
-            In "auto": if val > 1000 it must be a display-space pixel, not
-            0-1000; if display_dim is available and val fits within it, treat
-            as pixel; otherwise fall back to 0-1000 normalised interpretation.
-            """
-            if _mode == "pixels" and display_dim > 1:
-                return min(int(val / display_dim * screen_dim), screen_dim - 1)
-            if _mode == "norm1000" and val <= 1000:
-                return min(int(val / 1000 * screen_dim), screen_dim - 1)
-            if val > 1000:
-                return _px_to_screen(val, 0)[0] if screen_dim == screen_w else _px_to_screen(0, val)[1]
-            if display_dim > 1 and val <= display_dim:
-                return min(int(val / display_dim * screen_dim), screen_dim - 1)
-            return int(val / 1000 * screen_dim)
-
+        Bracket style varies wildly: '[[', '[[[', '(', '[(', etc., and the
+        model sometimes emits a 2-value centre point instead of a full bbox.
+        Scale interpretation: the prompt asks for 0-1000 but the OVMS-served
+        INT4 UI-TARS often emits coordinates in the screenshot's pixel space
+        instead — _CoordSpace.scale_x/y applies the per-value heuristic.
+        """
         m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _OPEN +
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _BOX_OPEN +
             r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
-            + _CLOSE + r"'?\s*\)",
+            + _BOX_CLOSE + r"'?\s*\)",
             text,
         )
         if m:
             x1, y1, x2, y2 = (float(m.group(i)) for i in range(1, 5))
             cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-            sx = _scale_box_coord(cx, screen_w, dw)
-            sy = _scale_box_coord(cy, screen_h, dh)
-            return (sx, sy, 0.90)
+            return (space.scale_x(cx), space.scale_y(cy), 0.90)
 
         # 2-value form: model emits [[cx, cy]] or (cx, cy) instead of a full bbox.
         m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _OPEN +
+            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _BOX_OPEN +
             r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
             r"\s*[\]\)\s']+",
             text,
         )
         if m:
             cx, cy = float(m.group(1)), float(m.group(2))
-            sx = _scale_box_coord(cx, screen_w, dw)
-            sy = _scale_box_coord(cy, screen_h, dh)
-            return (sx, sy, 0.80)
+            return (space.scale_x(cx), space.scale_y(cy), 0.80)
+        return None
 
-        # JSON block — x/y may be:
-        #   0-1 normalised floats  (model followed instructions)
-        #   1-1000 integers        (UI-TARS native 0-1000 scale leaked into JSON)
-        #   > 1000                 (raw display pixels — scale by dw/dh)
-        # Also handle malformed JSON like {"x": 658, 294} (missing "y": key).
+    def _parse_json_coords(
+        self, text: str, space: "_CoordSpace",
+    ) -> tuple[int, int, float] | None:
+        """JSON block — x/y may be:
+          0-1 normalised floats  (model followed instructions)
+          1-1000 integers        (UI-TARS native 0-1000 scale leaked into JSON)
+          > 1000                 (raw display pixels — scale by display dims)
+        Also handles malformed JSON like {"x": 658, 294} (missing "y": key)
+        by salvaging the first two numbers at reduced confidence.
+        """
         m = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if m:
-            raw_json = re.sub(r",\s*([\]}])", r"\1", m.group())
-            try:
-                data = json.loads(raw_json)
-                if not data.get("found", True):
-                    return None
-                xv, yv = float(data["x"]), float(data["y"])
-                conf = float(data.get("confidence", 0.7))
-                if 0.0 <= xv <= 1.0 and 0.0 <= yv <= 1.0:
-                    # Normalised 0-1 — most accurate
-                    return (int(xv * screen_w), int(yv * screen_h), conf)
-                if _mode in ("pixels", "norm1000"):
-                    return (_scale_box_coord(xv, screen_w, dw),
-                            _scale_box_coord(yv, screen_h, dh), conf)
-                if 1.0 < xv <= 1000 and 1.0 < yv <= 1000:
-                    # UI-TARS native 0-1000 scale — treat as normalised/1000
-                    return (int(xv / 1000 * screen_w), int(yv / 1000 * screen_h), conf)
-                # Values > 1000 — raw display pixels, scale to screen space
-                sx, sy = _px_to_screen(xv, yv)
-                return (sx, sy, conf)
-            except (json.JSONDecodeError, ValueError, KeyError):
-                # Fallback: try to extract two numbers from the JSON string
-                nums = re.findall(r'[\d]+(?:\.\d+)?', raw_json)
-                if len(nums) >= 2:
-                    try:
-                        xv, yv = float(nums[0]), float(nums[1])
-                        if 0.0 <= xv <= 1.0 and 0.0 <= yv <= 1.0:
-                            return (int(xv * screen_w), int(yv * screen_h), 0.65)
-                        if 1.0 < xv <= 1000 and 1.0 < yv <= 1000:
-                            return (int(xv / 1000 * screen_w), int(yv / 1000 * screen_h), 0.65)
-                        sx, sy = _px_to_screen(xv, yv)
-                        return (sx, sy, 0.65)
-                    except ValueError:
-                        pass
+        if not m:
+            return None
+        raw_json = re.sub(r",\s*([\]}])", r"\1", m.group())
+        try:
+            data = json.loads(raw_json)
+            if not data.get("found", True):
+                raise _VLMSaysNotFound
+            xv, yv = float(data["x"]), float(data["y"])
+            conf = float(data.get("confidence", 0.7))
+            return self._xy_to_screen(space, xv, yv, conf, conf, strict_1000=True)
+        except (json.JSONDecodeError, ValueError, KeyError):
+            # Fallback: try to extract two numbers from the JSON string
+            nums = re.findall(r'[\d]+(?:\.\d+)?', raw_json)
+            if len(nums) >= 2:
+                try:
+                    xv, yv = float(nums[0]), float(nums[1])
+                    return self._xy_to_screen(
+                        space, xv, yv, 0.65, 0.65,
+                        strict_1000=True, honor_pinned=False,
+                    )
+                except ValueError:
+                    pass
+            return None
 
-        # <point>cx cy</point>  (0-1000 scale or display-space pixels)
+    def _parse_point_tag(
+        self, text: str, space: "_CoordSpace",
+    ) -> tuple[int, int, float] | None:
+        """<point>cx cy</point> — 0-1000 scale or display-space pixels."""
         m = re.search(r'<point>\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s*</point>', text)
-        if m:
-            px, py = float(m.group(1)), float(m.group(2))
-            if px <= 1.0 and py <= 1.0:
-                return (int(px * screen_w), int(py * screen_h), 0.85)
-            if _mode in ("pixels", "norm1000"):
-                return (_scale_box_coord(px, screen_w, dw),
-                        _scale_box_coord(py, screen_h, dh), 0.85)
-            if px <= 1000 and py <= 1000:
-                # Could be 0-1000 normalised or small-display pixels; treat as 0-1000.
-                return (int(px / 1000 * screen_w), int(py / 1000 * screen_h), 0.85)
-            sx, sy = _px_to_screen(px, py)
-            return (sx, sy, 0.75)
+        if not m:
+            return None
+        px, py = float(m.group(1)), float(m.group(2))
+        return self._xy_to_screen(space, px, py, 0.85, 0.75, strict_1000=False)
 
-        # (x1,y1),(x2,y2) bounding box — take centre
+    def _parse_paren_bbox(
+        self, text: str, space: "_CoordSpace",
+    ) -> tuple[int, int, float] | None:
+        """(x1,y1),(x2,y2) bounding box — take the centre point."""
         m = re.search(
             r'\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\),\s*\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\)',
             text
         )
-        if m:
-            x1, y1, x2, y2 = (float(m.group(i)) for i in range(1, 5))
-            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-            if cx <= 1.0 and cy <= 1.0:
-                return (int(cx * screen_w), int(cy * screen_h), 0.85)
-            if _mode in ("pixels", "norm1000"):
-                return (_scale_box_coord(cx, screen_w, dw),
-                        _scale_box_coord(cy, screen_h, dh), 0.85)
-            if cx <= 1000 and cy <= 1000:
-                return (int(cx / 1000 * screen_w), int(cy / 1000 * screen_h), 0.85)
-            sx, sy = _px_to_screen(cx, cy)
-            return (sx, sy, 0.75)
-
-        logger.debug(f"[GROUNDING/S2] Unrecognised VLM format: '{text[:100]}'")
-        return None
+        if not m:
+            return None
+        x1, y1, x2, y2 = (float(m.group(i)) for i in range(1, 5))
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        return self._xy_to_screen(space, cx, cy, 0.85, 0.75, strict_1000=False)
 
     def _rephrase_targets(self, target: str) -> list[str]:
         """Ask the LLM for up to 3 alternative text labels for the same UI element.

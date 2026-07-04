@@ -43,7 +43,10 @@ class SubTask(BaseModel):
 class ActionStep(BaseModel):
     id: int
     subtask_id: int
-    action_type: str     # click | double_click | right_click | type | key_press | hotkey | scroll | wait | screenshot
+    # click | double_click | right_click | type | key_press | hotkey | scroll |
+    # wait | screenshot | extract | drag |
+    # set_value | select | invoke   (UIA structured-control actions)
+    action_type: str
     target: str | None = None    # natural-language UI element description (for grounding)
     value: str | None = None     # text to type, scroll direction, or wait duration in seconds
     key: str | None = None       # key name for key_press / hotkey e.g. "ctrl+s"

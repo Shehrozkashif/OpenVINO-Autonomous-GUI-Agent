@@ -111,6 +111,7 @@ _STEP_SCHEMA = {
             "action_type":  {"type": "string", "enum": [
                 "click", "right_click", "double_click",
                 "type", "key_press", "hotkey", "scroll", "wait", "drag", "extract",
+                "set_value", "select", "invoke",
             ]},
             "target":       {"type": ["string", "null"]},
             "value":        {"type": ["string", "null"]},
@@ -160,6 +161,20 @@ extract                             →  target = description of what to read fr
                                        Use when the task says: "tell me", "what is", "read", "get the value"
                                        The extracted text is returned to the user at task end.
 wait                                →  value  = seconds as string: "0.5" "1.0" "2.0" "3.0"
+set_value                           →  target = the field's visible label or accessible name
+                                       value  = exact text to put in the field
+                                       Sets a text field / combo box DIRECTLY through the
+                                       accessibility tree and verifies by read-back.
+                                       PREFER over click+type for labelled form fields.
+select                              →  target = the dropdown / list / tab control's name
+                                       value  = the option to choose (visible option text)
+                                       Opens the control if collapsed and selects the option
+                                       through the accessibility tree. PREFER over clicking
+                                       a dropdown and then clicking an option.
+invoke                              →  target = button / menu item / checkbox accessible name
+                                       Presses it through the accessibility tree — works even
+                                       when partially hidden. Use when a click on the same
+                                       label has already FAILED, or for checkboxes.
 
 ━━━ LAUNCHING APPS ━━━
 PRIMARY — click a visible icon (ONLY when the exact app name appears in screen text):
@@ -263,6 +278,19 @@ To find content that may be below the fold (not visible on screen):
   1. scroll  target=null  value="down"   (the system auto-scrolls and retries grounding)
   2. Continue generating steps — grounding will retry after each scroll automatically.
   Do NOT generate a long chain of scroll steps manually — one step is enough.
+
+━━━ FORMS / SCHEDULING DIALOGS (meetings, events, settings pages) ━━━
+Forms are filled FIELD BY FIELD with the structured actions — they act on the
+real control and self-verify, where blind clicking on a dropdown is a guess:
+  Text field ("Topic", "Title", "Search")    →  set_value target="<field label>" value="<text>"
+  Dropdown / combo (date, time, duration)    →  select target="<control name>" value="<option>"
+  Checkbox / radio ("Waiting room", "AM/PM") →  invoke target="<label>"
+  Confirm the form                           →  click "Save" / "Schedule" / "Done" (visible text)
+FALLBACK: when set_value/select FAILS on a field (custom-drawn control), use the
+mouse route instead: click the field → hotkey ctrl+a → type the value.
+Dropdown fallback: click the dropdown → wait "0.5" → click the option text.
+Fill ALL fields the goal names before clicking Save/Schedule — a form submitted
+half-filled is a failed subtask even if the dialog closes.
 
 ━━━ POPUP / DIALOG HANDLING ━━━
 If the screen shows an unexpected dialog, dismiss it BEFORE continuing:
@@ -387,6 +415,15 @@ EXAMPLE 6 — type in a LibreOffice Writer document:
   {{"id":1,"action_type":"click","target":"document area","value":null,"key":null,"description":"Click document to focus it","verification":"Cursor visible in document"}},
   {{"id":2,"action_type":"type","target":null,"value":"Hello World","key":null,"description":"Type text","verification":"Hello World visible in document"}},
   {{"id":3,"action_type":"hotkey","target":null,"value":null,"key":"ctrl+s","description":"Save document","verification":"Title bar shows no unsaved indicator"}}
+]
+
+EXAMPLE 7 — fill a scheduling form (goal: "with the schedule-meeting form open,
+set topic to Weekly Sync, date to 07/10/2026, time to 3:00 PM, then save"):
+[
+  {{"id":1,"action_type":"set_value","target":"Topic","value":"Weekly Sync","key":null,"description":"Set meeting topic","verification":"Topic field shows Weekly Sync"}},
+  {{"id":2,"action_type":"set_value","target":"Date","value":"07/10/2026","key":null,"description":"Set meeting date","verification":"Date field shows 07/10/2026"}},
+  {{"id":3,"action_type":"select","target":"Start time","value":"3:00 PM","key":null,"description":"Pick start time","verification":"Start time shows 3:00 PM"}},
+  {{"id":4,"action_type":"click","target":"Save","value":null,"key":null,"description":"Save the meeting","verification":"Form closes, meeting appears in list"}}
 ]"""
 
 
@@ -501,6 +538,44 @@ def _parse_visual_action(
     raise PlanningParseError(f"unrecognised visual action: {text[:120]}")
 
 
+# Appended to every planning prompt: when to return steps vs. an empty
+# array (= goal achieved). Kept out of plan_steps() for readability.
+_COMPLETION_RULES = (
+    "\n\nReturn ALL remaining action steps, in order, needed to achieve "
+    "the goal. The steps run in sequence exactly as given; the system "
+    "re-plans automatically if one fails, so do NOT add contingency or "
+    "just-in-case steps.\n"
+    "Return [] ONLY when the goal is DEFINITIVELY complete:\n"
+    "  • ‘open terminal / Windows Terminal’: a shell prompt is visible "
+    "(text like ‘PS’, ‘C:\\>’, ‘$’, or a username prompt) = goal achieved.\n"
+    "  • ‘run: <command>’ in terminal: The command has been TYPED (in history) AND "
+    "Enter has been pressed (in history). If a shell prompt is now visible = goal achieved. "
+    "Do NOT press Enter again.\n"
+    "  • ‘open browser’: the URL/address bar or browser tab is visible = achieved.\n"
+    "  • ‘open <any app>’: the app’s actual running content is on screen "
+    "(document area, file list, settings panel, etc.) = achieved.\n"
+    "  • ‘click <menu item>’: if a submenu panel or dialog opened AFTER the click = "
+    "goal achieved. Do NOT re-click the same item just because it is still visible "
+    "in the parent menu — parent menu items remain visible after their submenu opens.\n"
+    "  • ‘type X and press enter’ (rename/create dialog): step 1 = type X; "
+    "step 2 = key_press enter; step 3 = [] (done). "
+    "Do NOT type X again after it already appears in history — go straight to enter.\n"
+    "  • ‘type/write <text>’ (document/editor): once the text has been typed "
+    "(a type step is in history) = goal achieved → return []. "
+    "Do NOT type it again, and do NOT add save/close/extra steps the goal "
+    "does not mention — those belong to LATER subtasks.\n"
+    "CAUTION: An app name appearing in text does NOT mean the app is open — "
+    "it may be from the task description shown in the GUI agent’s own log window, "
+    "or a search result. Only return [] when the app’s active running content "
+    "is clearly visible.\n"
+    "LOOP PREVENTION: If the step you are about to plan has the same action_type, "
+    "target, value, and key as the immediately preceding completed step, do NOT "
+    "repeat it — plan the next logical action in sequence or return [].\n"
+    "When in doubt whether the goal is complete, return [] rather than adding "
+    "speculative steps."
+)
+
+
 class PlanningAgent:
     def __init__(self, client: InferenceClient):
         self.client = client
@@ -588,6 +663,28 @@ class PlanningAgent:
         SnapshotClass = _get_snapshot_class()
         if snapshot is not None and isinstance(snapshot, SnapshotClass):
             screen_context = snapshot.format_for_planner()
+
+        messages = [
+            {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
+            {"role": "user", "content": self._build_planning_prompt(
+                subtask, screen_context, completed, task_context, failure_hints,
+            )},
+        ]
+        steps = self._query_with_retry(messages, subtask.id)
+        if not steps:
+            logger.info("[PLANNING] Goal achieved — no more steps needed")
+            return None
+        return self._finalize_steps(steps, subtask, completed)
+
+    @staticmethod
+    def _build_planning_prompt(
+        subtask: SubTask,
+        screen_context: str,
+        completed: list[str],
+        task_context: list[str],
+        failure_hints: list[str],
+    ) -> str:
+        """Assemble the user prompt: goal + context blocks + completion rules."""
         # Inter-subtask context — what was done before this subtask
         ctx_block = ""
         if task_context:
@@ -619,51 +716,16 @@ class PlanningAgent:
         if screen_context:
             user_content += f"\nText currently visible on screen: {screen_context}"
 
-        user_content += (
-            "\n\nReturn ALL remaining action steps, in order, needed to achieve "
-            "the goal. The steps run in sequence exactly as given; the system "
-            "re-plans automatically if one fails, so do NOT add contingency or "
-            "just-in-case steps.\n"
-            "Return [] ONLY when the goal is DEFINITIVELY complete:\n"
-            "  • ‘open terminal / Windows Terminal’: a shell prompt is visible "
-            "(text like ‘PS’, ‘C:\\>’, ‘$’, or a username prompt) = goal achieved.\n"
-            "  • ‘run: <command>’ in terminal: The command has been TYPED (in history) AND "
-            "Enter has been pressed (in history). If a shell prompt is now visible = goal achieved. "
-            "Do NOT press Enter again.\n"
-            "  • ‘open browser’: the URL/address bar or browser tab is visible = achieved.\n"
-            "  • ‘open <any app>’: the app’s actual running content is on screen "
-            "(document area, file list, settings panel, etc.) = achieved.\n"
-            "  • ‘click <menu item>’: if a submenu panel or dialog opened AFTER the click = "
-            "goal achieved. Do NOT re-click the same item just because it is still visible "
-            "in the parent menu — parent menu items remain visible after their submenu opens.\n"
-            "  • ‘type X and press enter’ (rename/create dialog): step 1 = type X; "
-            "step 2 = key_press enter; step 3 = [] (done). "
-            "Do NOT type X again after it already appears in history — go straight to enter.\n"
-            "  • ‘type/write <text>’ (document/editor): once the text has been typed "
-            "(a type step is in history) = goal achieved → return []. "
-            "Do NOT type it again, and do NOT add save/close/extra steps the goal "
-            "does not mention — those belong to LATER subtasks.\n"
-            "CAUTION: An app name appearing in text does NOT mean the app is open — "
-            "it may be from the task description shown in the GUI agent’s own log window, "
-            "or a search result. Only return [] when the app’s active running content "
-            "is clearly visible.\n"
-            "LOOP PREVENTION: If the step you are about to plan has the same action_type, "
-            "target, value, and key as the immediately preceding completed step, do NOT "
-            "repeat it — plan the next logical action in sequence or return [].\n"
-            "When in doubt whether the goal is complete, return [] rather than adding "
-            "speculative steps."
-        )
+        return user_content + _COMPLETION_RULES
 
-        messages = [
-            {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
+    def _query_with_retry(self, messages: list[dict], subtask_id: int) -> list[ActionStep]:
+        """One planning call, with a single temperature-0 retry on parse errors."""
         resp = self.client.query_llm(
             messages, max_tokens=768, temperature=0.2,
             response_schema=_STEP_SCHEMA,
         )
         try:
-            steps = self._parse_steps(resp.content, subtask.id)
+            return self._parse_steps(resp.content, subtask_id)
         except (ValueError, json.JSONDecodeError) as e:
             # A parse error is NOT "goal achieved" — returning None here made the
             # orchestrator mark the subtask complete on garbage output. Retry once
@@ -675,16 +737,17 @@ class PlanningAgent:
                 response_schema=_STEP_SCHEMA,
             )
             try:
-                steps = self._parse_steps(resp.content, subtask.id)
+                return self._parse_steps(resp.content, subtask_id)
             except (ValueError, json.JSONDecodeError) as e2:
                 raise PlanningParseError(
                     f"planner output unparseable after retry: {e2}"
                 ) from e2
 
-        if not steps:
-            logger.info("[PLANNING] Goal achieved — no more steps needed")
-            return None
-
+    @staticmethod
+    def _finalize_steps(
+        steps: list[ActionStep], subtask: SubTask, completed: list[str],
+    ) -> list[ActionStep]:
+        """Renumber steps after the completed history and apply overrides."""
         # Deterministic right_click override — the LLM occasionally outputs "click"
         # even when the subtask description clearly says "right click".
         _sub_lower = subtask.description.lower()
@@ -748,5 +811,13 @@ class PlanningAgent:
                 raise ValueError(
                     f"Step {step.id} is '{step.action_type}' but 'target' is missing."
                 )
+            if step.action_type in ("set_value", "select") and (
+                not step.target or step.value is None
+            ):
+                raise ValueError(
+                    f"Step {step.id} is '{step.action_type}' but 'target' or 'value' is missing."
+                )
+            if step.action_type == "invoke" and not step.target:
+                raise ValueError(f"Step {step.id} is 'invoke' but 'target' is missing.")
             steps.append(step)
         return steps

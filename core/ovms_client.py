@@ -2,8 +2,8 @@
 """OpenVINO™ Model Server (OVMS) inference client.
 
 A single OVMS instance serves BOTH models on one OpenAI-compatible endpoint:
-    LLM (text reasoning):   qwen3-8b-int4-ov        — planning, routing, reflection
-    VLM (visual grounding): ui-tars-1.5-7b-int4-ov  — GUI grounding, visual verify
+    LLM (text reasoning):   config.LLM_MODEL — planning, routing, reflection
+    VLM (visual grounding): config.VLM_MODEL — GUI grounding, visual verify
 
 Both are reached at  POST {OVMS_BASE_URL}/v3/chat/completions  and selected by the
 "model" field in the request body. start.py prepares the models and launches OVMS.
