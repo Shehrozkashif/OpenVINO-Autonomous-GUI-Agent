@@ -568,6 +568,23 @@ _INTERACTIVE_CONTROL_TYPES = frozenset({
 
 # ── Tree walking ──────────────────────────────────────────────────────────────
 
+def _click_point(ctrl, rect) -> tuple[int, int]:
+    """Where a click should land for this control.
+
+    Prefer the OS-reported clickable point: the center of a wide control's
+    bounding rect can sit on an overlapping child or padding, while
+    GetClickablePoint() is the accessibility tree's own answer to "where do I
+    click this". Falls back to rect center when the pattern is unsupported.
+    """
+    try:
+        x, y, got = ctrl.GetClickablePoint()
+        if got and x > 0 and y > 0:
+            return x, y
+    except Exception:
+        pass
+    return (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+
+
 def _walk_and_match(
     root,
     query: str,
@@ -576,45 +593,61 @@ def _walk_and_match(
     publish=None,
 ) -> tuple[int, int, float] | None:
     """DFS walk of a UIA subtree.  Returns the best (x, y, confidence) match or None.
-    Stops immediately on an exact name match.
+
+    Two-tier matching: INTERACTIVE controls (buttons, menu items, list items…)
+    always outrank decorative ones (text labels, images, badges). A decorative
+    element that merely displays the query text — e.g. a "NEW" feature badge
+    (TextControl) — must never beat the interactive control the planner means
+    (the "New meeting" button, substring match). Clicking decoration is a
+    no-op, which is exactly the delta=0 dead-click loop seen in live runs.
+    Only an exact INTERACTIVE match stops the walk early; decorative matches
+    are kept as a confidence-discounted fallback used when nothing interactive
+    matches at all (some apps label a clickable region only via a text child).
 
     publish: optional callback invoked with each new best match as the walk
     progresses — lets the caller keep the best result found so far even when
     the walk is cut off by a timeout (deep browser/Electron trees).
     """
-    best_result: list = [None]
+    best_result: list = [None]   # interactive tier
     best_score:  list = [0.0]
+    passive_result: list = [None]   # decorative fallback tier
+    passive_score:  list = [0.0]
+
+    def _publish_best():
+        if publish:
+            publish(best_result[0] or passive_result[0])
 
     def _walk(ctrl, depth: int):
         if depth > max_depth:
             return
         if best_result[0] and best_score[0] >= 1.0:
-            return   # exact match already found — prune remaining tree
+            return   # exact interactive match already found — prune remaining tree
 
         try:
+            interactive = ctrl.ControlTypeName in _INTERACTIVE_CONTROL_TYPES
             for text in _control_texts(ctrl):
                 score = _match_score(query, text)
-
-                if score >= 1.0:
-                    rect = ctrl.BoundingRectangle
-                    if _rect_valid(rect):
-                        cx = (rect.left + rect.right) // 2
-                        cy = (rect.top + rect.bottom) // 2
-                        best_result[0] = (cx, cy, 1.0)
+                if score < threshold:
+                    continue
+                rect = ctrl.BoundingRectangle
+                if not _rect_valid(rect):
+                    continue
+                if interactive:
+                    if score >= 1.0:
+                        best_result[0] = (*_click_point(ctrl, rect), 1.0)
                         best_score[0]  = 1.0
-                        if publish:
-                            publish(best_result[0])
+                        _publish_best()
                         return   # stop this branch — propagate up
-
-                elif score >= threshold and score > best_score[0]:
-                    rect = ctrl.BoundingRectangle
-                    if _rect_valid(rect):
-                        cx = (rect.left + rect.right) // 2
-                        cy = (rect.top + rect.bottom) // 2
-                        best_result[0] = (cx, cy, round(score * 0.90, 3))
+                    if score > best_score[0]:
+                        best_result[0] = (*_click_point(ctrl, rect),
+                                          round(score * 0.90, 3))
                         best_score[0]  = score
-                        if publish:
-                            publish(best_result[0])
+                        _publish_best()
+                elif score > passive_score[0]:
+                    passive_result[0] = (*_click_point(ctrl, rect),
+                                         round(score * 0.80, 3))
+                    passive_score[0]  = score
+                    _publish_best()
 
             for child in ctrl.GetChildren():
                 _walk(child, depth + 1)
@@ -625,7 +658,7 @@ def _walk_and_match(
             pass   # UIA elements can disappear mid-walk (window closed, etc.)
 
     _walk(root, 0)
-    return best_result[0]
+    return best_result[0] or passive_result[0]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

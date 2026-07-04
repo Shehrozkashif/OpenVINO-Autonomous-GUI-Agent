@@ -276,6 +276,10 @@ class ElementCache:
     def invalidate(self):
         self._cache.clear()
 
+    def drop(self, target: str):
+        """Remove one target's entry (e.g. its coordinate was proven inert)."""
+        self._cache.pop(target, None)
+
 
 # Bracket styles UI-TARS uses around click(start_box=...) coordinates:
 # '[[', '[[[', '(', '[(', etc.
@@ -362,12 +366,50 @@ class UIGroundingAgent:
         self.ocr = ocr if ocr is not None else OCREngine()
         self.min_confidence = min_confidence
         self.screen_w, self.screen_h = _screen_size()
+        # Coordinates proven inert by the reflector (click → phash delta=0),
+        # keyed by (target, screen phash). While the screen is in that exact
+        # state, these points are never served again — grounding falls through
+        # to the next stage instead. See mark_dead().
+        self._dead: dict[tuple[str, str], list[tuple[int, int]]] = {}
         logger.info(
             f"[GROUNDING] Ready. Screen: {self.screen_w}×{self.screen_h}. "
             f"OCR: {'on' if self.ocr.is_available() else 'off (pip install rapidocr-onnxruntime)'}"
         )
 
     # ── public API ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _near_dead(x: int, y: int, dead, radius: int = 10) -> bool:
+        return any(abs(x - dx) <= radius and abs(y - dy) <= radius for dx, dy in dead)
+
+    def mark_dead(self, target: str, x: int, y: int):
+        """Record that clicking (x,y) for `target` provably changed nothing.
+
+        Called by the orchestrator when the reflector's frame comparison shows
+        phash delta=0 after the click — hard evidence the point is inert in the
+        CURRENT screen state. The screen is still in that state (nothing
+        changed), so hashing it now keys the blacklist to exactly the state
+        where the click was proven dead. On any other screen the same
+        coordinate stays usable.
+        """
+        if not target:
+            return
+        try:
+            display = self.capturer.capture()
+            display.thumbnail((self._DISPLAY_W, self._DISPLAY_H), Image.LANCZOS)
+            screen_hash = str(imagehash.phash(display))
+        except Exception:
+            return
+        self._dead.setdefault((target.lower(), screen_hash), []).append((x, y))
+        if len(self._dead) > 64:
+            self._dead.pop(next(iter(self._dead)))
+        # The cached entry points at the dead coordinate — drop it so the
+        # retry re-grounds instead of re-serving the proven-inert point.
+        self.cache.drop(target)
+        logger.info(
+            f"[GROUNDING] ({x},{y}) marked DEAD for '{target}' on current "
+            f"screen — next attempt must find a different point"
+        )
 
     def ground(self, target: str, max_retries: int = 1) -> GroundingResult:
         """Locate a UI element by natural language description.
@@ -388,7 +430,11 @@ class UIGroundingAgent:
         scale_y = self.screen_h / dh if dh > 0 else 1.0
 
         screen_hash = str(imagehash.phash(display))
+        dead = self._dead.get((target.lower(), screen_hash), [])
         cached = self.cache.get(target, screen_hash)
+        if cached and dead and self._near_dead(cached[0], cached[1], dead):
+            self.cache.drop(target)
+            cached = None
         if cached:
             x, y, conf, method, element_type = cached
             # Canonical "[GROUNDING] '…' → (x,y) conf=… method=…" format — the
@@ -408,7 +454,7 @@ class UIGroundingAgent:
             # VLM call costs a 30-60s model swap, and re-asking it the identical
             # question on an unchanged screen returns the same answer anyway.
             result = self._locate(target, display, img_b64, words, scale_x, scale_y,
-                                  use_vlm=(attempt == 0))
+                                  use_vlm=(attempt == 0), dead=dead)
             if result:
                 x, y, conf, method, element_type = result
                 x = max(0, min(x, self.screen_w - 1))
@@ -432,7 +478,7 @@ class UIGroundingAgent:
             # Rephrased labels are alternative TEXT spellings — UIA/OCR are the
             # right matchers for them; skip the expensive VLM here.
             result = self._locate(alt, display, img_b64, words, scale_x, scale_y,
-                                  use_vlm=False)
+                                  use_vlm=False, dead=dead)
             if result:
                 x, y, conf, method, element_type = result
                 x = max(0, min(x, self.screen_w - 1))
@@ -509,7 +555,12 @@ class UIGroundingAgent:
         scale_x: float,
         scale_y: float,
         use_vlm: bool = True,
+        dead=(),
     ) -> tuple[int, int, float, str, str] | None:
+        # `dead` holds coordinates proven inert on this exact screen (a click
+        # there changed zero pixels). A stage that lands on a dead point is
+        # skipped so the next stage gets a chance to find a different point.
+
         # Stage 0: Windows UIAutomation — fast, pixel-perfect, no model needed
         # UIA elements are always interactive → element_type="foreground_interactive"
         if _uia_ok():
@@ -518,9 +569,13 @@ class UIGroundingAgent:
                 x, y, conf = r
                 x = max(0, min(x, self.screen_w - 1))
                 y = max(0, min(y, self.screen_h - 1))
-                logger.info(f"[GROUNDING/S0-UIA] '{target}' → screen({x},{y}) conf={conf:.2f}")
-                return (x, y, conf, "uia", "foreground_interactive")
-            logger.debug(f"[GROUNDING/S0-UIA] '{target}' not found in UIA tree")
+                if self._near_dead(x, y, dead):
+                    logger.info(f"[GROUNDING/S0-UIA] '{target}' → ({x},{y}) is a known-dead point — skipping stage")
+                else:
+                    logger.info(f"[GROUNDING/S0-UIA] '{target}' → screen({x},{y}) conf={conf:.2f}")
+                    return (x, y, conf, "uia", "foreground_interactive")
+            else:
+                logger.debug(f"[GROUNDING/S0-UIA] '{target}' not found in UIA tree")
 
         # Stage 1: OCR direct fuzzy-match — carry element_type from the matched word
         if words:
@@ -528,15 +583,19 @@ class UIGroundingAgent:
             match = self.ocr.find_text(words, query, threshold=0.65)
             if match:
                 x, y = int(match.cx * scale_x), int(match.cy * scale_y)
-                logger.info(f"[GROUNDING/S1-OCR] '{target}' → '{match.text}' → screen({x},{y})")
-                return (x, y, 0.95, "ocr_direct", match.element_type)
-            logger.debug(f"[GROUNDING/S1] No OCR match for '{query}'")
+                if self._near_dead(x, y, dead):
+                    logger.info(f"[GROUNDING/S1-OCR] '{target}' → ({x},{y}) is a known-dead point — skipping stage")
+                else:
+                    logger.info(f"[GROUNDING/S1-OCR] '{target}' → '{match.text}' → screen({x},{y})")
+                    return (x, y, 0.95, "ocr_direct", match.element_type)
+            else:
+                logger.debug(f"[GROUNDING/S1] No OCR match for '{query}'")
 
         # Stage 2: VLM direct coordinate prediction
         # VLM is expected to hit interactive elements → element_type="foreground_interactive"
         if use_vlm and self.client:
             result = self._vlm_coords(target, img_b64, int(display.width), int(display.height))
-            if result:
+            if result and not self._near_dead(result[0], result[1], dead):
                 return result
 
         return None

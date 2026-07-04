@@ -886,46 +886,48 @@ class TestRightClickDedupLimit:
         assert last_step.key == "escape"
 
 
-class TestStreakReset:
-    """A different action signature resets the streak; subsequent runs start fresh."""
+class TestInterleavedRepeats:
+    """Repeats are counted as per-subtask TOTALS, not consecutively.
 
-    def test_type_streak_resets_after_click(self):
-        """Type × 2 → streak = 1 (at limit, but NOT >1 so not triggered).
-        click (different) → streak resets to 0.
-        type × 2 → streak = 1 again (fresh start, NOT triggered).
-        None → done normally.
-        Planner called 6 times (5 steps + None).
+    An interleaved different step must NOT launder a loop: A-B-A-B ping-pong
+    (seen live: hallucinated verifier success alternating 'click NEW' /
+    'click Schedule' for 10 minutes) trips the guard exactly like A-A-A.
+    Different signatures still count independently.
+    """
+
+    def test_type_repeat_survives_interleaved_click(self):
+        """type ×2 allowed (limit 1 = one repeat); an interleaved click does
+        not reset the count, so the 3rd type total fires the guard.
+        Planner called 4 times (guard fires while recording step 4).
         """
         ts = _step_loop("type", target=None, value="hello")
         cs = _step_loop("click", target="Foo")
-        orch = _make_orch_loop([ts, ts, cs, ts, ts])
+        orch = _make_orch_loop([ts, ts, cs, ts])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_steps.call_count == 6
+        assert orch.planner.plan_steps.call_count == 4
 
-    def test_click_streak_resets_after_type(self):
-        """Click × 3 → streak = 2 (at limit, NOT triggered).
-        type → streak resets.
-        click × 3 → streak = 2 again (NOT triggered).
-        """
+    def test_click_repeat_survives_interleaved_type(self):
+        """click ×3 allowed (limit 2); an interleaved type does not reset the
+        count, so the 4th click total fires the guard at step 5."""
         cs = _step_loop("click", target="Btn")
         ts = _step_loop("type", target=None, value="x")
-        orch = _make_orch_loop([cs, cs, cs, ts, cs, cs, cs])
+        orch = _make_orch_loop([cs, cs, cs, ts, cs])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_steps.call_count == 8  # 7 steps + None
+        assert orch.planner.plan_steps.call_count == 5
 
-    def test_different_target_same_type_resets_streak(self):
-        """Two clicks on the same target, then a click on a different target,
-        then two more clicks on the original target — streak for the original
-        resets after the different target, so no trigger.
+    def test_different_targets_count_independently(self):
+        """Clicks on Alpha and Beta have different signatures — three Alpha
+        clicks plus one Beta click stay within Alpha's allowance (3 total),
+        so no trigger: all 4 steps run, then None ends the subtask.
         """
         ca = _step_loop("click", target="Alpha")
         cb = _step_loop("click", target="Beta")
-        orch = _make_orch_loop([ca, ca, cb, ca, ca])
+        orch = _make_orch_loop([ca, ca, cb, ca])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_steps.call_count == 6
+        assert orch.planner.plan_steps.call_count == 5  # 4 steps + None
 
     def test_only_type_no_escape_on_trigger(self):
         """Type loop guard does NOT inject Escape (only click/right_click do)."""

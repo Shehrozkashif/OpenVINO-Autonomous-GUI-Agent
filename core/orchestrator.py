@@ -64,7 +64,9 @@ class OrchestratorConfig:
     max_task_replans: int = 2
 
 
-# Per-action-type limit on consecutive identical successful steps.
+# Per-action-type limit on identical successful steps within ONE subtask —
+# counted as a TOTAL, not consecutively, so A-B-A-B ping-pong loops (e.g. a
+# hallucinated verifier success alternating between two clicks) trip it too.
 # Stricter for high-signal actions (type, right_click); lenient for nav keys.
 DEDUP_LIMIT_BY_ACTION_TYPE: dict[str, int] = {
     "type":        1,   # same text typed twice → almost certainly a loop
@@ -99,8 +101,7 @@ class _SubtaskRun:
     consecutive_failures: int = 0
     cached_ocr: str = ""                   # reuse reflection's OCR for the next plan
     screen_context: str = ""               # OCR context the current step was planned on
-    last_step_sig: tuple = ()              # (action_type, target, value, key)
-    same_step_streak: int = 0              # consecutive successes of the identical step
+    step_sig_counts: dict = field(default_factory=dict)  # (action_type, target, value, key) → successes
     typed_ok: bool = False                 # a type step succeeded in this subtask
     last_error: str = ""                   # most recent step failure reason
     # Steps planned ahead by the last plan_steps() call. Executing from this
@@ -1098,6 +1099,18 @@ class TaskOrchestrator:
                 f"  Verification failed: {run.last_error} "
                 f"(conf={reflection.confidence:.2f})"
             )
+            # Ground truth: a click that changed ZERO pixels (phash delta=0)
+            # hit an inert point. Blacklist it so the retry's re-grounding
+            # cannot serve the same coordinate from cache/UIA/OCR and must
+            # fall through to another stage (or fail honestly). Without this,
+            # "Re-ground the target" retries are no-ops: unchanged screen →
+            # same phash → cache hit → same dead pixel, forever.
+            if (
+                step.action_type in ("click", "right_click", "double_click")
+                and "unchanged" in run.last_error.lower()
+                and getattr(self, "_last_click_xy", None)
+            ):
+                self.grounder.mark_dead(step.target, *self._last_click_xy)
             # A confidently-failed non-idempotent action must also not
             # be blind-retried (Fix C5) — same double-execution risk.
             if not reflection.should_retry or non_idempotent:
@@ -1167,18 +1180,16 @@ class TaskOrchestrator:
             return True
 
         sig = (step.action_type, step.target, step.value, step.key)
-        if sig != run.last_step_sig:
-            run.same_step_streak = 0
-            run.last_step_sig = sig
-            return None
-
-        run.same_step_streak += 1
+        count = run.step_sig_counts.get(sig, 0) + 1
+        run.step_sig_counts[sig] = count
         _dedup_limit = DEDUP_LIMIT_BY_ACTION_TYPE.get(step.action_type, 2)
-        if run.same_step_streak <= _dedup_limit:
+        # limit = allowed REPEATS beyond the first success (same semantics as
+        # the old consecutive streak: total appearances ≤ limit+1 are fine).
+        if count <= _dedup_limit + 1:
             return None
         self.log(
-            f"  [LOOP-GUARD] '{step.action_type}' repeated "
-            f"{run.same_step_streak + 1}× (limit={_dedup_limit}) — "
+            f"  [LOOP-GUARD] '{step.action_type}' on '{step.target}' "
+            f"succeeded {count}× in this subtask (limit={_dedup_limit}) — "
             f"loop detected, stopping subtask"
         )
         # Fix C4: a loop is a strong signal the plan is not working.
@@ -1356,6 +1367,9 @@ class TaskOrchestrator:
 
     def _execute_step(self, step: ActionStep) -> bool:
         x, y, x2, y2 = None, None, None, None
+        # Where the last click-family step actually landed — lets the
+        # reflector's "screen unchanged" verdict blacklist the exact point.
+        self._last_click_xy = None
 
         # Never type into the agent's own host terminal session.
         if step.action_type in ("type", "key_press", "hotkey") and \
@@ -1382,6 +1396,7 @@ class TaskOrchestrator:
             if _coords is not None:
                 # Explicit pixel coordinates (visual planner / burst convention)
                 x, y = _coords
+                self._last_click_xy = (x, y)
                 return self.actor.execute(step, x=x, y=y)
             if not step.target:
                 self.log(f"  {step.action_type} has no target")
@@ -1398,6 +1413,7 @@ class TaskOrchestrator:
             # Clicks on these elements (score=1.0, method=ocr_direct) are correct.
             # The GUI window masking (exclude_regions) prevents log-text false positives.
             x, y = result.x, result.y
+            self._last_click_xy = (x, y)
 
         # ── Drag ──────────────────────────────────────────────────────────────
         elif step.action_type == "drag":
