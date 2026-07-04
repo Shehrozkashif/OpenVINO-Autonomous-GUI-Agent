@@ -127,22 +127,48 @@ def _ensure_export_tool() -> str:
         return ""
 
 
+def _hf_cli_entrypoint():
+    """Return the `hf` CLI as "module:function", or "" if not importable.
+
+    huggingface_hub >= 1.0 ships this as a console_scripts entry point named
+    `hf`. We read it from package metadata rather than hardcoding the module
+    path so the shim keeps working across huggingface_hub versions.
+    """
+    try:
+        import importlib.metadata as md
+        for ep in md.distribution("huggingface_hub").entry_points:
+            if ep.group == "console_scripts" and ep.name == "hf":
+                return ep.value  # e.g. "huggingface_hub.cli.hf:main"
+    except Exception:
+        pass
+    return ""
+
+
 def _ensure_hf_cli():
     """Guarantee a WORKING `huggingface-cli` for export_model.py.
 
     export_model.py downloads pre-converted OpenVINO models via
     `huggingface-cli download ...`. huggingface_hub >= 1.0 replaced that command
-    with `hf` and ships a `huggingface-cli` stub that just errors out — so we
-    cannot rely on it being absent. Drop a shim that forwards to `hf` into a
-    dedicated dir and PREPEND it to PATH so it wins over the broken stub.
+    with `hf` and ships a `huggingface-cli` stub that just errors out.
+
+    We can't forward the shim to `hf.exe`: that launcher has the venv's
+    python.exe path baked in at install time, so copying/moving the venv breaks
+    it with "The system cannot find the file specified". Instead we invoke the
+    `hf` entry point through the CURRENT interpreter (sys.executable, resolved
+    fresh each run), drop that as a `huggingface-cli` shim, and PREPEND it to
+    PATH so it wins over the broken stub.
     """
-    if not shutil.which("hf"):
-        return  # no `hf` to forward to — leave export_model.py to its own CLI
+    entrypoint = _hf_cli_entrypoint()
+    if not entrypoint:
+        return  # no importable `hf` CLI — leave export_model.py to its own CLI
+    module, _, func = entrypoint.partition(":")
     shim_dir = os.path.join(_HERE, "tools", "ovms", "_shims")
     os.makedirs(shim_dir, exist_ok=True)
+    # `python -c "import sys; from <mod> import <fn>; sys.exit(<fn>())" %*`
+    runner = f"import sys; from {module} import {func}; sys.exit({func}())"
     try:
         with open(os.path.join(shim_dir, "huggingface-cli.bat"), "w") as f:
-            f.write("@echo off\r\nhf %*\r\n")
+            f.write(f'@echo off\r\n"{sys.executable}" -c "{runner}" %*\r\n')
     except Exception as e:
         print(_yellow(f"  [WARN] Could not create huggingface-cli shim: {e}"))
         return
