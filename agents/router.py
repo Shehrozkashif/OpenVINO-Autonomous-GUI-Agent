@@ -270,17 +270,24 @@ class RouterAgent:
             {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
-        resp = self.client.query_llm(messages, max_tokens=768, temperature=0.1,
+        # 768 tokens truncated real 8-subtask decompositions mid-string (seen
+        # live) — the parse failed and the retry produced junk. 1536 fits any
+        # realistic plan; generation still stops at the closing bracket.
+        resp = self.client.query_llm(messages, max_tokens=1536, temperature=0.1,
                                    response_schema=_SUBTASK_SCHEMA)
         try:
             subtasks = self._parse_subtasks(resp.content)
         except (ValueError, json.JSONDecodeError):
-            logger.warning("[ROUTER] Parse failed — retrying with schema-only prompt")
+            logger.warning("[ROUTER] Parse failed — retrying with JSON-only reminder")
+            # Keep the FULL router system prompt: a bare "output JSON" retry
+            # (no decomposition rules) returns conversational to-do items
+            # ("Confirm the date with X") that no planner can act on.
             retry_messages = [
-                {"role": "system", "content": "Output ONLY a JSON array of sub-tasks."},
-                {"role": "user", "content": f"Sub-tasks for: {instruction}"},
+                {"role": "system", "content": ROUTER_SYSTEM_PROMPT
+                 + "\nOutput ONLY the JSON array — no prose, no explanation."},
+                {"role": "user", "content": user_content},
             ]
-            resp = self.client.query_llm(retry_messages, max_tokens=512, temperature=0.0,
+            resp = self.client.query_llm(retry_messages, max_tokens=1536, temperature=0.0,
                                        response_schema=_SUBTASK_SCHEMA)
             subtasks = self._parse_subtasks(resp.content)
 
@@ -338,7 +345,7 @@ class RouterAgent:
         ]
         try:
             resp = self.client.query_llm(
-                messages, max_tokens=768, temperature=0.2,
+                messages, max_tokens=1536, temperature=0.2,
                 response_schema=_SUBTASK_SCHEMA,
             )
             subtasks = self._parse_subtasks(resp.content)
@@ -463,7 +470,7 @@ class RouterAgent:
         ]
         try:
             resp = self.client.query_llm(
-                messages, max_tokens=768, temperature=0.1,
+                messages, max_tokens=1536, temperature=0.1,
                 response_schema=_SUBTASK_SCHEMA,
             )
             fixed = self._parse_subtasks(resp.content)
@@ -485,18 +492,44 @@ class RouterAgent:
 
         start_idx = text.find('[')
         end_idx = text.rfind(']')
-        if start_idx == -1 or end_idx == -1:
+        if start_idx == -1:
             raise ValueError(f"No JSON array in router response: {text[:200]}")
-
-        json_str = text[start_idx:end_idx + 1]
+        # A truncated generation (hit max_tokens mid-object) may have no
+        # closing ']' at all — take everything and let the salvage below
+        # recover the complete prefix.
+        json_str = text[start_idx:end_idx + 1] if end_idx > start_idx else text[start_idx:]
         json_str = re.sub(r",\s*([\]}])", r"\1", json_str)
         json_str = re.sub(r":\s*'([^']*)'", r': "\1"', json_str)
 
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
-            logger.error(f"[ROUTER] JSON parse error: {e}\nRaw: {json_str[:300]}")
-            raise
+            # Salvage a truncated array: cut back to the last complete object
+            # and close the bracket. The complete prefix is real work the model
+            # planned; anything dropped off the tail is restored by the
+            # _ensure_complete() backstop, which re-prompts for missing actions.
+            # Scan the FULL tail, not json_str — the rfind(']') trim above may
+            # have cut at an inner bracket (e.g. "depends_on":[1]), dropping
+            # the closing brace of the last complete object.
+            tail = text[start_idx:]
+            tail = re.sub(r",\s*([\]}])", r"\1", tail)
+            tail = re.sub(r":\s*'([^']*)'", r': "\1"', tail)
+            data = None
+            for m in reversed(list(re.finditer(r"\}", tail))):
+                try:
+                    candidate = json.loads(tail[:m.end()] + "]")
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(candidate, list) and candidate:
+                    data = candidate
+                    logger.warning(
+                        f"[ROUTER] Truncated JSON — salvaged "
+                        f"{len(data)} complete sub-task(s)"
+                    )
+                    break
+            if data is None:
+                logger.error(f"[ROUTER] JSON parse error: {e}\nRaw: {json_str[:300]}")
+                raise
 
         subtasks = []
         for item in data:

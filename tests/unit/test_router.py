@@ -103,3 +103,45 @@ class TestEnsureComplete:
             "Open Notepad and write and save the file", "Instruction: ...", original)
         assert out is original
         router.client.query_llm.assert_not_called()
+
+
+class TestParseTruncatedJSON:
+    """Salvage of truncated decompose output (hit max_tokens mid-object).
+
+    Live failure: an 8-subtask decomposition was cut mid-string, parse failed,
+    and the schema-only retry produced conversational to-do items the planner
+    could not act on. The complete prefix of a truncated array is real work —
+    it must be recovered, not thrown away.
+    """
+
+    def _router(self):
+        return RouterAgent(client=MagicMock())
+
+    def test_truncated_mid_string_salvages_prefix(self):
+        # Shape taken from the live log: cut off inside subtask 3's description.
+        raw = (
+            '[{"id":1,"description":"open Thunderbird","depends_on":[]},'
+            '{"id":2,"description":"click the Write new message button","depends_on":[1]},'
+            '{"id":3,"description":"set To to sharooz57@gmail.com, and type the message'
+        )
+        subs = self._router()._parse_subtasks(raw)
+        assert [s.id for s in subs] == [1, 2]
+        assert subs[0].description == "open Thunderbird"
+
+    def test_truncated_after_object_salvages_all_complete(self):
+        raw = (
+            '[{"id":1,"description":"open Notepad","depends_on":[]},'
+            '{"id":2,"description":"type: hello","depends_on":[1]},'
+        )
+        subs = self._router()._parse_subtasks(raw)
+        assert [s.id for s in subs] == [1, 2]
+
+    def test_intact_json_still_parses(self):
+        raw = '[{"id":1,"description":"open Calculator","depends_on":[]}]'
+        subs = self._router()._parse_subtasks(raw)
+        assert len(subs) == 1 and subs[0].description == "open Calculator"
+
+    def test_unsalvageable_still_raises(self):
+        import pytest
+        with pytest.raises((ValueError, json.JSONDecodeError)):
+            self._router()._parse_subtasks('[{"id":1,"description":"open')
