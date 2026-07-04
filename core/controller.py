@@ -274,10 +274,24 @@ def _send_text(text: str, interval: float = 0.04) -> None:
 class DesktopController:
     """Windows desktop controller — mouse and keyboard via raw Win32 SendInput."""
 
+    # Optional UI hook fired on every pointer action: on_pointer(x, y, kind).
+    # The GUI uses it to pulse a capture-excluded ring where the click lands,
+    # so the user can follow the agent's mouse work. Never blocks or raises
+    # into the action path.
+    on_pointer = None
+
+    def _notify_pointer(self, x: int, y: int, kind: str):
+        if self.on_pointer is not None:
+            try:
+                self.on_pointer(x, y, kind)
+            except Exception:
+                pass
+
     def click(self, x: int, y: int, button: str = "left") -> bool:
         x, y = int(x), int(y)
         down = _MOUSE_DOWN_FLAG.get(button, _MOUSEEVENTF_LEFTDOWN)
         up = _MOUSE_UP_FLAG.get(button, _MOUSEEVENTF_LEFTUP)
+        self._notify_pointer(x, y, button)
         _glide_cursor(x, y)
         time.sleep(0.12)
         _mouse_event(down)
@@ -292,6 +306,7 @@ class DesktopController:
 
     def double_click(self, x: int, y: int) -> bool:
         x, y = int(x), int(y)
+        self._notify_pointer(x, y, "double")
         _glide_cursor(x, y)
         time.sleep(0.12)
         _mouse_event(_MOUSEEVENTF_LEFTDOWN)

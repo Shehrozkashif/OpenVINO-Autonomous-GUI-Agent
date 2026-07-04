@@ -206,7 +206,14 @@ class ReflectionAgent:
         _used_llm = len(meaningful) >= 3 or _force_llm
         if _used_llm:
             ocr_text = ", ".join(w.text for w in meaningful[:40]) if meaningful else "(screen appears blank or icon-only)"
-            result = self._verify_with_llm(step, ocr_text, verification)
+            # Focus is INVISIBLE to OCR: "the address bar is now focused"
+            # cannot be confirmed from screen text, so the verifier failed
+            # successful ctrl+l hotkeys forever (seen live, 12 retries).
+            # Give the LLM the accessibility tree's answer as ground truth.
+            focus_note = self._focused_control_note()
+            result = self._verify_with_llm(
+                step, ocr_text + focus_note, verification
+            )
             result.ocr_text = ocr_text
         else:
             ocr_text = ""
@@ -251,6 +258,30 @@ class ReflectionAgent:
         return result
 
     # ── verification paths ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _focused_control_note() -> str:
+        """One-line ground truth about which control owns keyboard focus.
+
+        Appended to the OCR text given to the LLM verifier so outcomes that
+        are invisible to OCR (focus moves, caret placement, a field being
+        selected) are verifiable against the accessibility tree instead of
+        being systematically failed. ~50 ms; empty string when unavailable.
+        """
+        try:
+            from core.windows_uia import focused_element_info
+            info = focused_element_info(timeout_s=0.8)
+            if info:
+                name = info["name"][:60]
+                value = (info["value"] or "").strip()[:60]
+                return (
+                    f"\nKeyboard focus (accessibility tree, ground truth): "
+                    f"{info['control_type']} '{name}'"
+                    + (f" containing '{value}'" if value else " (empty)")
+                )
+        except Exception:
+            pass
+        return ""
 
     def _verify_with_llm(
         self, step: ActionStep, ocr_text: str, verification: str

@@ -61,6 +61,9 @@ class WorkerSignals(QObject):
     # Missing-detail elicitation finished (pre-mission, window still visible);
     # carries the instruction enriched with the user's answers.
     elicit_done = pyqtSignal(str)
+    # Pointer action fired by the controller (worker thread) — the UI thread
+    # pulses a capture-excluded ring at that spot so clicks are visible.
+    pointer_action = pyqtSignal(int, int, str)
 
 
 class Shell(QWidget):
@@ -105,6 +108,7 @@ class DesktopGUIAgent(QMainWindow):
         self.bus = AgentEventBus()
         self._running = False
         self._memory = None
+        self._click_pulse = None   # lazy ClickPulse overlay (see _on_pointer_action)
         # (timestamp, QPixmap, action_text) frames recorded during missions
         self.frame_store = deque(maxlen=48)
         self._frame_counter = 0
@@ -269,6 +273,23 @@ class DesktopGUIAgent(QMainWindow):
         self.signals.ask_user.connect(self._on_ask_user)
         self.signals.confirm_action.connect(self._on_confirm_action)
         self.signals.elicit_done.connect(self._launch_mission)
+        self.signals.pointer_action.connect(self._on_pointer_action)
+        # Let the controller report every click so the user can see where the
+        # agent's mouse lands (emit is thread-safe from the worker thread).
+        if self.orchestrator is not None:
+            try:
+                self.orchestrator.actor.controller.on_pointer = (
+                    lambda x, y, kind: self.signals.pointer_action.emit(x, y, kind)
+                )
+            except AttributeError:
+                pass  # headless/mock orchestrator without a real controller
+
+    def _on_pointer_action(self, x: int, y: int, kind: str):
+        """UI-thread slot: pulse the click indicator at the action's location."""
+        if self._click_pulse is None:
+            from ui.click_pulse import ClickPulse
+            self._click_pulse = ClickPulse()
+        self._click_pulse.flash(x, y, kind)
 
     # ── Blocking questions from the worker thread ─────────────────────────────
 

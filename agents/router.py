@@ -247,6 +247,40 @@ class RouterAgent:
     def __init__(self, client: InferenceClient):
         self.client = client
 
+    @staticmethod
+    def _installed_app_hint(instruction: str) -> str:
+        """Ground-truth hint: installed apps whose names appear in the instruction.
+
+        General by construction — the app list comes from the OS
+        (Get-StartApps: Win32 + Store apps) and the match comes from the
+        user's own words. No app names are hardcoded. Stops the router from
+        planning a browser/web route when the user has the real app installed
+        (e.g. 'outlook meeting' → the installed Outlook, not outlook.live.com).
+        """
+        from utils.platform_utils import installed_apps
+        apps = installed_apps()
+        if not apps:
+            logger.warning(
+                "[ROUTER] Installed-app list unavailable (Get-StartApps "
+                "failed/timed out) — no app hint for the planner"
+            )
+            return ""
+        tokens = set(re.findall(r"[a-zA-Z]{4,}", instruction.lower()))
+        hits = sorted({a for a in apps if any(t in a.lower() for t in tokens)})
+        if not hits:
+            logger.info(
+                f"[ROUTER] No installed app matches the instruction "
+                f"({len(apps)} apps checked)"
+            )
+            return ""
+        logger.info(f"[ROUTER] Installed-app hint: {hits[:8]}")
+        return (
+            "Ground truth — these apps mentioned in the instruction are "
+            "INSTALLED on this machine: " + ", ".join(hits[:8]) + ". "
+            "Use the installed app (open it via Start menu search), NOT a "
+            "browser/web version of it."
+        )
+
     def decompose(
         self,
         instruction: str,
@@ -257,6 +291,9 @@ class RouterAgent:
         logger.info(f"[ROUTER] Task {task_id}: '{instruction}'")
 
         user_content = f"Instruction: {instruction}\n{_today_line()}"
+        app_hint = self._installed_app_hint(instruction)
+        if app_hint:
+            user_content += f"\n\n{app_hint}"
         if memory_hint:
             user_content += f"\n\n{memory_hint}"
         if screen_context:
@@ -338,6 +375,9 @@ class RouterAgent:
         )
         if screen_context:
             user_content += f"\n\nCurrently visible on screen: {screen_context}"
+        app_hint = self._installed_app_hint(instruction)
+        if app_hint:
+            user_content += f"\n\n{app_hint}"
 
         messages = [
             {"role": "system", "content": ROUTER_SYSTEM_PROMPT},

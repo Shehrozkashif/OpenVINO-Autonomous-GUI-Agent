@@ -35,6 +35,15 @@ def _warmup_models(client: OVMSClient, task_memory: TaskMemory | None = None) ->
     import threading
 
     def _do_warmup():
+        # Prewarm the installed-app catalogue (Get-StartApps, ~1-3 s but can
+        # be slow on locked-down machines) so the router's app hint is ready
+        # before the first decompose instead of timing out inside it.
+        try:
+            from utils.platform_utils import installed_apps
+            apps = installed_apps()
+            logger.info(f"[STARTUP] Installed-app catalogue: {len(apps)} apps")
+        except Exception as e:
+            logger.debug(f"[STARTUP] App catalogue skipped: {e}")
         try:
             client.query_llm(
                 [{"role": "user", "content": "ping"}],

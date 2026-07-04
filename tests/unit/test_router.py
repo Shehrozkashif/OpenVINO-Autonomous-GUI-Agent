@@ -145,3 +145,34 @@ class TestParseTruncatedJSON:
         import pytest
         with pytest.raises((ValueError, json.JSONDecodeError)):
             self._router()._parse_subtasks('[{"id":1,"description":"open')
+
+
+class TestInstalledAppHint:
+    """Ground-truth app hint: OS app list × the user's own words. No hardcoding."""
+
+    def _hint(self, instruction, apps):
+        from unittest.mock import patch
+        with patch("utils.platform_utils.installed_apps", return_value=apps):
+            return RouterAgent._installed_app_hint(instruction)
+
+    def test_mentioned_installed_app_is_hinted(self):
+        hint = self._hint(
+            "schedule an outlook meeting with shehroz at 3pm",
+            ["Outlook (new)", "Microsoft Edge", "Calculator"],
+        )
+        assert "Outlook (new)" in hint
+        assert "INSTALLED" in hint
+
+    def test_unmentioned_apps_are_not_hinted(self):
+        hint = self._hint(
+            "schedule an outlook meeting",
+            ["Zoom Workplace", "Spotify"],
+        )
+        assert hint == ""
+
+    def test_no_apps_detected_means_no_hint(self):
+        assert self._hint("open outlook", []) == ""
+
+    def test_any_app_name_works_generally(self):
+        hint = self._hint("play some music on spotify", ["Spotify", "Outlook"])
+        assert "Spotify" in hint and "Outlook" not in hint

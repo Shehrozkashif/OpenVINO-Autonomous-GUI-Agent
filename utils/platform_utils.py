@@ -35,6 +35,39 @@ def enable_dpi_awareness() -> None:
         pass   # non-Windows or restricted environment — nothing to do
 
 
+# ── Installed apps ────────────────────────────────────────────────────────────
+
+_installed_apps_cache: list[str] | None = None
+
+
+def installed_apps() -> list[str]:
+    """Names of every launchable app on this machine, from the OS itself.
+
+    Get-StartApps lists the Start-menu catalogue — classic Win32 apps AND
+    packaged/Store apps (e.g. the new Outlook), which have no .lnk on disk.
+    This is planning ground truth: it lets the router prefer an app the user
+    actually has over a web fallback, without hardcoding a single app name.
+    Cached for the process lifetime (~1-3 s first call). Returns [] off
+    Windows or on failure — callers must treat the list as best-effort.
+    """
+    global _installed_apps_cache
+    if _installed_apps_cache is not None:
+        return _installed_apps_cache
+    apps: list[str] = []
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-StartApps | ForEach-Object Name"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            apps = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    _installed_apps_cache = apps
+    return apps
+
+
 # ── Firefox ───────────────────────────────────────────────────────────────────
 
 def detect_firefox() -> str:

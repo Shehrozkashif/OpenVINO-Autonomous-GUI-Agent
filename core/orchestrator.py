@@ -1179,7 +1179,13 @@ class TaskOrchestrator:
             self.log(f"  [GOAL-CHECK] '{_label}' confirmed — goal achieved")
             return True
 
-        sig = (step.action_type, step.target, step.value, step.key)
+        # Normalize the signature so trivial respellings of the same target
+        # ("New Tab" vs "Newtab") cannot dodge the loop guard — the planner
+        # varies casing/spacing between cycles when it is stuck.
+        def _norm(s):
+            return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+        sig = (step.action_type, _norm(step.target), _norm(step.value),
+               _norm(step.key))
         count = run.step_sig_counts.get(sig, 0) + 1
         run.step_sig_counts[sig] = count
         _dedup_limit = DEDUP_LIMIT_BY_ACTION_TYPE.get(step.action_type, 2)
