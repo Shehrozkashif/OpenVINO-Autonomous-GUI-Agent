@@ -58,6 +58,9 @@ class WorkerSignals(QObject):
     # "answer": [None]} — the UI slot fills answer and sets the event.
     ask_user = pyqtSignal(str, object)
     confirm_action = pyqtSignal(str, str, object)
+    # Missing-detail elicitation finished (pre-mission, window still visible);
+    # carries the instruction enriched with the user's answers.
+    elicit_done = pyqtSignal(str)
 
 
 class Shell(QWidget):
@@ -265,20 +268,38 @@ class DesktopGUIAgent(QMainWindow):
         self.signals.error.connect(self._on_error)
         self.signals.ask_user.connect(self._on_ask_user)
         self.signals.confirm_action.connect(self._on_confirm_action)
+        self.signals.elicit_done.connect(self._launch_mission)
 
     # ── Blocking questions from the worker thread ─────────────────────────────
+
+    def _restore_for_dialog(self) -> bool:
+        """Bring the window back if minimized so a modal dialog can be seen
+        and hold focus (a dialog parented to a minimized window centers
+        off-screen at -32000 and loses keystrokes). Returns True if the
+        window must be re-minimized afterwards.
+        """
+        if self.isMinimized():
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            return True
+        return False
 
     def _on_ask_user(self, question: str, ctx: dict):
         """UI-thread slot: ask the user for a missing detail (e.g. meeting time)."""
         from PyQt6.QtWidgets import QInputDialog
+        re_minimize = self._restore_for_dialog()
         try:
             text, ok = QInputDialog.getText(self, "The agent needs a detail", question)
             ctx["answer"][0] = text.strip() if ok and text.strip() else None
         finally:
             ctx["event"].set()
+            if re_minimize:
+                self.showMinimized()
 
     def _on_confirm_action(self, summary: str, command: str, ctx: dict):
         """UI-thread slot: confirm a potentially destructive command."""
+        re_minimize = self._restore_for_dialog()
         reply = QMessageBox.question(
             self, "Confirm potentially destructive action",
             f"{summary}\n\nCommand:\n{command}\n\nAllow the agent to run this?",
@@ -289,6 +310,8 @@ class DesktopGUIAgent(QMainWindow):
             ctx["answer"][0] = reply == QMessageBox.StandardButton.Yes
         finally:
             ctx["event"].set()
+            if re_minimize:
+                self.showMinimized()
 
     def _ask_blocking(self, question: str) -> str | None:
         """Called from the worker thread. Blocks (max 180 s) until the user
@@ -357,6 +380,29 @@ class DesktopGUIAgent(QMainWindow):
         self.bus.reset()
         self.panel.clear_mission()
         self._goto_page(1)  # Mission Control
+
+        # Ask for missing details BEFORE minimizing. A modal question parented
+        # to a minimized window centers off-screen at (-32000,-32000) and
+        # cannot hold keyboard focus — users lost their answer mid-typing and
+        # the mission proceeded with the raw instruction. The ~3 s LLM check +
+        # dialogs run on a prep thread while the window is still visible;
+        # _launch_mission then minimizes and starts the worker with the
+        # enriched instruction.
+        self.orchestrator.log = \
+            lambda msg: self.signals.log_update.emit(msg)
+        self.orchestrator.on_ask = self._ask_blocking
+
+        def _prep():
+            try:
+                enriched = self.orchestrator._elicit_missing_parameters(instruction)
+            except Exception:
+                enriched = instruction
+            self.signals.elicit_done.emit(enriched)
+
+        threading.Thread(target=_prep, daemon=True).start()
+
+    def _launch_mission(self, instruction: str):
+        """UI-thread slot: details are in — minimize and start the mission."""
         self.showMinimized()
         self.hud.show_mission()
         # Delay the worker 500 ms so the window manager fully hides this
@@ -372,9 +418,10 @@ class DesktopGUIAgent(QMainWindow):
         try:
             self.orchestrator.log = \
                 lambda msg: self.signals.log_update.emit(msg)
-            # Human-in-the-loop hooks: missing-detail questions and
-            # destructive-command confirmations pop dialogs on the UI thread.
-            self.orchestrator.on_ask = self._ask_blocking
+            # Elicitation already ran pre-minimize (_run_task) — disable it in
+            # execute() so the mission never pops a dialog under a minimized
+            # window. Destructive-command confirmation stays wired.
+            self.orchestrator.on_ask = None
             self.orchestrator.on_confirm = self._confirm_blocking
             result = self.orchestrator.execute(instruction)
             self.signals.task_complete.emit(result)
