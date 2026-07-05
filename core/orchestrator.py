@@ -627,6 +627,56 @@ class TaskOrchestrator:
         except Exception:
             return 0, 0, ""
 
+    @staticmethod
+    def _window_title(hwnd: int) -> str:
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(512)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+            return buf.value or ""
+        except Exception:
+            return ""
+
+    def _launch_already_satisfied(self, subtask: SubTask) -> bool:
+        """Ground-truth launch skip: "open X" when X already owns the foreground.
+
+        The app name is parsed from the subtask's own text and matched against
+        the foreground window's title and process name — no app catalogue.
+        Launching blindly when the app is already in front is actively harmful
+        (seen live: Start-menu Enter landed on the WEB result and opened a
+        browser page over the real Outlook). When satisfied, the window is
+        anchored so the rest of the task acts on it.
+        """
+        desc = subtask.description
+        if not self._LAUNCH_DESC_RX.match(desc.lower()):
+            return False
+        # Apps with mapped processes keep the stricter launch semantics in
+        # _setup_launch_goal (a pre-existing terminal may be busy running
+        # another program — reusing it is the documented H-bug). The skip is
+        # for everything else, where "it's already in front" means done.
+        if any(k in desc.lower() for k in self._PROCESS_MAP_WINDOWS):
+            return False
+        signals = self._derive_launch_signals(desc)
+        if not signals:
+            return False
+        hwnd, pid, name = self._foreground_app()
+        if not hwnd or hwnd == getattr(self, "_own_hwnd", None):
+            return False
+        title = self._window_title(hwnd)
+        hay = f"{title} {name}".lower()
+        if not any(s.lower() in hay for s in signals if len(s) >= 3):
+            return False
+        self._app_anchor = (hwnd, pid, name)
+        self.log(
+            f"  [LAUNCH-SKIP] '{signals[0]}' already owns the foreground "
+            f"('{title[:60]}') — anchored it, nothing to launch"
+        )
+        logger.info(
+            f"[ORCHESTRATOR] Launch skipped: '{signals[0]}' foreground "
+            f"(title='{title[:60]}', proc={name}) — anchored hwnd={hwnd}"
+        )
+        return True
+
     def _maybe_set_app_anchor(self, description: str):
         """Record the foreground window as the task's app anchor after a
         successful launch subtask ("open X" / "launch X" / "start X")."""
@@ -750,6 +800,12 @@ class TaskOrchestrator:
           _record_step_success   → history, early-exit checks, loop guard
           _record_step_failure   → history, failure memory, abort threshold
         """
+        # Ground truth fast path: "open X" when X is already the foreground
+        # window — anchor it and skip the launch entirely (zero LLM calls,
+        # zero keystrokes). See _launch_already_satisfied.
+        if self._launch_already_satisfied(subtask):
+            return True
+
         # Fast path: recognised multi-step patterns run with zero LLM calls.
         if self._try_burst(subtask):
             return True
@@ -1088,6 +1144,37 @@ class TaskOrchestrator:
             reflection = self.reflector.verify(step, _reflect_wait,
                                                pre_hash=pre_click_hash)
             run.cached_ocr = reflection.ocr_text   # reuse for next planning call
+
+            # Ground truth override: a click that flipped the foreground to a
+            # DIFFERENT app than the task's anchor hit the wrong element, no
+            # matter what any model verdict says (seen live: an Outlook button
+            # literally named 'New' opened an Edge error page — the VLM even
+            # blessed it). Blacklist the point on the screen it was grounded
+            # on, bring the task app back, and fail the step honestly.
+            if (
+                step.action_type in ("click", "right_click", "double_click")
+                and not run.is_launch_goal
+                and getattr(self, "_app_anchor", None)
+            ):
+                _fg_hwnd, _fg_pid, _fg_name = self._foreground_app()
+                if _fg_pid and _fg_pid != self._app_anchor[1] \
+                        and _fg_hwnd != getattr(self, "_own_hwnd", None):
+                    self.log(
+                        f"  [ANCHOR] Click switched foreground to {_fg_name} — "
+                        f"wrong element for a task anchored to {self._app_anchor[2]}"
+                    )
+                    logger.warning(
+                        f"[ORCHESTRATOR] Click on '{step.target}' opened {_fg_name} "
+                        f"(task app: {self._app_anchor[2]}) — marking point dead"
+                    )
+                    if getattr(self, "_last_click_xy", None) and step.target:
+                        self.grounder.mark_dead(step.target, *self._last_click_xy)
+                    self._ensure_anchor_foreground()
+                    run.last_error = (
+                        f"click opened {_fg_name} instead of acting inside "
+                        f"{self._app_anchor[2]} — wrong element"
+                    )
+                    return "stop"
 
             if reflection.success:
                 self.log(f"  Verified (conf={reflection.confidence:.2f})")

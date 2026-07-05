@@ -371,6 +371,11 @@ class UIGroundingAgent:
         # state, these points are never served again — grounding falls through
         # to the next stage instead. See mark_dead().
         self._dead: dict[tuple[str, str], list[tuple[int, int]]] = {}
+        # Screen hash each target was last grounded on — mark_dead() blacklists
+        # against THIS state, so a wrong click that changed the screen (e.g.
+        # opened another app's window) still poisons the point on the screen
+        # where it will be looked up again.
+        self._ground_hash: dict[str, str] = {}
         logger.info(
             f"[GROUNDING] Ready. Screen: {self.screen_w}×{self.screen_h}. "
             f"OCR: {'on' if self.ocr.is_available() else 'off (pip install rapidocr-onnxruntime)'}"
@@ -394,12 +399,18 @@ class UIGroundingAgent:
         """
         if not target:
             return
-        try:
-            display = self.capturer.capture()
-            display.thumbnail((self._DISPLAY_W, self._DISPLAY_H), Image.LANCZOS)
-            screen_hash = str(imagehash.phash(display))
-        except Exception:
-            return
+        # Prefer the hash of the screen this target was GROUNDED on: when the
+        # wrong click changed the screen (opened another window), hashing the
+        # current screen would key the blacklist to the aftermath state — a
+        # state where the point is never looked up — making it useless.
+        screen_hash = self._ground_hash.get(target.lower())
+        if screen_hash is None:
+            try:
+                display = self.capturer.capture()
+                display.thumbnail((self._DISPLAY_W, self._DISPLAY_H), Image.LANCZOS)
+                screen_hash = str(imagehash.phash(display))
+            except Exception:
+                return
         self._dead.setdefault((target.lower(), screen_hash), []).append((x, y))
         if len(self._dead) > 64:
             self._dead.pop(next(iter(self._dead)))
@@ -430,6 +441,9 @@ class UIGroundingAgent:
         scale_y = self.screen_h / dh if dh > 0 else 1.0
 
         screen_hash = str(imagehash.phash(display))
+        self._ground_hash[target.lower()] = screen_hash
+        if len(self._ground_hash) > 128:
+            self._ground_hash.pop(next(iter(self._ground_hash)))
         dead = self._dead.get((target.lower(), screen_hash), [])
         cached = self.cache.get(target, screen_hash)
         if cached and dead and self._near_dead(cached[0], cached[1], dead):
