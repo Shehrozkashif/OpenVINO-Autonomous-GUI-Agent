@@ -127,54 +127,63 @@ def _ensure_export_tool() -> str:
         return ""
 
 
-def _hf_cli_entrypoint():
-    """Return the `hf` CLI as "module:function", or "" if not importable.
+# CLIs export_model.py shells out to, as (shim name, distribution, entry point).
+# Windows console-script .exe launchers embed the venv's python.exe path at
+# install time — copy or move the venv and every one of them dies with
+# "The system cannot find the file specified" ('hf.exe' and 'optimum-cli.exe'
+# both hit this in live runs). huggingface-cli additionally maps to the `hf`
+# entry point because huggingface_hub >= 1.0 ships a huggingface-cli stub that
+# just errors out.
+_CLI_SHIMS = (
+    ("huggingface-cli", "huggingface_hub", "hf"),
+    ("optimum-cli", "optimum", "optimum-cli"),
+)
 
-    huggingface_hub >= 1.0 ships this as a console_scripts entry point named
-    `hf`. We read it from package metadata rather than hardcoding the module
-    path so the shim keeps working across huggingface_hub versions.
+
+def _console_entrypoint(dist: str, name: str) -> str:
+    """Return a console_scripts entry point as "module:function", or "".
+
+    Read from package metadata rather than hardcoding module paths so the
+    shims keep working across package versions.
     """
     try:
         import importlib.metadata as md
-        for ep in md.distribution("huggingface_hub").entry_points:
-            if ep.group == "console_scripts" and ep.name == "hf":
+        for ep in md.distribution(dist).entry_points:
+            if ep.group == "console_scripts" and ep.name == name:
                 return ep.value  # e.g. "huggingface_hub.cli.hf:main"
     except Exception:
         pass
     return ""
 
 
-def _ensure_hf_cli():
-    """Guarantee a WORKING `huggingface-cli` for export_model.py.
+def _ensure_cli_shims():
+    """Guarantee WORKING CLIs for export_model.py, immune to venv moves.
 
-    export_model.py downloads pre-converted OpenVINO models via
-    `huggingface-cli download ...`. huggingface_hub >= 1.0 replaced that command
-    with `hf` and ships a `huggingface-cli` stub that just errors out.
-
-    We can't forward the shim to `hf.exe`: that launcher has the venv's
-    python.exe path baked in at install time, so copying/moving the venv breaks
-    it with "The system cannot find the file specified". Instead we invoke the
-    `hf` entry point through the CURRENT interpreter (sys.executable, resolved
-    fresh each run), drop that as a `huggingface-cli` shim, and PREPEND it to
-    PATH so it wins over the broken stub.
+    Each shim is a .bat that invokes the entry point through the CURRENT
+    interpreter (sys.executable, resolved fresh each run). The shim dir is
+    PREPENDED to PATH so the shims win over the venv's broken .exe launchers.
     """
-    entrypoint = _hf_cli_entrypoint()
-    if not entrypoint:
-        return  # no importable `hf` CLI — leave export_model.py to its own CLI
-    module, _, func = entrypoint.partition(":")
     shim_dir = os.path.join(_HERE, "tools", "ovms", "_shims")
     os.makedirs(shim_dir, exist_ok=True)
-    # `python -c "import sys; from <mod> import <fn>; sys.exit(<fn>())" %*`
-    runner = f"import sys; from {module} import {func}; sys.exit({func}())"
-    try:
-        with open(os.path.join(shim_dir, "huggingface-cli.bat"), "w") as f:
-            f.write(f'@echo off\r\n"{sys.executable}" -c "{runner}" %*\r\n')
-    except Exception as e:
-        print(_yellow(f"  [WARN] Could not create huggingface-cli shim: {e}"))
+    active = []
+    for shim_name, dist, ep_name in _CLI_SHIMS:
+        entrypoint = _console_entrypoint(dist, ep_name)
+        if not entrypoint:
+            continue  # package absent — leave that CLI alone
+        module, _, func = entrypoint.partition(":")
+        # `python -c "import sys; from <mod> import <fn>; sys.exit(<fn>())" %*`
+        runner = f"import sys; from {module} import {func}; sys.exit({func}())"
+        try:
+            with open(os.path.join(shim_dir, f"{shim_name}.bat"), "w") as f:
+                f.write(f'@echo off\r\n"{sys.executable}" -c "{runner}" %*\r\n')
+            active.append(shim_name)
+        except Exception as e:
+            print(_yellow(f"  [WARN] Could not create {shim_name} shim: {e}"))
+    if not active:
         return
     if shim_dir not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = shim_dir + os.pathsep + os.environ.get("PATH", "")
-    print(_green("  [OK] huggingface-cli → hf shim active"))
+    print(_green(f"  [OK] CLI shims active: {', '.join(active)}"))
 
 
 def _model_already_exported(model_name: str) -> bool:
@@ -285,7 +294,7 @@ def ensure_models(device: str) -> bool:
     """Make sure both servables exist in the OVMS repository / config.json."""
     os.makedirs(_REPO, exist_ok=True)
     _prune_stale_servables()
-    _ensure_hf_cli()
+    _ensure_cli_shims()
     export_tool = _ensure_export_tool()
     if not export_tool:
         return False
