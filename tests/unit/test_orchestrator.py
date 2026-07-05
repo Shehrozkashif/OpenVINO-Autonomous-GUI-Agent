@@ -1508,3 +1508,25 @@ class TestGoalAlreadySatisfied:
                    {"type_payload": "hello"}):
             assert orch._goal_already_satisfied(_run_state(**kw), _subtask()) is False
         orch.reflector.client.query_llm.assert_not_called()
+
+    def test_unsatisfied_evidence_fed_to_planner_context(self):
+        """Live failure 2026-07-05 16:31+: after a replan the planner redid the
+        whole fill-details subtask (re-set the title, re-clicked the date)
+        because the goal check's "what's missing" evidence was discarded."""
+        orch = _goal_check_orch(
+            '{"satisfied": false, "confidence": 0.9, '
+            '"evidence": "subject is set, but start time is not 3:00 PM"}'
+        )
+        run = _run_state()
+        assert orch._goal_already_satisfied(run, _subtask()) is False
+        assert "start time is not 3:00 PM" in run.screen_context
+        assert "GOAL CHECK (what is still missing)" in run.screen_context
+
+    def test_satisfied_verdict_leaves_context_untouched(self):
+        orch = _goal_check_orch(
+            '{"satisfied": true, "confidence": 0.95, "evidence": "form open"}'
+        )
+        run = _run_state()
+        before = run.screen_context
+        assert orch._goal_already_satisfied(run, _subtask()) is True
+        assert run.screen_context == before

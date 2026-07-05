@@ -952,10 +952,20 @@ class TaskOrchestrator:
             if not m:
                 return False
             verdict = json.loads(m.group(0))
-            return (
+            ok = (
                 bool(verdict.get("satisfied"))
                 and float(verdict.get("confidence", 0.0)) >= 0.8
             )
+            # A "not yet" verdict names exactly what's still missing (e.g.
+            # "subject is set, but start time is not 3:00 PM"). Hand that to
+            # the planner in the same cycle so it works on the missing part
+            # instead of redoing the whole subtask from step one.
+            evidence = str(verdict.get("evidence", "")).strip()[:300]
+            if not ok and evidence:
+                run.screen_context += (
+                    f"\nGOAL CHECK (what is still missing): {evidence}"
+                )
+            return ok
         except Exception as e:
             logger.debug(f"[GOAL-CHECK] Error: {e}")
             return False
@@ -1000,6 +1010,13 @@ class TaskOrchestrator:
                 )
         except Exception:
             pass
+
+        # Real date/time from the OS — the planner otherwise reasons from the
+        # model's frozen sense of "now" (it clicked 'Today' to select a date
+        # two days ahead, silently resetting a correctly-set date).
+        run.screen_context += time.strftime(
+            "\nSYSTEM CLOCK (ground truth): %A, %B %d, %Y %I:%M %p"
+        )
 
         # Ask "is this goal ALREADY met?" before planning another action.
         # Without this, "click X to open Y" subtasks loop after they succeed:
