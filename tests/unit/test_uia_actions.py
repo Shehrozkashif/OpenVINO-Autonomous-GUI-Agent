@@ -246,3 +246,93 @@ class TestAppAnchor:
     def test_refocus_without_anchor_is_noop(self):
         orch = _orch()
         orch._ensure_anchor_foreground()   # must not raise off-Windows
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# invoke_element pattern chain
+#
+# Live failures (AI-PC log 2026-07-05): WebView2-hosted Outlook buttons raised
+# "An event was unable to invoke any of the subscribers" from InvokePattern,
+# and the old fallback called GetSelectionItemPattern() — an attribute
+# ButtonControl doesn't have — aborting the whole invoke. The chain must try
+# each pattern independently and reach LegacyIAccessible.DoDefaultAction.
+# ═══════════════════════════════════════════════════════════════════════════
+
+from types import SimpleNamespace
+
+import core.windows_uia as wu
+
+
+class _FakePatternId:
+    InvokePattern = 10000
+    SelectionItemPattern = 10010
+    TogglePattern = 10015
+    LegacyIAccessiblePattern = 10018
+
+
+def _fake_ctrl(control_type, patterns):
+    """patterns: {pattern_id: pattern_object_or_None}"""
+    ctrl = MagicMock()
+    ctrl.ControlTypeName = control_type
+    ctrl.GetPattern.side_effect = lambda pid: patterns.get(pid)
+    return ctrl
+
+
+def _run_invoke(ctrl):
+    fake_uia = SimpleNamespace(PatternId=_FakePatternId)
+    with patch.object(wu, "_load", return_value=True), \
+         patch.object(wu, "_uia", fake_uia), \
+         patch.object(wu, "_find_control", return_value=ctrl):
+        return wu.invoke_element("Calendar", timeout_s=2.0)
+
+
+class TestInvokePatternChain:
+
+    def test_invoke_com_error_falls_through_to_do_default_action(self):
+        invoke = MagicMock()
+        invoke.Invoke.side_effect = OSError(
+            "(-2147220991, 'An event was unable to invoke any of the subscribers')")
+        legacy = MagicMock()
+        ctrl = _fake_ctrl("ButtonControl", {
+            _FakePatternId.InvokePattern: invoke,
+            _FakePatternId.SelectionItemPattern: None,
+            _FakePatternId.TogglePattern: None,
+            _FakePatternId.LegacyIAccessiblePattern: legacy,
+        })
+        assert _run_invoke(ctrl) is True
+        legacy.DoDefaultAction.assert_called_once()
+
+    def test_unsupported_patterns_do_not_abort_chain(self):
+        """GetPattern returning None (pattern unsupported) must be skipped."""
+        legacy = MagicMock()
+        ctrl = _fake_ctrl("ButtonControl", {
+            _FakePatternId.LegacyIAccessiblePattern: legacy,
+        })
+        assert _run_invoke(ctrl) is True
+        legacy.DoDefaultAction.assert_called_once()
+
+    def test_invoke_success_stops_chain(self):
+        invoke = MagicMock()
+        legacy = MagicMock()
+        ctrl = _fake_ctrl("ButtonControl", {
+            _FakePatternId.InvokePattern: invoke,
+            _FakePatternId.LegacyIAccessiblePattern: legacy,
+        })
+        assert _run_invoke(ctrl) is True
+        invoke.Invoke.assert_called_once()
+        legacy.DoDefaultAction.assert_not_called()
+
+    def test_checkbox_prefers_toggle(self):
+        toggle = MagicMock()
+        invoke = MagicMock()
+        ctrl = _fake_ctrl("CheckBoxControl", {
+            _FakePatternId.TogglePattern: toggle,
+            _FakePatternId.InvokePattern: invoke,
+        })
+        assert _run_invoke(ctrl) is True
+        toggle.Toggle.assert_called_once()
+        invoke.Invoke.assert_not_called()
+
+    def test_all_patterns_fail_returns_false_for_click_fallback(self):
+        ctrl = _fake_ctrl("ButtonControl", {})
+        assert _run_invoke(ctrl) is False

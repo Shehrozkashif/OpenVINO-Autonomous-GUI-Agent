@@ -746,11 +746,18 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
 
 
 def invoke_element(target: str, timeout_s: float = 3.0) -> bool:
-    """Press the button/menu-item/link named `target` via InvokePattern.
+    """Press the button/menu-item/link named `target` through UIA patterns.
 
     Works even when the element is occluded or off-screen (where a mouse
     click cannot land) and never mis-clicks a lookalike pixel region.
-    TogglePattern is used for checkboxes, which expose Toggle, not Invoke.
+
+    Each action pattern is tried independently — WebView2/Electron providers
+    routinely raise COM errors from Invoke on perfectly real buttons, and the
+    Get<Name>Pattern helpers only exist on control classes whose spec lists
+    that pattern, so a failed attempt must never abort the chain.
+    GetPattern(id) is safe on every control (returns None if unsupported).
+    LegacyIAccessible.DoDefaultAction is the last resort: the MSAA bridge
+    presses almost anything, including web-content buttons.
     """
     def _do():
         ctrl = _find_control(target, timeout_s, frozenset({
@@ -760,15 +767,28 @@ def invoke_element(target: str, timeout_s: float = 3.0) -> bool:
         }))
         if ctrl is None:
             return False
+        pid = _uia.PatternId
+        attempts = [
+            ("Invoke", pid.InvokePattern, "Invoke"),
+            ("Select", pid.SelectionItemPattern, "Select"),
+            ("Toggle", pid.TogglePattern, "Toggle"),
+            ("DoDefaultAction", pid.LegacyIAccessiblePattern, "DoDefaultAction"),
+        ]
         if ctrl.ControlTypeName == "CheckBoxControl":
-            ctrl.GetTogglePattern().Toggle()
-        else:
+            attempts.insert(0, attempts.pop(2))   # Toggle first for checkboxes
+        for name, pattern_id, method in attempts:
             try:
-                ctrl.GetInvokePattern().Invoke()
-            except Exception:
-                ctrl.GetSelectionItemPattern().Select()
-        logger.info(f"[UIA] invoke '{target}' ({ctrl.ControlTypeName})")
-        return True
+                pattern = ctrl.GetPattern(pattern_id)
+                if pattern is None:
+                    continue
+                getattr(pattern, method)()
+                logger.info(
+                    f"[UIA] invoke '{target}' via {name} ({ctrl.ControlTypeName})"
+                )
+                return True
+            except Exception as e:
+                logger.debug(f"[UIA] {name} on '{target}' failed: {e}")
+        return False
 
     return _run_uia_action(f"invoke('{target}')", _do, timeout_s)
 
