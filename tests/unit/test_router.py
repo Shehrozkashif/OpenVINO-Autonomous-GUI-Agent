@@ -176,3 +176,39 @@ class TestInstalledAppHint:
     def test_any_app_name_works_generally(self):
         hint = self._hint("play some music on spotify", ["Spotify", "Outlook"])
         assert "Spotify" in hint and "Outlook" not in hint
+
+
+class TestAppHintWholeWordMatching:
+    """Regression: loose substring matching sent a run into Task Scheduler.
+
+    'schedule a meeting WITH shehroz' must NOT hint 'Task Scheduler'
+    ("schedule" ⊂ "Scheduler") or 'Windows Defender Firewall with Advanced
+    Security' ("with" is a word of it). Only actually-named apps count.
+    """
+
+    _APPS = ["Task Scheduler",
+             "Windows Defender Firewall with Advanced Security",
+             "Outlook (new)", "Zoom Workplace"]
+
+    def _hint(self, instruction):
+        from unittest.mock import patch
+        with patch("utils.platform_utils.installed_apps", return_value=self._APPS):
+            return RouterAgent._installed_app_hint(instruction)
+
+    def test_no_app_named_means_no_hint(self):
+        assert self._hint(
+            "schedule a meeting with shehroz sharooz57@gmail.com 3pm 6 july"
+        ) == ""
+
+    def test_substring_of_app_word_does_not_match(self):
+        # "schedule" must not summon "Scheduler"
+        assert "Task Scheduler" not in self._hint("schedule something for me")
+
+    def test_named_app_still_hinted(self):
+        hint = self._hint("schedule a meeting in outlook with shehroz")
+        assert "Outlook (new)" in hint
+        assert "Firewall" not in hint and "Task Scheduler" not in hint
+
+    def test_zoom_by_name_still_works(self):
+        hint = self._hint("start a zoom call with my friend")
+        assert "Zoom Workplace" in hint

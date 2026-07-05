@@ -43,6 +43,15 @@ _ROUTER_OS_CONTEXT = "Windows 11"
 # need \\ escaping in the JSON the LLM emits and small models mangle them
 # (observed truncation to "C:\"). All Windows shells/dialogs accept "/".
 _DESKTOP_PATH = get_desktop_path().replace("\\", "/")
+# Closed-class English function words (≥4 letters) — never treated as app
+# names by the installed-app hint. Purely grammatical words, not app-specific.
+_FUNCTION_WORDS = frozenset({
+    "with", "from", "this", "that", "then", "than", "when", "where", "will",
+    "would", "your", "into", "onto", "over", "under", "have", "them", "they",
+    "there", "here", "please", "want", "need", "make", "using", "about",
+    "after", "before", "some", "just", "like", "only", "also", "very",
+})
+
 _TERMINAL_APP = "Windows Terminal"
 _CALC_APP     = "Calculator"
 _FILES_APP    = "File Explorer"
@@ -265,8 +274,18 @@ class RouterAgent:
                 "failed/timed out) — no app hint for the planner"
             )
             return ""
+        # WHOLE-WORD matching only, minus closed-class function words. Loose
+        # substring matching sent a live run into the wrong app entirely:
+        # "schedule a meeting WITH..." matched 'Task SCHEDULEr' and 'Firewall
+        # WITH Advanced Security', and the router built the whole plan around
+        # Task Scheduler. An app is hinted only when the user actually NAMES
+        # a word of it ("outlook", "zoom", "spotify").
         tokens = set(re.findall(r"[a-zA-Z]{4,}", instruction.lower()))
-        hits = sorted({a for a in apps if any(t in a.lower() for t in tokens)})
+        tokens -= _FUNCTION_WORDS
+        hits = sorted({
+            a for a in apps
+            if tokens & set(re.findall(r"[a-zA-Z]{4,}", a.lower()))
+        })
         if not hits:
             logger.info(
                 f"[ROUTER] No installed app matches the instruction "
