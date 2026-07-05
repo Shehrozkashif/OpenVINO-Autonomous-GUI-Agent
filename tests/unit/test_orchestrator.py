@@ -1432,3 +1432,79 @@ class TestSaveTargetDiskGate:
         orch._file_saved_fresh = MagicMock(return_value=True)
         assert orch._execute_subtask(self._save_subtask()) is True
         orch.planner.plan_steps.assert_not_called()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# _goal_already_satisfied — pre-plan goal check
+#
+# Live failure (AI-PC log 2026-07-05 14:25–14:34): one invoke opened the
+# Outlook event form, but the subtask "click New event to open the form" kept
+# re-planning that click for 8 more cycles — state-describing verifiers kept
+# blessing the no-ops ("the form is visible → success") and nothing ever asked
+# "is the goal already met?". The check must say yes there, and stay
+# conservative everywhere else.
+# ═══════════════════════════════════════════════════════════════════════════
+
+from core.orchestrator import _SubtaskRun
+
+
+def _goal_check_orch(llm_reply: str):
+    orch = _make_orch_loop([])
+    resp = MagicMock()
+    resp.content = llm_reply
+    orch.reflector.client.query_llm = MagicMock(return_value=resp)
+    return orch
+
+
+def _run_state(**kw):
+    return _SubtaskRun(started_at=0.0, screen_context=(
+        "CLICKABLE CONTROLS: 'New event' [Document], 'Save' [Button], "
+        "'Add title' [Edit], 'Event body' [Edit]"
+    ), **kw)
+
+
+def _subtask(desc="click the New event button to open the schedule-meeting form"):
+    return SubTask(id=1, description=desc, depends_on=[])
+
+
+class TestGoalAlreadySatisfied:
+
+    def test_confident_yes_returns_true(self):
+        orch = _goal_check_orch(
+            '{"satisfied": true, "confidence": 0.95, '
+            '"evidence": "Save button and Add title field on screen"}'
+        )
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is True
+
+    def test_low_confidence_yes_returns_false(self):
+        orch = _goal_check_orch('{"satisfied": true, "confidence": 0.5}')
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is False
+
+    def test_no_returns_false(self):
+        orch = _goal_check_orch('{"satisfied": false, "confidence": 0.9}')
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is False
+
+    def test_think_block_and_prose_around_json_tolerated(self):
+        orch = _goal_check_orch(
+            '<think>the form is open already</think>\n'
+            'Here is my verdict: {"satisfied": true, "confidence": 0.9, '
+            '"evidence": "form controls visible"}'
+        )
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is True
+
+    def test_garbage_reply_returns_false(self):
+        orch = _goal_check_orch("the goal seems achieved to me")
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is False
+
+    def test_launch_subtasks_excluded(self):
+        orch = _goal_check_orch('{"satisfied": true, "confidence": 1.0}')
+        run = _run_state(is_launch_goal=True)
+        assert orch._goal_already_satisfied(run, _subtask("open Outlook")) is False
+        orch.reflector.client.query_llm.assert_not_called()
+
+    def test_deterministic_subtask_kinds_excluded(self):
+        orch = _goal_check_orch('{"satisfied": true, "confidence": 1.0}')
+        for kw in ({"is_cmd_subtask": True}, {"save_target": "C:/x.txt"},
+                   {"type_payload": "hello"}):
+            assert orch._goal_already_satisfied(_run_state(**kw), _subtask()) is False
+        orch.reflector.client.query_llm.assert_not_called()

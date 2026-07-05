@@ -15,6 +15,7 @@ Execution flow:
     → Router.summarize_completion()
     → return extracted_data alongside success/failure
 """
+import json
 import re
 import subprocess
 import threading
@@ -904,6 +905,61 @@ class TaskOrchestrator:
             return "abort"
         return "retry"
 
+    def _goal_already_satisfied(self, run: "_SubtaskRun", subtask: SubTask) -> bool:
+        """One focused LLM question: does the current screen already show the
+        state this subtask is trying to reach?
+
+        Judged against ground truth the planner also sees — OCR text plus the
+        CLICKABLE CONTROLS list from the accessibility tree. Conservative by
+        contract: only a confident, evidence-backed YES skips work; anything
+        else (uncertainty, parse failure, missing values) plans normally.
+        Subtask kinds with deterministic completion checks are excluded.
+        """
+        if (run.is_launch_goal or run.is_cmd_subtask
+                or run.save_target or run.type_payload):
+            return False
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You check whether a desktop-automation subtask is "
+                        "ALREADY complete before any further action is taken. "
+                        "Judge ONLY from the screen evidence provided. Reply "
+                        "with strict JSON: {\"satisfied\": true|false, "
+                        "\"confidence\": 0.0-1.0, \"evidence\": \"<what on "
+                        "screen proves it>\"}. satisfied=true ONLY if the end "
+                        "state the goal aims at is fully present (e.g. the "
+                        "goal is to open a form and that form's controls are "
+                        "on screen). If the goal sets or fills specific "
+                        "values, every value must be visibly present exactly. "
+                        "When uncertain, satisfied=false."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Subtask goal: {subtask.description}\n\n"
+                        f"Current screen:\n{run.screen_context}"
+                    ),
+                },
+            ]
+            resp = self.reflector.client.query_llm(
+                messages, max_tokens=200, temperature=0.0
+            )
+            text = re.sub(r"<think>.*?</think>", "", resp.content, flags=re.DOTALL)
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if not m:
+                return False
+            verdict = json.loads(m.group(0))
+            return (
+                bool(verdict.get("satisfied"))
+                and float(verdict.get("confidence", 0.0)) >= 0.8
+            )
+        except Exception as e:
+            logger.debug(f"[GOAL-CHECK] Error: {e}")
+            return False
+
     def _plan_next_step(
         self, run: "_SubtaskRun", subtask: SubTask, task_context: list[str],
     ) -> tuple[str, ActionStep | None]:
@@ -944,6 +1000,16 @@ class TaskOrchestrator:
                 )
         except Exception:
             pass
+
+        # Ask "is this goal ALREADY met?" before planning another action.
+        # Without this, "click X to open Y" subtasks loop after they succeed:
+        # once Y is open, every further click is a no-op that state-describing
+        # verifiers keep blessing ("the form is visible → success"), and the
+        # planner re-plans the same click instead of returning []. Launches,
+        # commands, saves and typing have their own deterministic checks.
+        if self._goal_already_satisfied(run, subtask):
+            self.log("  [GOAL-CHECK] Goal already satisfied on current screen")
+            return ("done", None)
 
         # Pass failure hints so planner avoids repeating known-bad patterns
         failure_hints = []
