@@ -261,6 +261,7 @@ class TaskOrchestrator:
         self._extracted_data = {}
         self._launch_window_baseline = {}
         self._degraded = False
+        self._app_anchor = None   # (hwnd, pid, exe) of the task's app window
         self.log(f"[TASK START] '{instruction}'")
         start_time = time.time()
         self._arm_kill_switch()
@@ -394,6 +395,9 @@ class TaskOrchestrator:
                 completed_subtask_descs.append(subtask.description)
                 executed_subtasks.append(subtask)
                 self.log(f"[SUBTASK {subtask.id}] Complete")
+                # A successful "open <app>" anchors the task to the window
+                # that now owns the foreground — later subtasks act on it.
+                self._maybe_set_app_anchor(subtask.description)
                 # Checkpoint after every completed subtask so an interrupted or
                 # failed long task resumes here instead of starting over.
                 try:
@@ -589,6 +593,87 @@ class TaskOrchestrator:
         )
         return False
 
+    # ── Task app anchor ───────────────────────────────────────────────────────
+    # Ground truth for "which window are we working in". After a successful
+    # "open <app>" subtask, the window owning the foreground IS the launched
+    # app — no name→process mapping needed, works for any app. Later subtasks
+    # verify the anchor still owns the foreground before planning/acting; if
+    # another window is on top (seen live: a leftover Edge error page swallowed
+    # every action while Outlook sat behind it), the anchor is refocused first.
+
+    _LAUNCH_DESC_RX = re.compile(r"^\s*(?:open|launch|start)\b", re.IGNORECASE)
+
+    @staticmethod
+    def _foreground_app() -> tuple[int, int, str]:
+        """(hwnd, pid, exe_name) of the current foreground window; zeros on failure."""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return 0, 0, ""
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            name = ""
+            h = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+            if h:
+                buf = ctypes.create_unicode_buffer(260)
+                size = ctypes.c_ulong(260)
+                if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    name = buf.value.rsplit("\\", 1)[-1]
+                kernel32.CloseHandle(h)
+            return hwnd, pid.value, name
+        except Exception:
+            return 0, 0, ""
+
+    def _maybe_set_app_anchor(self, description: str):
+        """Record the foreground window as the task's app anchor after a
+        successful launch subtask ("open X" / "launch X" / "start X")."""
+        desc = description.lower()
+        if not self._LAUNCH_DESC_RX.match(desc) or "already" in desc:
+            return
+        hwnd, pid, name = self._foreground_app()
+        if not hwnd or hwnd == getattr(self, "_own_hwnd", None):
+            return
+        self._app_anchor = (hwnd, pid, name)
+        self.log(f"  [ANCHOR] Task app window = {name} (hwnd={hwnd})")
+        logger.info(f"[ORCHESTRATOR] App anchor set: {name} hwnd={hwnd}")
+
+    def _ensure_anchor_foreground(self):
+        """Bring the task's app window back to the foreground if something
+        else has covered it. Same-process windows (dialogs, pickers) count as
+        the anchor being active. Drops the anchor when its window is gone."""
+        anchor = getattr(self, "_app_anchor", None)
+        if not anchor:
+            return
+        hwnd, pid, name = anchor
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            if not user32.IsWindow(hwnd):
+                logger.info(f"[ORCHESTRATOR] App anchor window gone ({name}) — cleared")
+                self._app_anchor = None
+                return
+            fg = user32.GetForegroundWindow()
+            if fg == hwnd:
+                return
+            fg_pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(fg, ctypes.byref(fg_pid))
+            if fg_pid.value == pid:
+                return   # a dialog/popup of the same app — still our context
+            self.log(f"  [FOCUS] Foreground is not {name} — refocusing the task app")
+            logger.info(f"[ORCHESTRATOR] Refocusing task app {name} (hwnd={hwnd})")
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            if not user32.SetForegroundWindow(hwnd):
+                # SetForegroundWindow is refused when we lack foreground
+                # rights; SwitchToThisWindow (alt-tab semantics) still works.
+                user32.SwitchToThisWindow(hwnd, True)
+            time.sleep(0.6)   # let the window paint before capture/grounding
+        except Exception:
+            pass
+
     def _setup_launch_goal(
         self, subtask: SubTask, task_context: list[str] | None,
     ) -> tuple:
@@ -774,6 +859,12 @@ class TaskOrchestrator:
           ("retry", None) — planning failed; the loop may try again
           ("abort", None) — consecutive planning failures exhausted the budget
         """
+        # The task's app window must own the foreground before we read the
+        # screen and plan against it — otherwise every action lands on
+        # whatever window happens to be on top. Launch subtasks are creating
+        # that window, so they skip the check.
+        if not run.is_launch_goal:
+            self._ensure_anchor_foreground()
         run.screen_context = run.cached_ocr if run.cached_ocr else self._get_screen_context()
         run.cached_ocr = ""   # consume — will be refreshed after reflection
 

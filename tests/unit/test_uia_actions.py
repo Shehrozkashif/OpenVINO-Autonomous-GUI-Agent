@@ -198,3 +198,51 @@ class TestUiaHelpers:
             assert wu.set_element_value("Topic", "x") is False
             assert wu.select_option("Time", "3:00 PM") is False
             assert wu.invoke_element("Save") is False
+
+
+class TestAppAnchor:
+    """Task app anchor: ground truth for which window the task works in.
+
+    Live failure this guards against: Outlook launched fine but a leftover
+    Edge error page owned the foreground, so every subsequent action landed
+    on Edge ('New Appointment' unfindable, 'New Tab' invoked instead).
+    """
+
+    def test_launch_subtask_sets_anchor_from_foreground(self):
+        orch = _orch()
+        orch._foreground_app = lambda: (1234, 42, "olk.exe")
+        orch._maybe_set_app_anchor("open Outlook")
+        assert orch._app_anchor == (1234, 42, "olk.exe")
+
+    def test_launch_verbs_all_anchor(self):
+        for verb in ("open", "launch", "start", "Open", "Launch"):
+            orch = _orch()
+            orch._foreground_app = lambda: (1, 2, "app.exe")
+            orch._maybe_set_app_anchor(f"{verb} SomeApp")
+            assert orch._app_anchor == (1, 2, "app.exe"), verb
+
+    def test_non_launch_subtask_does_not_anchor(self):
+        orch = _orch()
+        orch._app_anchor = None
+        orch._foreground_app = lambda: (1234, 42, "olk.exe")
+        orch._maybe_set_app_anchor("with Outlook already open, click New Appointment")
+        assert orch._app_anchor is None
+
+    def test_already_running_phrase_does_not_anchor(self):
+        orch = _orch()
+        orch._app_anchor = None
+        orch._foreground_app = lambda: (1234, 42, "olk.exe")
+        orch._maybe_set_app_anchor("open Outlook which is already running")
+        assert orch._app_anchor is None
+
+    def test_own_window_never_anchors(self):
+        orch = _orch()
+        orch._app_anchor = None
+        orch._own_hwnd = 777
+        orch._foreground_app = lambda: (777, 42, "python.exe")
+        orch._maybe_set_app_anchor("open Notepad")
+        assert orch._app_anchor is None
+
+    def test_refocus_without_anchor_is_noop(self):
+        orch = _orch()
+        orch._ensure_anchor_foreground()   # must not raise off-Windows
