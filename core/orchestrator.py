@@ -924,6 +924,24 @@ class TaskOrchestrator:
         run.screen_context = run.cached_ocr if run.cached_ocr else self._get_screen_context()
         run.cached_ocr = ""   # consume — will be refreshed after reflection
 
+        # Ground-truth clickables from the accessibility tree. Without this
+        # the planner INVENTS button names from world knowledge — it planned
+        # "New Meeting" for a whole run while the app's real button was named
+        # differently, and every grounding stage honestly failed to find the
+        # imaginary name. Click targets must come from names that exist.
+        try:
+            from core.windows_uia import get_interactive_elements
+            _elems = get_interactive_elements(max_elements=30)
+            if _elems:
+                _names = ", ".join(f"'{n}' [{t}]" for n, t in _elems)
+                run.screen_context += (
+                    "\nCLICKABLE CONTROLS (exact names from the Windows "
+                    "accessibility tree — choose click targets ONLY from "
+                    "this list, verbatim): " + _names
+                )
+        except Exception:
+            pass
+
         # Pass failure hints so planner avoids repeating known-bad patterns
         failure_hints = []
         try:

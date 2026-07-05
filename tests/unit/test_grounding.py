@@ -371,3 +371,76 @@ class TestElementCachePreservesElementType(unittest.TestCase):
     def test_cache_miss_returns_none(self):
         cache = ElementCache()
         self.assertIsNone(cache.get("missing", "hash"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3. ground_fast() respects the dead-point blacklist
+#
+# Regression (live AI-PC log 2026-07-05 05:55:49): (11,19) was marked DEAD for
+# 'New' after a delta=0 click, yet the scroll-to-find path — which uses
+# ground_fast() — re-found the same UIA element and invoked it again, reopening
+# the wrong app. ground_fast() must apply the same origin-screen blacklist as
+# ground().
+# ═══════════════════════════════════════════════════════════════════════════
+
+from unittest.mock import patch
+
+from PIL import Image as _PILImage
+
+
+def _fast_agent():
+    agent = UIGroundingAgent.__new__(UIGroundingAgent)
+    agent.screen_w, agent.screen_h = 1852, 963
+    agent.capturer = MagicMock()
+    agent.capturer.capture.return_value = _PILImage.new("RGB", (1852, 963), "white")
+    agent.ocr = MagicMock()
+    agent.ocr.is_available.return_value = False
+    agent.cache = MagicMock()
+    agent._dead = {}
+    agent._ground_hash = {}
+    return agent
+
+
+class TestGroundFastDeadPoints(unittest.TestCase):
+
+    def test_uia_hit_skipped_after_mark_dead(self):
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            first = agent.ground_fast("New")
+            self.assertTrue(first.found)
+            self.assertEqual((first.x, first.y), (11, 19))
+
+            agent.mark_dead("New", 11, 19)
+
+            second = agent.ground_fast("New")
+            self.assertFalse(second.found)
+
+    def test_ocr_hit_skipped_after_mark_dead(self):
+        agent = _fast_agent()
+        agent.ocr.is_available.return_value = True
+        agent.ocr.extract.return_value = [_word("New", x=50, y=88)]
+        match = MagicMock()
+        match.cx, match.cy = 55, 93   # thumbnail coords → scaled ≈ (79, 134)
+        match.element_type = "foreground_interactive"
+        agent.ocr.find_text.return_value = match
+        with patch("agents.grounding._uia_ok", return_value=False):
+            first = agent.ground_fast("New")
+            self.assertTrue(first.found)
+
+            agent.mark_dead("New", first.x, first.y)
+
+            second = agent.ground_fast("New")
+            self.assertFalse(second.found)
+            self.assertEqual(second.method, "fast_dead")
+
+    def test_different_screen_keeps_point_alive(self):
+        """Blacklist is keyed to the screen state — a new screen frees the point."""
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19)
+            agent.capturer.capture.return_value = _PILImage.effect_noise((1852, 963), 64).convert("RGB")
+            again = agent.ground_fast("New")
+            self.assertTrue(again.found)

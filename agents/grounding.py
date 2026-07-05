@@ -529,16 +529,26 @@ class UIGroundingAgent:
 
         words = self.ocr.extract(display) if self.ocr.is_available() else []
 
+        screen_hash = str(imagehash.phash(display))
+        self._ground_hash[target.lower()] = screen_hash
+        dead = self._dead.get((target.lower(), screen_hash), [])
+
         if _uia_ok():
             r = _uia_find(target)
             if r:
                 x, y, conf = r
                 x = max(0, min(x, self.screen_w - 1))
                 y = max(0, min(y, self.screen_h - 1))
-                return GroundingResult(x=x, y=y, confidence=conf, found=True,
-                                       latency_ms=(time.time() - start) * 1000,
-                                       target=target, method="uia",
-                                       element_type="foreground_interactive")
+                if self._near_dead(x, y, dead):
+                    logger.info(
+                        f"[GROUNDING/FAST] '{target}' → ({x},{y}) is a "
+                        "known-dead point — skipping UIA hit"
+                    )
+                else:
+                    return GroundingResult(x=x, y=y, confidence=conf, found=True,
+                                           latency_ms=(time.time() - start) * 1000,
+                                           target=target, method="uia",
+                                           element_type="foreground_interactive")
 
         if words:
             query = _strip_role_words(target)
@@ -546,6 +556,15 @@ class UIGroundingAgent:
             if match:
                 x = int(match.cx * scale_x)
                 y = int(match.cy * scale_y)
+                if self._near_dead(x, y, dead):
+                    logger.info(
+                        f"[GROUNDING/FAST] '{target}' → ({x},{y}) is a "
+                        "known-dead point — skipping OCR hit"
+                    )
+                    return GroundingResult(
+                        x=0, y=0, confidence=0.0, found=False,
+                        latency_ms=(time.time() - start) * 1000,
+                        target=target, method="fast_dead")
                 return GroundingResult(x=x, y=y, confidence=0.95, found=True,
                                        latency_ms=(time.time() - start) * 1000,
                                        target=target, method="ocr_direct",
