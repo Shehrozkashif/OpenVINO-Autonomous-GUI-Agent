@@ -931,9 +931,12 @@ class TaskOrchestrator:
         # imaginary name. Click targets must come from names that exist.
         try:
             from core.windows_uia import get_interactive_elements
-            _elems = get_interactive_elements(max_elements=30)
+            _elems = get_interactive_elements(max_elements=60, timeout_s=3.0)
             if _elems:
                 _names = ", ".join(f"'{n}' [{t}]" for n, t in _elems)
+                logger.info(
+                    f"[PLANNING] UIA clickable controls ({len(_elems)}): {_names}"
+                )
                 run.screen_context += (
                     "\nCLICKABLE CONTROLS (exact names from the Windows "
                     "accessibility tree — choose click targets ONLY from "

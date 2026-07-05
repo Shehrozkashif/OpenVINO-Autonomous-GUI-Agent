@@ -62,6 +62,145 @@ def _thread_com_init():
         return None
 
 
+# ── Native batched tree search ────────────────────────────────────────────────
+# The recursive GetChildren() walk pays one cross-process COM round trip per
+# node. WebView2/Electron accessibility trees (new Outlook, Teams, Edge,
+# VS Code…) run to thousands of nodes, so the walk times out while still
+# inside the window chrome — the agent then sees only title-bar controls
+# ('System', 'Minimize'…) and never the app's real buttons. FindAll executes
+# the traversal inside the UIA engine and returns matches in a single batch.
+
+_PROP_BOUNDING_RECT = 30001
+_PROP_CONTROL_TYPE = 30003
+_PROP_NAME = 30005
+_PROP_IS_OFFSCREEN = 30022
+_TREESCOPE_DESCENDANTS = 4
+
+_TYPE_IDS: dict = {}    # "ButtonControl" <-> 50000, both directions
+
+
+def _type_id_maps() -> dict:
+    if not _TYPE_IDS:
+        ct = getattr(_uia, "ControlType", None)
+        for tname in _INTERACTIVE_CONTROL_TYPES:
+            tid = getattr(ct, tname, None) if ct else None
+            if tid is not None:
+                _TYPE_IDS[tname] = tid
+                _TYPE_IDS[tid] = tname
+    return _TYPE_IDS
+
+
+def _raw_iuia():
+    """The IUIAutomation COM interface behind the uiautomation package."""
+    sub = getattr(_uia, "uiautomation", _uia)
+    return sub._AutomationClient.instance().IUIAutomation
+
+
+def _control_from_element(element):
+    """Wrap a raw IUIAutomationElement back into a package Control object."""
+    try:
+        sub = getattr(_uia, "uiautomation", _uia)
+        return sub.Control.CreateControlFromElement(element)
+    except Exception:
+        return None
+
+
+def _native_interactive_elements(root, max_items: int = 400) -> list | None:
+    """All interactive descendants of `root` via ONE native FindAll call.
+
+    Returns [(name, control_type_name, (l, t, r, b), is_offscreen, element)],
+    or None when the raw COM plumbing is unavailable — callers then fall back
+    to the recursive walk. MUST run on a COM-initialized thread.
+    """
+    try:
+        iuia = _raw_iuia()
+        ids = _type_id_maps()
+        cond = None
+        for tname in sorted(_INTERACTIVE_CONTROL_TYPES):
+            tid = ids.get(tname)
+            if tid is None:
+                continue
+            c = iuia.CreatePropertyCondition(_PROP_CONTROL_TYPE, tid)
+            cond = c if cond is None else iuia.CreateOrCondition(cond, c)
+        element = getattr(root, "Element", None)
+        if cond is None or element is None:
+            return None
+        # Cache request = element properties arrive in the same batch;
+        # otherwise every property read below is its own cross-process call.
+        try:
+            cr = iuia.CreateCacheRequest()
+            for pid in (_PROP_BOUNDING_RECT, _PROP_CONTROL_TYPE,
+                        _PROP_NAME, _PROP_IS_OFFSCREEN):
+                cr.AddProperty(pid)
+            found = element.FindAllBuildCache(_TREESCOPE_DESCENDANTS, cond, cr)
+            cached = True
+        except Exception:
+            found = element.FindAll(_TREESCOPE_DESCENDANTS, cond)
+            cached = False
+        out = []
+        for i in range(min(found.Length, max_items)):
+            try:
+                el = found.GetElement(i)
+                if cached:
+                    name, ctype = el.CachedName, el.CachedControlType
+                    r, off = el.CachedBoundingRectangle, el.CachedIsOffscreen
+                else:
+                    name, ctype = el.CurrentName, el.CurrentControlType
+                    r, off = el.CurrentBoundingRectangle, el.CurrentIsOffscreen
+                out.append((
+                    (name or "").strip(),
+                    ids.get(ctype, ""),
+                    (r.left, r.top, r.right, r.bottom),
+                    bool(off),
+                    el,
+                ))
+            except Exception:
+                continue   # elements can vanish mid-read
+        return out
+    except Exception as e:
+        logger.debug(f"[UIA] Native FindAll unavailable: {e}")
+        return None
+
+
+def _rect_tuple_valid(rect: tuple) -> bool:
+    l, t, r, b = rect
+    return r > l and b > t and r > 0 and b > 0
+
+
+def _native_best_match(root, query: str, threshold: float):
+    """Best interactive match for `query` from the native element batch.
+
+    Same scoring/confidence rules as the interactive tier of _walk_and_match.
+    Returns (x, y, confidence), or None when nothing scores above threshold
+    OR the native plumbing is unavailable (caller falls back to the walk).
+    """
+    elems = _native_interactive_elements(root)
+    if elems is None:
+        return None
+    best, best_score = None, 0.0
+    for name, _tname, rect, offscreen, el in elems:
+        if offscreen or not name or not _rect_tuple_valid(rect):
+            continue
+        score = _match_score(query, name.lower())
+        if score < threshold or score <= best_score:
+            continue
+        best, best_score = (rect, el), score
+        if score >= 1.0:
+            break
+    if best is None:
+        return None
+    rect, el = best
+    x, y = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+    ctrl = _control_from_element(el)
+    if ctrl is not None:
+        try:
+            x, y = _click_point(ctrl, ctrl.BoundingRectangle)
+        except Exception:
+            pass
+    conf = 1.0 if best_score >= 1.0 else round(best_score * 0.90, 3)
+    return x, y, conf
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def find_element(
@@ -97,8 +236,14 @@ def find_element(
             if not query:
                 return
 
-            # Fast path — foreground window only
+            # Fast path — foreground window only. Native batch first (reaches
+            # WebView2/Electron content the recursive walk can't); the walk
+            # remains as fallback and adds the decorative-text tier.
             fg = _uia.GetForegroundControl()
+            r = _native_best_match(fg, query, fuzzy_threshold)
+            if r:
+                result[0] = r
+                return
             r = _walk_and_match(fg, query, fuzzy_threshold, max_depth=12,
                                 publish=_publish)
             if r:
@@ -185,6 +330,26 @@ def get_interactive_elements(
         try:
             out: list = []
             seen: set = set()
+
+            native = _native_interactive_elements(_uia.GetForegroundControl())
+            if native is not None:
+                for name, tname, rect, offscreen, _el in native:
+                    if (
+                        not name
+                        or offscreen
+                        or len(name) > 60
+                        or not any(ch.isalnum() for ch in name)
+                        or not _rect_tuple_valid(rect)
+                    ):
+                        continue
+                    key = (name.lower(), tname)
+                    if key not in seen:
+                        seen.add(key)
+                        out.append((name, tname.replace("Control", "")))
+                        if len(out) >= max_elements:
+                            break
+                result[0] = out
+                return
 
             def _walk(ctrl, depth: int):
                 if depth > max_depth or len(out) >= max_elements:
@@ -376,6 +541,27 @@ def _find_control(query: str, timeout_s: float, control_types: frozenset | None 
     query = _strip_roles(query).lower().strip()
     if not query:
         return None
+
+    # Native batch first — the recursive walk below cannot reach controls
+    # buried in WebView2/Electron trees. Offscreen elements are kept: UIA
+    # patterns (Invoke/Value) work on them where a pixel click cannot.
+    native = _native_interactive_elements(_uia.GetForegroundControl())
+    if native is not None:
+        best_el, best_native = None, 0.0
+        for name, tname, _rect, _offscreen, el in native:
+            if not name:
+                continue
+            if control_types is not None and tname not in control_types:
+                continue
+            score = _match_score(query, name.lower())
+            if score >= 0.65 and score > best_native:
+                best_el, best_native = el, score
+                if score >= 1.0:
+                    break
+        if best_el is not None:
+            ctrl = _control_from_element(best_el)
+            if ctrl is not None:
+                return ctrl
 
     best: list = [None, 0.0]   # control, score
 

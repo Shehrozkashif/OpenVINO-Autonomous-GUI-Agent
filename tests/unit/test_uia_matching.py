@@ -95,3 +95,88 @@ class TestClickablePoint:
         ctrl = _FakeCtrl("save", "ButtonControl", _Rect(0, 0, 100, 40))
         result = _walk_and_match(_root(ctrl), "save", 0.65, max_depth=5)
         assert (result[0], result[1]) == (50, 20)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Native FindAll batch path (regression, live AI-PC run 2026-07-05 06:14):
+# new Outlook (olk.exe) renders inside WebView2; the recursive walk timed out
+# in the window chrome, so UIA/the planner saw only frame controls ('System'
+# title-bar menu, decoy 'New') and never the app's real buttons. The native
+# batch must surface deep content, honor offscreen flags, and everything must
+# fall back to the recursive walk when the raw COM plumbing is unavailable.
+# ═══════════════════════════════════════════════════════════════════════════
+from unittest import mock
+
+import core.windows_uia as wu
+
+
+def _batch(*items):
+    """items: (name, type_name, rect_tuple, offscreen) → native batch rows."""
+    return [(n, t, r, off, None) for n, t, r, off in items]
+
+
+class TestNativeBestMatch:
+
+    def test_exact_deep_content_wins_conf_1(self):
+        elems = _batch(
+            ("System", "MenuItemControl", (100, 110, 146, 145), False),
+            ("New", "ButtonControl", (100, 111, 146, 146), False),
+            ("New event", "ButtonControl", (60, 150, 200, 190), False),
+        )
+        with mock.patch.object(wu, "_native_interactive_elements",
+                               return_value=elems):
+            r = wu._native_best_match(object(), "new event", 0.65)
+        assert r == (130, 170, 1.0)
+
+    def test_offscreen_and_empty_rows_skipped(self):
+        elems = _batch(
+            ("New event", "ButtonControl", (60, 150, 200, 190), True),   # offscreen
+            ("", "ButtonControl", (0, 0, 50, 20), False),                # unnamed
+            ("New event", "ButtonControl", (0, 0, 0, 0), False),         # empty rect
+        )
+        with mock.patch.object(wu, "_native_interactive_elements",
+                               return_value=elems):
+            assert wu._native_best_match(object(), "new event", 0.65) is None
+
+    def test_fuzzy_match_discounted(self):
+        elems = _batch(("New event", "ButtonControl", (60, 150, 200, 190), False),)
+        with mock.patch.object(wu, "_native_interactive_elements",
+                               return_value=elems):
+            r = wu._native_best_match(object(), "new events", 0.65)
+        assert r is not None
+        assert r[2] < 1.0
+
+    def test_plumbing_unavailable_returns_none(self):
+        with mock.patch.object(wu, "_native_interactive_elements",
+                               return_value=None):
+            assert wu._native_best_match(object(), "new event", 0.65) is None
+
+
+class TestGetInteractiveElementsNative:
+
+    def _run(self, native_return, fg=None):
+        fake_uia = mock.MagicMock()
+        fake_uia.GetForegroundControl.return_value = fg or object()
+        with mock.patch.object(wu, "_load", return_value=True), \
+             mock.patch.object(wu, "_thread_com_init", return_value=None), \
+             mock.patch.object(wu, "_uia", fake_uia), \
+             mock.patch.object(wu, "_native_interactive_elements",
+                               return_value=native_return):
+            return wu.get_interactive_elements(max_elements=3)
+
+    def test_native_batch_filtered_and_deduped(self):
+        out = self._run(_batch(
+            ("New event", "ButtonControl", (60, 150, 200, 190), False),
+            ("New event", "ButtonControl", (60, 150, 200, 190), False),  # dup
+            ("Hidden", "ButtonControl", (0, 0, 50, 20), True),           # offscreen
+            ("", "ButtonControl", (0, 0, 50, 20), False),                # unnamed
+            ("New mail", "SplitButtonControl", (10, 150, 55, 190), False),
+        ))
+        assert out == [("New event", "Button"), ("New mail", "SplitButton")]
+
+    def test_falls_back_to_walk_when_native_unavailable(self):
+        fg = _FakeCtrl("", "WindowControl", _Rect(0, 0, 100, 100),
+                       children=[_FakeCtrl("Save", "ButtonControl",
+                                           _Rect(0, 0, 60, 20))])
+        out = self._run(None, fg=fg)
+        assert out == [("Save", "Button")]
