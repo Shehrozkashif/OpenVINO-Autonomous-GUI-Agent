@@ -1420,6 +1420,19 @@ class TaskOrchestrator:
             # The GUI window masking (exclude_regions) prevents log-text false positives.
             x, y = result.x, result.y
             self._last_click_xy = (x, y)
+            # Ground truth first: when Stage 0 found this element in the UIA
+            # tree, activate the control OBJECT via its Invoke/Toggle pattern
+            # instead of synthesizing a mouse click at its pixels. A pattern
+            # invoke cannot hit the wrong pixel and cannot be swallowed by
+            # overlays or WebView input handling (seen live: every click on
+            # Outlook's 'New' button landed with delta=0 while the control
+            # was perfectly invokable). Reflection still verifies the visible
+            # outcome afterwards. Falls back to the pixel click whenever the
+            # control exposes no pattern or the re-lookup misses.
+            if step.action_type == "click" and "uia" in (result.method or ""):
+                from core import windows_uia
+                if windows_uia.invoke_element(step.target, timeout_s=2.5):
+                    return True
 
         # ── Drag ──────────────────────────────────────────────────────────────
         elif step.action_type == "drag":
@@ -1682,21 +1695,28 @@ class TaskOrchestrator:
         truth: if the focused control contains the clicked coordinates and is
         a text control, the click achieved everything a click can achieve.
         Works for any app and any task — no target-name matching involved.
+
+        The clicked PIXEL itself must also be a text control. WebView apps
+        (new Outlook, Teams) expose one focused DocumentControl whose rect
+        spans nearly the whole window — "focused rect contains the point"
+        alone rescued dead clicks on buttons for 10+ minutes (seen live),
+        which also kept the dead-point blacklist from ever firing.
         """
         try:
             from core import windows_uia
+            xy = getattr(self, "_last_click_xy", None)
+            if not xy:
+                return False
+            at_point = windows_uia.control_type_at_point(*xy)
+            if at_point not in ("EditControl", "DocumentControl"):
+                return False
             info = windows_uia.focused_element_info()
             if not info or info["control_type"] not in (
                 "EditControl", "DocumentControl",
             ):
                 return False
-            # Screen is unchanged (that is why we are here), so this is a
-            # cache hit — no OCR/VLM cost.
-            loc = self.grounder.ground(step.target)
-            if not loc.found:
-                return False
             left, top, right, bottom = info["rect"]
-            return left <= loc.x <= right and top <= loc.y <= bottom
+            return left <= xy[0] <= right and top <= xy[1] <= bottom
         except Exception:
             return False
 

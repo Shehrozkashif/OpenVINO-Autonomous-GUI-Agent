@@ -277,6 +277,36 @@ def focused_element_info(timeout_s: float = 1.0) -> dict | None:
     return result[0]
 
 
+def control_type_at_point(x: int, y: int, timeout_s: float = 1.0) -> str | None:
+    """ControlTypeName of the UIA element under screen pixel (x, y).
+
+    Ground truth for "what did the click actually land on" — e.g. the
+    caret-placement rescue must only fire when the clicked pixel IS a text
+    control, not merely inside some huge focused WebView document whose rect
+    covers the whole window. Returns None when UIA is unavailable/timed out.
+    """
+    if not _load():
+        return None
+
+    result: list = [None]
+
+    def _get():
+        _com = _thread_com_init()
+        try:
+            ctrl = _uia.ControlFromPoint(int(x), int(y))
+            if ctrl is not None:
+                result[0] = ctrl.ControlTypeName
+        except Exception as e:
+            logger.debug(f"[UIA] ControlFromPoint({x},{y}) error: {e}")
+        finally:
+            del _com
+
+    t = threading.Thread(target=_get, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    return result[0]
+
+
 def save_dialog_open(timeout_s: float = 1.2) -> bool | None:
     """Is a native Windows file (Save/Save-As) dialog in the foreground?
 
