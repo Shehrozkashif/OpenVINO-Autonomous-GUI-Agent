@@ -73,6 +73,7 @@ def _thread_com_init():
 _PROP_BOUNDING_RECT = 30001
 _PROP_CONTROL_TYPE = 30003
 _PROP_NAME = 30005
+_PROP_IS_ENABLED = 30010
 _PROP_IS_OFFSCREEN = 30022
 _TREESCOPE_DESCENDANTS = 4
 
@@ -108,9 +109,9 @@ def _control_from_element(element):
 def _native_interactive_elements(root, max_items: int = 400) -> list | None:
     """All interactive descendants of `root` via ONE native FindAll call.
 
-    Returns [(name, control_type_name, (l, t, r, b), is_offscreen, element)],
-    or None when the raw COM plumbing is unavailable — callers then fall back
-    to the recursive walk. MUST run on a COM-initialized thread.
+    Returns [(name, control_type_name, (l, t, r, b), is_offscreen, is_enabled,
+    element)], or None when the raw COM plumbing is unavailable — callers then
+    fall back to the recursive walk. MUST run on a COM-initialized thread.
     """
     try:
         iuia = _raw_iuia()
@@ -130,7 +131,7 @@ def _native_interactive_elements(root, max_items: int = 400) -> list | None:
         try:
             cr = iuia.CreateCacheRequest()
             for pid in (_PROP_BOUNDING_RECT, _PROP_CONTROL_TYPE,
-                        _PROP_NAME, _PROP_IS_OFFSCREEN):
+                        _PROP_NAME, _PROP_IS_OFFSCREEN, _PROP_IS_ENABLED):
                 cr.AddProperty(pid)
             found = element.FindAllBuildCache(_TREESCOPE_DESCENDANTS, cond, cr)
             cached = True
@@ -144,14 +145,17 @@ def _native_interactive_elements(root, max_items: int = 400) -> list | None:
                 if cached:
                     name, ctype = el.CachedName, el.CachedControlType
                     r, off = el.CachedBoundingRectangle, el.CachedIsOffscreen
+                    enabled = el.CachedIsEnabled
                 else:
                     name, ctype = el.CurrentName, el.CurrentControlType
                     r, off = el.CurrentBoundingRectangle, el.CurrentIsOffscreen
+                    enabled = el.CurrentIsEnabled
                 out.append((
                     (name or "").strip(),
                     ids.get(ctype, ""),
                     (r.left, r.top, r.right, r.bottom),
                     bool(off),
+                    bool(enabled),
                     el,
                 ))
             except Exception:
@@ -178,8 +182,10 @@ def _native_best_match(root, query: str, threshold: float):
     if elems is None:
         return None
     best, best_score = None, 0.0
-    for name, _tname, rect, offscreen, el in elems:
-        if offscreen or not name or not _rect_tuple_valid(rect):
+    for name, _tname, rect, offscreen, enabled, el in elems:
+        # Disabled controls are never click candidates: clicking them is
+        # provably inert (live: a grayed 'Save' ate 10 minutes of retries).
+        if offscreen or not enabled or not name or not _rect_tuple_valid(rect):
             continue
         score = _match_score(query, name.lower())
         if score < threshold or score <= best_score:
@@ -342,7 +348,7 @@ def get_interactive_elements(
                 if native is None:
                     continue
                 any_native = True
-                for name, tname, rect, offscreen, _el in native:
+                for name, tname, rect, offscreen, enabled, _el in native:
                     if (
                         not name
                         or offscreen
@@ -354,7 +360,13 @@ def get_interactive_elements(
                     key = (name.lower(), tname)
                     if key not in seen:
                         seen.add(key)
-                        out.append((name, tname.replace("Control", "")))
+                        # "(disabled)" is load-bearing: it tells the planner
+                        # WHY a button won't respond (fill required fields
+                        # first) instead of letting it hammer a gray button.
+                        label = tname.replace("Control", "")
+                        if not enabled:
+                            label += " (disabled)"
+                        out.append((name, label))
                         if len(out) >= max_elements:
                             break
             if any_native:
@@ -589,8 +601,8 @@ def _find_control(query: str, timeout_s: float, control_types: frozenset | None 
         native = _native_interactive_elements(root)
         if native is None:
             continue
-        for name, tname, _rect, _offscreen, el in native:
-            if not name:
+        for name, tname, _rect, _offscreen, enabled, el in native:
+            if not name or not enabled:
                 continue
             if control_types is not None and tname not in control_types:
                 continue
@@ -921,6 +933,11 @@ def _walk_and_match(
 
         try:
             interactive = ctrl.ControlTypeName in _INTERACTIVE_CONTROL_TYPES
+            try:
+                if interactive and not ctrl.IsEnabled:
+                    interactive = False   # disabled → never a click candidate
+            except Exception:
+                pass
             for text in _control_texts(ctrl):
                 score = _match_score(query, text)
                 if score < threshold:

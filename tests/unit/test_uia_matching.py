@@ -111,8 +111,13 @@ import core.windows_uia as wu
 
 
 def _batch(*items):
-    """items: (name, type_name, rect_tuple, offscreen) → native batch rows."""
-    return [(n, t, r, off, None) for n, t, r, off in items]
+    """items: (name, type_name, rect_tuple, offscreen[, enabled]) → rows."""
+    rows = []
+    for it in items:
+        n, t, r, off = it[:4]
+        enabled = it[4] if len(it) > 4 else True
+        rows.append((n, t, r, off, enabled, None))
+    return rows
 
 
 class TestNativeBestMatch:
@@ -180,3 +185,43 @@ class TestGetInteractiveElementsNative:
                                            _Rect(0, 0, 60, 20))])
         out = self._run(None, fg=fg)
         assert out == [("Save", "Button")]
+
+
+class TestDisabledControls:
+    """Regression (live AI-PC 19:12-19:19): Teams' grayed 'Save' ate 10
+    minutes — every stage kept serving a button that cannot respond. Disabled
+    controls must be skipped as click candidates and labeled for the planner."""
+
+    def test_disabled_button_never_a_click_candidate(self):
+        elems = _batch(
+            ("Save", "ButtonControl", (1380, 150, 1430, 180), False, False),
+        )
+        with mock.patch.object(wu, "_native_interactive_elements",
+                               return_value=elems):
+            assert wu._native_best_match(object(), "save", 0.65) is None
+
+    def test_enabled_sibling_wins_over_disabled_exact(self):
+        elems = _batch(
+            ("Save", "ButtonControl", (1380, 150, 1430, 180), False, False),
+            ("Save as draft", "ButtonControl", (100, 150, 200, 180), False, True),
+        )
+        with mock.patch.object(wu, "_native_interactive_elements",
+                               return_value=elems):
+            r = wu._native_best_match(object(), "save", 0.65)
+        assert r is not None and r[0] == 150   # the enabled control's center
+
+    def test_planner_list_labels_disabled(self):
+        fake_uia = mock.MagicMock()
+        with mock.patch.object(wu, "_load", return_value=True), \
+             mock.patch.object(wu, "_thread_com_init", return_value=None), \
+             mock.patch.object(wu, "_uia", fake_uia), \
+             mock.patch.object(wu, "_native_interactive_elements",
+                               return_value=_batch(
+                                   ("Save", "ButtonControl",
+                                    (1380, 150, 1430, 180), False, False),
+                                   ("Add required attendees", "EditControl",
+                                    (100, 300, 500, 330), False, True),
+                               )):
+            out = wu.get_interactive_elements(max_elements=5)
+        assert ("Save", "Button (disabled)") in out
+        assert ("Add required attendees", "Edit") in out

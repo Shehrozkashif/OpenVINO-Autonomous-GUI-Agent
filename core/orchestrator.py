@@ -520,7 +520,9 @@ class TaskOrchestrator:
         router cannot help — the caller then fails the task as before.
         """
         try:
-            screen_context = self._get_screen_context()
+            screen_context = (
+                self._get_screen_context() + self._clickable_controls_block()
+            )
             fresh = self.router.replan(
                 instruction, completed_descs, failed_subtask.description,
                 screen_context=screen_context,
@@ -915,6 +917,34 @@ class TaskOrchestrator:
             return "abort"
         return "retry"
 
+    def _clickable_controls_block(self) -> str:
+        """The CLICKABLE CONTROLS prompt block from the accessibility tree,
+        or "" when unavailable. Shared by step planning and replanning —
+        WebView2 apps are nearly invisible to OCR, so an LLM that only gets
+        OCR text plans blind (a replanner kept emitting 'click Save' while
+        the empty required fields sat unreadable right next to it).
+        """
+        try:
+            from core.windows_uia import get_interactive_elements
+            _elems = get_interactive_elements(max_elements=60, timeout_s=3.0)
+            if not _elems:
+                return ""
+            _names = ", ".join(f"'{n}' [{t}]" for n, t in _elems)
+            # Bound the prompt cost: ~3 KB ≈ 700 tokens ≈ seconds of
+            # prefill per planning cycle on the iGPU.
+            if len(_names) > 3000:
+                _names = _names[:3000].rsplit(", ", 1)[0] + ", …(truncated)"
+            logger.info(
+                f"[PLANNING] UIA clickable controls ({len(_elems)}): {_names}"
+            )
+            return (
+                "\nCLICKABLE CONTROLS (exact names from the Windows "
+                "accessibility tree — choose click targets ONLY from "
+                "this list, verbatim): " + _names
+            )
+        except Exception:
+            return ""
+
     def _goal_already_satisfied(self, run: "_SubtaskRun", subtask: SubTask) -> bool:
         """One focused LLM question: does the current screen already show the
         state this subtask is trying to reach?
@@ -1010,25 +1040,7 @@ class TaskOrchestrator:
         # "New Meeting" for a whole run while the app's real button was named
         # differently, and every grounding stage honestly failed to find the
         # imaginary name. Click targets must come from names that exist.
-        try:
-            from core.windows_uia import get_interactive_elements
-            _elems = get_interactive_elements(max_elements=60, timeout_s=3.0)
-            if _elems:
-                _names = ", ".join(f"'{n}' [{t}]" for n, t in _elems)
-                # Bound the prompt cost: ~3 KB ≈ 700 tokens ≈ seconds of
-                # prefill per planning cycle on the iGPU.
-                if len(_names) > 3000:
-                    _names = _names[:3000].rsplit(", ", 1)[0] + ", …(truncated)"
-                logger.info(
-                    f"[PLANNING] UIA clickable controls ({len(_elems)}): {_names}"
-                )
-                run.screen_context += (
-                    "\nCLICKABLE CONTROLS (exact names from the Windows "
-                    "accessibility tree — choose click targets ONLY from "
-                    "this list, verbatim): " + _names
-                )
-        except Exception:
-            pass
+        run.screen_context += self._clickable_controls_block()
 
         # Real date/time from the OS — the planner otherwise reasons from the
         # model's frozen sense of "now" (it clicked 'Today' to select a date
