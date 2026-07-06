@@ -134,13 +134,19 @@ class ReflectionAgent:
     # ── public API ────────────────────────────────────────────────────────────
 
     def verify(self, step: ActionStep, wait_s: float = 1.5,
-               pre_hash=None) -> ReflectionResult:
+               pre_hash=None, controls_before: set | None = None) -> ReflectionResult:
         """Verify if an action step succeeded.
         1. For click actions: use pre_hash (captured by orchestrator BEFORE the action)
            as the baseline. Falls back to capturing after-action if pre_hash is None.
         2. Adaptive wait for UI to settle.
         3. Capture after-screenshot; if hash unchanged for click → immediate failure.
         4. OCR → LLM (primary) or VLM (fallback if screen is icon-heavy).
+
+        controls_before: pre-action snapshot of accessibility-tree control
+        labels. When given, the LLM judge also sees which controls appeared/
+        disappeared — tree-level proof of effect on WebView2 screens whose
+        pixels OCR cannot read (live: an attendee click was judged FAILED
+        while 'Remove <email>' [Button] had appeared in the tree).
         """
         if step.action_type == "wait":
             try:
@@ -211,8 +217,9 @@ class ReflectionAgent:
             # successful ctrl+l hotkeys forever (seen live, 12 retries).
             # Give the LLM the accessibility tree's answer as ground truth.
             focus_note = self._focused_control_note()
+            controls_note = self._controls_delta_note(controls_before)
             result = self._verify_with_llm(
-                step, ocr_text + focus_note, verification
+                step, ocr_text + focus_note + controls_note, verification
             )
             result.ocr_text = ocr_text
         else:
@@ -282,6 +289,43 @@ class ReflectionAgent:
         except Exception:
             pass
         return ""
+
+    @staticmethod
+    def _controls_delta_note(before: set | None) -> str:
+        """Which accessibility-tree controls appeared/disappeared since the
+        pre-action snapshot — ground truth the OCR text cannot provide.
+        Empty string when no snapshot was given or the tree is unreadable.
+        """
+        if not before:
+            return ""
+        try:
+            from core.windows_uia import get_interactive_elements
+            now = {
+                f"'{n}' [{t}]"
+                for n, t in get_interactive_elements(
+                    max_elements=60, timeout_s=1.5
+                )
+            }
+            if not now:
+                return ""
+            appeared = sorted(now - before)[:8]
+            gone = sorted(before - now)[:8]
+            if not appeared and not gone:
+                return (
+                    "\nUI controls (accessibility tree, ground truth): no "
+                    "interactive controls appeared or disappeared after the action"
+                )
+            parts = []
+            if appeared:
+                parts.append("appeared: " + ", ".join(appeared))
+            if gone:
+                parts.append("disappeared: " + ", ".join(gone))
+            return (
+                "\nUI control changes after the action (accessibility tree, "
+                "ground truth): " + "; ".join(parts)
+            )
+        except Exception:
+            return ""
 
     def _verify_with_llm(
         self, step: ActionStep, ocr_text: str, verification: str

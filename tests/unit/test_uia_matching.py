@@ -228,3 +228,83 @@ class TestDisabledControls:
             out = wu.get_interactive_elements(max_elements=5)
         assert ("Save", "Button (disabled)") in out
         assert ("Add required attendees", "Edit") in out
+
+
+class TestFieldValueLabels:
+    """Regression (live AI-PC 07:26 run): the planner could not see that
+    'Start time' still held its default while it moved on to Save. Editable
+    controls must carry their current ValuePattern content in the label.
+    """
+
+    def _elements(self, ctrl):
+        fake_uia = mock.MagicMock()
+        with mock.patch.object(wu, "_load", return_value=True), \
+             mock.patch.object(wu, "_thread_com_init", return_value=None), \
+             mock.patch.object(wu, "_uia", fake_uia), \
+             mock.patch.object(wu, "_control_from_element", return_value=ctrl), \
+             mock.patch.object(wu, "_native_interactive_elements",
+                               return_value=_batch(
+                                   ("Start time", "ComboBoxControl",
+                                    (10, 10, 60, 30), False),
+                                   ("Save", "ButtonControl",
+                                    (70, 10, 120, 30), False),
+                               )):
+            return wu.get_interactive_elements(max_elements=5)
+
+    def test_value_suffix_on_editable_controls(self):
+        class _VP:
+            Value = "8:00 AM"
+
+        class _Ctrl:
+            @staticmethod
+            def GetValuePattern():
+                return _VP
+
+        out = self._elements(_Ctrl())
+        assert ("Start time", "ComboBox = '8:00 AM'") in out
+        assert ("Save", "Button") in out          # non-editables untouched
+
+    def test_empty_value_is_shown_as_empty(self):
+        class _VP:
+            Value = ""
+
+        class _Ctrl:
+            @staticmethod
+            def GetValuePattern():
+                return _VP
+
+        out = self._elements(_Ctrl())
+        assert ("Start time", "ComboBox = ''") in out
+
+    def test_unreadable_value_leaves_label_plain(self):
+        # Non-string Value (mock objects, COM oddities) must never leak
+        # into the planner prompt.
+        out = self._elements(mock.MagicMock())
+        assert ("Start time", "ComboBox") in out
+
+
+class TestOcclusionChainLogic:
+    """Regression (live AI-PC 07:26 run): Teams' 'Meeting created' popup sat
+    over the scheduling form — a hit-test chain that never names the target
+    proves the click would land on the overlay instead.
+    """
+
+    def test_chain_containing_target_is_not_covered(self):
+        assert wu._chain_matches_target(
+            ["", "Send", "Calendar | New meeting | Microsoft Teams"], "Send"
+        ) is True
+
+    def test_dialog_chain_reports_covered(self):
+        assert wu._chain_matches_target(
+            ["Copy", "Meeting created",
+             "Calendar | New meeting | Microsoft Teams"], "Send"
+        ) is False
+
+    def test_all_empty_chain_is_inconclusive_not_covered(self):
+        assert wu._chain_matches_target(["", "", ""], "Send") is True
+
+    def test_empty_target_never_covered(self):
+        assert wu._chain_matches_target(["Whatever"], "") is True
+
+    def test_containment_counts_as_match(self):
+        assert wu._chain_matches_target(["Save meeting"], "Save") is True

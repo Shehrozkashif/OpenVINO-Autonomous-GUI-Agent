@@ -1652,3 +1652,131 @@ class TestInvokeDeadBlacklist:
         run.screen_context = "completely different screen"
         orch._goal_already_satisfied(run, _subtask())
         assert orch.reflector.client.query_llm.call_count == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Invoke failures must not poison the pixel path, and occluded targets must
+# fail fast with the blocker's name (regression, live AI-PC run 2026-07-06
+# 07:26: Teams' 'Meeting created' popup covered the form; 'Send' invoke →
+# delta=0 → the REAL button's point was dead-marked although no pixel was
+# ever clicked → the retry's pixel click landed on a VLM title-bar guess).
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _make_orch_occl(method="uia"):
+    orch = _make_orch_loop([])
+    orch.grounder.ground = MagicMock(return_value=GroundingResult(
+        found=True, confidence=1.0, x=1404, y=168,
+        latency_ms=5.0, target="Send", method=method,
+        element_type="foreground_interactive",
+    ))
+    orch.grounder.mark_dead = MagicMock()
+    return orch
+
+
+def _send_click():
+    return ActionStep(
+        id=1, subtask_id=1, action_type="click", target="Send",
+        value=None, key=None, description="click Send", verification="",
+    )
+
+
+def _unchanged_reflection():
+    return MagicMock(
+        success=False, confidence=0.98, should_retry=True,
+        error_description="Screen unchanged after click",
+    )
+
+
+class TestInvokeFailureKeepsPixelAlive:
+
+    def test_failed_invoke_does_not_mark_point_dead(self):
+        orch = _make_orch_occl()
+        step = _send_click()
+        with patch("core.windows_uia.covering_element", return_value=None), \
+             patch("core.windows_uia.invoke_element", return_value=True):
+            assert orch._execute_step(step) is True
+        assert orch._last_was_invoke is True
+
+        run = _SubtaskRun(started_at=0.0)
+        orch.reflector.verify = MagicMock(return_value=_unchanged_reflection())
+        with patch("core.windows_uia.covering_element", return_value=None):
+            orch._judge_reflection(run, step, non_idempotent=False,
+                                   pre_click_hash=None)
+        orch.grounder.mark_dead.assert_not_called()   # point never clicked
+        assert "send" in orch._invoke_dead            # invoke path blacklisted
+
+    def test_failed_pixel_click_still_marks_dead(self):
+        orch = _make_orch_occl()
+        step = _send_click()
+        with patch("core.windows_uia.covering_element", return_value=None), \
+             patch("core.windows_uia.invoke_element", return_value=False):
+            assert orch._execute_step(step)           # falls to pixel click
+        assert orch._last_was_invoke is False
+
+        run = _SubtaskRun(started_at=0.0)
+        orch.reflector.verify = MagicMock(return_value=_unchanged_reflection())
+        with patch("core.windows_uia.covering_element", return_value=None):
+            orch._judge_reflection(run, step, non_idempotent=False,
+                                   pre_click_hash=None)
+        orch.grounder.mark_dead.assert_called_once_with("Send", 1404, 168)
+
+    def test_covered_point_failure_names_blocker_in_error(self):
+        orch = _make_orch_occl()
+        step = _send_click()
+        with patch("core.windows_uia.covering_element", return_value=None), \
+             patch("core.windows_uia.invoke_element", return_value=False):
+            orch._execute_step(step)
+
+        run = _SubtaskRun(started_at=0.0)
+        orch.reflector.verify = MagicMock(return_value=_unchanged_reflection())
+        with patch("core.windows_uia.covering_element",
+                   return_value="Meeting created"):
+            orch._judge_reflection(run, step, non_idempotent=False,
+                                   pre_click_hash=None)
+        assert "Meeting created" in run.last_error
+        assert "overlay" in run.last_error
+
+
+class TestOcclusionGate:
+
+    def test_covered_uia_point_fails_fast_with_blocker_name(self):
+        orch = _make_orch_occl(method="uia")
+        step = _send_click()
+        with patch("core.windows_uia.covering_element",
+                   return_value="Meeting created") as cov, \
+             patch("core.windows_uia.invoke_element") as inv:
+            assert orch._execute_step(step) is False
+            cov.assert_called_once()
+            inv.assert_not_called()
+        orch.actor.execute.assert_not_called()
+        assert "Meeting created" in orch._exec_fail_reason
+
+    def test_uncovered_point_proceeds_to_invoke(self):
+        orch = _make_orch_occl(method="uia")
+        step = _send_click()
+        with patch("core.windows_uia.covering_element", return_value=None), \
+             patch("core.windows_uia.invoke_element", return_value=True) as inv:
+            assert orch._execute_step(step) is True
+            inv.assert_called_once()
+
+    def test_ocr_grounded_click_skips_hit_test(self):
+        # OCR text rarely equals the accessible name — hit-testing there
+        # would false-positive, so the gate only guards UIA groundings.
+        orch = _make_orch_occl(method="ocr_fuzzy")
+        step = _send_click()
+        with patch("core.windows_uia.covering_element") as cov:
+            assert orch._execute_step(step)
+            cov.assert_not_called()
+        orch.actor.execute.assert_called_once()
+
+    def test_occlusion_reason_reaches_step_failure_record(self):
+        orch = _make_orch_occl(method="uia")
+        step = _send_click()
+        run = _SubtaskRun(started_at=0.0)
+        subtask = SubTask(id=1, description="click Send", depends_on=[])
+        orch.config.max_retries_per_step = 1
+        with patch("core.windows_uia.covering_element",
+                   return_value="Meeting created"):
+            outcome = orch._run_step_attempts(run, subtask, step)
+        assert outcome == "step_failed"
+        assert "Meeting created" in run.last_error

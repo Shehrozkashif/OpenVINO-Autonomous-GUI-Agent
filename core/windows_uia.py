@@ -171,6 +171,22 @@ def _rect_tuple_valid(rect: tuple) -> bool:
     return right > left and bottom > top and right > 0 and bottom > 0
 
 
+def _element_value_of(el) -> str | None:
+    """Current text of a raw element via ValuePattern, or None when the
+    element exposes no readable value. "" is a real answer: field is empty.
+    """
+    try:
+        ctrl = _control_from_element(el)
+        if ctrl is None:
+            return None
+        val = ctrl.GetValuePattern().Value
+        if not isinstance(val, str):
+            return None
+        return " ".join(val.split())[:40]
+    except Exception:
+        return None
+
+
 def _native_best_match(root, query: str, threshold: float):
     """Best interactive match for `query` from the native element batch.
 
@@ -364,6 +380,16 @@ def get_interactive_elements(
                         # WHY a button won't respond (fill required fields
                         # first) instead of letting it hammer a gray button.
                         label = tname.replace("Control", "")
+                        # Text fields carry their CURRENT content — without it
+                        # the planner/goal-check cannot tell a filled form from
+                        # an empty one (seen live: 'Start time' silently left
+                        # at 8:00 AM while the plan moved on to Save).
+                        if tname in (
+                            "EditControl", "ComboBoxControl", "SpinnerControl"
+                        ):
+                            val = _element_value_of(_el)
+                            if val is not None:
+                                label += f" = '{val}'"
                         if not enabled:
                             label += " (disabled)"
                         out.append((name, label))
@@ -485,6 +511,70 @@ def control_type_at_point(x: int, y: int, timeout_s: float = 1.0) -> str | None:
                 result[0] = ctrl.ControlTypeName
         except Exception as e:
             logger.debug(f"[UIA] ControlFromPoint({x},{y}) error: {e}")
+        finally:
+            del _com
+
+    t = threading.Thread(target=_get, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    return result[0]
+
+
+def _chain_matches_target(names: list, target: str) -> bool:
+    """Does any name in a hit-test ancestor chain plausibly BE `target`?
+
+    True means the point genuinely belongs to the target control (or a
+    named parent/child of it). All-empty chains also return True: web
+    canvases expose nameless nodes and "can't tell" must never be treated
+    as proof of occlusion.
+    """
+    t = _norm_text(target)
+    if not t:
+        return True
+    named = [n for n in (_norm_text(n) for n in names) if n]
+    if not named:
+        return True
+    for n in named:
+        if t in n or n in t or _match_score(t, n) >= 0.75:
+            return True
+    return False
+
+
+def covering_element(x: int, y: int, target: str, timeout_s: float = 1.5) -> str | None:
+    """Name of the element that actually owns screen point (x, y) when that
+    point does NOT belong to the control named `target` — i.e. an overlay or
+    dialog is physically on top and a click there can never reach the target.
+
+    Ground truth via hit-testing: ControlFromPoint returns what a click at
+    (x, y) would really land on; the ancestor walk covers targets whose
+    accessible name lives on a parent. Returns None when the point belongs
+    to the target, when nothing named is readable there, or when UIA is
+    unavailable — callers may only act on a positive answer.
+    """
+    if not _load():
+        return None
+
+    result: list = [None]
+
+    def _get():
+        _com = _thread_com_init()
+        try:
+            ctrl = _uia.ControlFromPoint(int(x), int(y))
+            names, hops = [], 0
+            while ctrl is not None and hops < 8:
+                try:
+                    names.append((ctrl.Name or "").strip())
+                except Exception:
+                    names.append("")
+                try:
+                    ctrl = ctrl.GetParentControl()
+                except Exception:
+                    break
+                hops += 1
+            if not _chain_matches_target(names, target):
+                result[0] = next(n for n in names if n)[:80]
+        except Exception as e:
+            logger.debug(f"[UIA] covering_element({x},{y}) error: {e}")
         finally:
             del _com
 
@@ -687,9 +777,11 @@ def set_element_value(target: str, value: str, timeout_s: float = 3.0) -> bool:
             "SpinnerControl",
         }))
         if ctrl is None:
+            logger.debug(f"[UIA] set_value: no editable control named '{target}'")
             return False
         vp = ctrl.GetValuePattern()
         if getattr(vp, "IsReadOnly", False):
+            logger.debug(f"[UIA] set_value: '{target}' is read-only")
             return False
         vp.SetValue(value)
         readback = vp.Value or ""

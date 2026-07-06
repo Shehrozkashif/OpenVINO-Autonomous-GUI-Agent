@@ -161,6 +161,8 @@ class TaskOrchestrator:
         self._invoke_dead = set()   # targets whose pattern-invoke provably no-ops
         self._last_was_invoke = False
         self._last_goal_evidence = ""
+        self._last_controls = None   # controls snapshot for verifier diffing
+        self._exec_fail_reason = ""
         # Set when a subtask completes via a degraded path (loop-guard recovery,
         # optimistic parse-failure success, etc.). Such a task is NOT stored in
         # success memory, so broken plans never poison future routing hints.
@@ -280,6 +282,7 @@ class TaskOrchestrator:
         self._app_anchor = None   # (hwnd, pid, exe) of the task's app window
         self._invoke_dead = set()   # targets whose pattern-invoke provably no-ops
         self._last_goal_evidence = ""
+        self._last_controls = None
         self.log(f"[TASK START] '{instruction}'")
         start_time = time.time()
         self._arm_kill_switch()
@@ -943,18 +946,23 @@ class TaskOrchestrator:
             _elems = get_interactive_elements(max_elements=60, timeout_s=3.0)
             if not _elems:
                 return ""
+            # Snapshot for the verifier: controls that appear/disappear
+            # after an action are tree-level proof of its effect.
+            self._last_controls = {f"'{n}' [{t}]" for n, t in _elems}
             _names = ", ".join(f"'{n}' [{t}]" for n, t in _elems)
-            # Bound the prompt cost: ~3 KB ≈ 700 tokens ≈ seconds of
+            # Bound the prompt cost: ~3.6 KB ≈ 850 tokens ≈ seconds of
             # prefill per planning cycle on the iGPU.
-            if len(_names) > 3000:
-                _names = _names[:3000].rsplit(", ", 1)[0] + ", …(truncated)"
+            if len(_names) > 3600:
+                _names = _names[:3600].rsplit(", ", 1)[0] + ", …(truncated)"
             logger.info(
                 f"[PLANNING] UIA clickable controls ({len(_elems)}): {_names}"
             )
             return (
                 "\nCLICKABLE CONTROLS (exact names from the Windows "
                 "accessibility tree — choose click targets ONLY from "
-                "this list, verbatim): " + _names
+                "this list, verbatim; = '…' after a field is its CURRENT "
+                "content, ground truth for what is already filled in): "
+                + _names
             )
         except Exception:
             return ""
@@ -1243,7 +1251,10 @@ class TaskOrchestrator:
                     pass
 
             if not self._execute_step(step):
-                run.last_error = "execution failed (element not found or action error)"
+                run.last_error = (
+                    getattr(self, "_exec_fail_reason", "")
+                    or "execution failed (element not found or action error)"
+                )
                 continue
 
             if skip_reflection:
@@ -1310,8 +1321,18 @@ class TaskOrchestrator:
                         for kw in ("launch", "open", "start", "run"))
             )
             _reflect_wait = 1.5 if _is_launch_enter else self.config.reflection_wait_s
+            # Controls snapshot from the planning cycle that produced this
+            # step: appeared/disappeared control names give the verifier
+            # tree-level proof of effect on WebView2 screens OCR can't read.
+            _controls_before = (
+                getattr(self, "_last_controls", None)
+                if step.action_type in
+                ("click", "right_click", "double_click", "invoke")
+                else None
+            )
             reflection = self.reflector.verify(step, _reflect_wait,
-                                               pre_hash=pre_click_hash)
+                                               pre_hash=pre_click_hash,
+                                               controls_before=_controls_before)
             run.cached_ocr = reflection.ocr_text   # reuse for next planning call
 
             # Ground truth override: a click that flipped the foreground to a
@@ -1452,10 +1473,17 @@ class TaskOrchestrator:
             # fall through to another stage (or fail honestly). Without this,
             # "Re-ground the target" retries are no-ops: unchanged screen →
             # same phash → cache hit → same dead pixel, forever.
+            # NEVER after a pattern invoke: the invoke consumed the attempt
+            # without touching that pixel, so the coordinate is unproven —
+            # dead-marking it here starved the retry's pixel click of the
+            # REAL button and sent it to a VLM guess instead (seen live:
+            # 'Send' invoked → delta=0 → true point blacklisted → the one
+            # click that would have worked landed on the title bar).
             if (
                 step.action_type in ("click", "right_click", "double_click")
                 and "unchanged" in run.last_error.lower()
                 and getattr(self, "_last_click_xy", None)
+                and not getattr(self, "_last_was_invoke", False)
             ):
                 self.grounder.mark_dead(step.target, *self._last_click_xy)
             # The pattern-invoke equivalent of a dead point: the provider
@@ -1472,6 +1500,30 @@ class TaskOrchestrator:
                     f"  [INVOKE-DEAD] Pattern invoke on '{step.target}' had no "
                     f"verified effect — retries will use a pixel click"
                 )
+            # When the proven-inert point turns out to be COVERED, the step
+            # isn't failing because the target is wrong — something is on
+            # top of it. Name the blocker in the failure record the planner
+            # reads, so the next plan dismisses the overlay.
+            if (
+                step.action_type in ("click", "right_click", "double_click")
+                and "unchanged" in run.last_error.lower()
+                and getattr(self, "_last_click_xy", None)
+                and step.target
+            ):
+                from core import windows_uia
+                _cover = windows_uia.covering_element(
+                    *self._last_click_xy, step.target
+                )
+                if _cover:
+                    run.last_error += (
+                        f" — the point belongs to '{_cover}', not "
+                        f"'{step.target}': an overlay/dialog is on top; "
+                        f"dismiss it before retrying"
+                    )
+                    self.log(
+                        f"  [OCCLUSION] '{step.target}' is covered by "
+                        f"'{_cover}'"
+                    )
             # A confidently-failed non-idempotent action must also not
             # be blind-retried (Fix C5) — same double-execution risk.
             if not reflection.should_retry or non_idempotent:
@@ -1737,6 +1789,9 @@ class TaskOrchestrator:
         # Where the last click-family step actually landed — lets the
         # reflector's "screen unchanged" verdict blacklist the exact point.
         self._last_click_xy = None
+        # Specific failure reason for the caller's [FAILED: …] record; the
+        # planner reads that record, so name the real blocker when we know it.
+        self._exec_fail_reason = ""
 
         # Never type into the agent's own host terminal session.
         if step.action_type in ("type", "key_press", "hotkey") and \
@@ -1787,6 +1842,26 @@ class TaskOrchestrator:
             # The GUI window masking (exclude_regions) prevents log-text false positives.
             x, y = result.x, result.y
             self._last_click_xy = (x, y)
+            # Hit-test before acting: ElementFromPoint is OS ground truth for
+            # "what would a click here actually land on". When a dialog or
+            # overlay sits on top (live: Teams' 'Meeting created' popup over
+            # the form), every click AND pattern invoke beneath it is a
+            # provable no-op — fail fast and hand the planner the blocker's
+            # name so it dismisses the overlay instead of grinding retries.
+            if "uia" in (result.method or ""):
+                from core import windows_uia
+                _cover = windows_uia.covering_element(x, y, step.target)
+                if _cover:
+                    self._exec_fail_reason = (
+                        f"'{step.target}' is covered by '{_cover}' — an "
+                        f"overlay/dialog is on top; dismiss it (its Close/"
+                        f"Cancel/OK button) before retrying"
+                    )
+                    self.log(
+                        f"  [OCCLUSION] '{step.target}' at ({x},{y}) is "
+                        f"covered by '{_cover}' — click would not reach it"
+                    )
+                    return False
             # Ground truth first: when Stage 0 found this element in the UIA
             # tree, activate the control OBJECT via its Invoke/Toggle pattern
             # instead of synthesizing a mouse click at its pixels. A pattern

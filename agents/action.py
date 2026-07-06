@@ -200,6 +200,10 @@ class ActionExecutionAgent:
         # web widgets) still take keyboard input: focus via the tree, replace
         # the content, verify by reading the focused control back.
         if not windows_uia.focus_element(step.target):
+            logger.warning(
+                f"[ACTION] set_value '{step.target}': ValuePattern write "
+                f"failed and the control could not be focused"
+            )
             return False
         self.controller.hotkey("ctrl", "a")
         if not self.controller.type_text(value, sensitive=sensitive):

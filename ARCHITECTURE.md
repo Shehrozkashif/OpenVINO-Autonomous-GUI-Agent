@@ -63,8 +63,11 @@ a model's opinion alone:
 
 | Mechanism | Keyed by | Protects against |
 |---|---|---|
-| Dead-point blacklist (`grounding.mark_dead`) | (target, screen phash) | re-clicking a coordinate a phash delta=0 proved inert |
+| Dead-point blacklist (`grounding.mark_dead`) | (target, screen phash) | re-clicking a coordinate a phash delta=0 proved inert (pixel attempts only — a failed pattern invoke never dead-marks the pixel it didn't touch) |
 | Invoke-dead blacklist (`orchestrator._invoke_dead`) | target, per task | WebView2 providers that accept Invoke/Toggle but do nothing |
+| Occlusion hit-test (`windows_uia.covering_element`) | ElementFromPoint ancestor chain | clicking/invoking a control a dialog covers — the blocker's name is handed to the planner so it dismisses the overlay |
+| Field-value read-back (controls list `= '…'` suffix) | ValuePattern on Edit/ComboBox | planner/goal-check blindness to form state (premature Save, re-filling already-set fields) |
+| Controls-diff verification (`reflection._controls_delta_note`) | appeared/disappeared control labels | verifier misjudging actions whose only effect lives in the tree (an added attendee pill on an OCR-invisible WebView2 screen) |
 | Negative grounding cache (`grounding._no_find`) | (target, screen phash) | re-running the 15-20 s find cascade for a known miss on an unchanged screen |
 | Goal-check cache (`run.goal_check_cache`) | screen context hash | re-paying an LLM call to re-judge identical pixels |
 | App anchor (`orchestrator._app_anchor`) | (hwnd, pid, exe) | operating on the wrong window; clicks that escape to another process are dead-marked and focus restored |

@@ -774,3 +774,39 @@ class TestEscalation:
                                     escalate=False)
         agent.verify(_step_vlm("click"), pre_hash=_PRE)
         assert not client.query_vlm.called
+
+
+class TestControlsDeltaNote:
+    """Regression (live AI-PC 07:26 run): the attendee click was judged
+    FAILED while 'Remove <email>' [Button] had appeared in the accessibility
+    tree — tree-level appear/disappear evidence must reach the LLM judge.
+    """
+
+    def test_appeared_and_disappeared_listed(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.windows_uia.get_interactive_elements",
+            lambda **kw: [("Remove a@b.com", "Button"), ("Send", "Button")],
+        )
+        note = ReflectionAgent._controls_delta_note(
+            {"'Save' [Button]", "'Send' [Button]"}
+        )
+        assert "appeared: 'Remove a@b.com' [Button]" in note
+        assert "disappeared: 'Save' [Button]" in note
+
+    def test_no_snapshot_returns_empty(self):
+        assert ReflectionAgent._controls_delta_note(None) == ""
+        assert ReflectionAgent._controls_delta_note(set()) == ""
+
+    def test_unchanged_controls_reported_as_negative_evidence(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.windows_uia.get_interactive_elements",
+            lambda **kw: [("Send", "Button")],
+        )
+        note = ReflectionAgent._controls_delta_note({"'Send' [Button]"})
+        assert "no interactive controls appeared or disappeared" in note
+
+    def test_unreadable_tree_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.windows_uia.get_interactive_elements", lambda **kw: []
+        )
+        assert ReflectionAgent._controls_delta_note({"'Send' [Button]"}) == ""
