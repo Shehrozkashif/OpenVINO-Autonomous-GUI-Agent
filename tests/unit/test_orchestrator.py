@@ -1621,3 +1621,28 @@ class TestInvokeDeadBlacklist:
         with patch("core.windows_uia.invoke_element", return_value=True) as inv:
             assert orch._execute_step(step) is True
             inv.assert_called_once()
+
+    def test_same_screen_verdict_cached_no_second_llm_call(self):
+        """Latency: identical screens must not re-pay the goal-check LLM call
+        (live: the same 'Save present but…' answer was recomputed ~10×)."""
+        orch = _goal_check_orch(
+            '{"satisfied": false, "confidence": 0.9, '
+            '"evidence": "attendee field is empty"}'
+        )
+        run = _run_state()
+        base_ctx = run.screen_context
+        assert orch._goal_already_satisfied(run, _subtask()) is False
+        assert orch.reflector.client.query_llm.call_count == 1
+
+        run.screen_context = base_ctx   # same screen next cycle
+        assert orch._goal_already_satisfied(run, _subtask()) is False
+        assert orch.reflector.client.query_llm.call_count == 1   # cache hit
+        assert "attendee field is empty" in run.screen_context   # evidence re-fed
+
+    def test_changed_screen_misses_cache(self):
+        orch = _goal_check_orch('{"satisfied": false, "confidence": 0.9}')
+        run = _run_state()
+        orch._goal_already_satisfied(run, _subtask())
+        run.screen_context = "completely different screen"
+        orch._goal_already_satisfied(run, _subtask())
+        assert orch.reflector.client.query_llm.call_count == 2

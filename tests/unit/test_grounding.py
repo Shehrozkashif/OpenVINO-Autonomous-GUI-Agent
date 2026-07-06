@@ -398,6 +398,7 @@ def _fast_agent():
     agent.cache = MagicMock()
     agent._dead = {}
     agent._ground_hash = {}
+    agent._no_find = {}
     return agent
 
 
@@ -444,3 +445,53 @@ class TestGroundFastDeadPoints(unittest.TestCase):
             agent.capturer.capture.return_value = _PILImage.effect_noise((1852, 963), 64).convert("RGB")
             again = agent.ground_fast("New")
             self.assertTrue(again.found)
+
+
+class TestNegativeGroundingCache:
+    """Latency regression (live 19:12-19:19): the full grounding cascade
+    (VLM + rephrase LLM + tree searches + scroll hunt, 15-20 s) re-ran ~15×
+    for the same absent target on the same screen. A miss on an unchanged
+    screen is deterministic — cache it; invalidate on screen change or when
+    a new dead point could change the outcome."""
+
+    def _agent(self):
+        agent = _fast_agent()
+        agent.ocr.is_available.return_value = False
+        agent.min_confidence = 0.5
+        agent.client = MagicMock()   # rephrase LLM
+        resp = MagicMock(); resp.content = '["A", "B", "C"]'
+        agent.client.query_llm.return_value = resp
+        agent.cache = ElementCache()
+        agent.vlm = None
+        return agent
+
+    def test_second_miss_on_same_screen_skips_cascade(self):
+        agent = self._agent()
+        with patch("agents.grounding._uia_ok", return_value=False), \
+             patch.object(agent, "_vlm_coords", return_value=None) as vlm:
+            first = agent.ground("Save")
+            assert first.found is False
+            calls_after_first = agent.client.query_llm.call_count
+            second = agent.ground("Save")
+        assert second.found is False
+        assert second.method == "cached_miss"
+        assert agent.client.query_llm.call_count == calls_after_first
+
+    def test_mark_dead_invalidates_negative_cache(self):
+        agent = self._agent()
+        with patch("agents.grounding._uia_ok", return_value=False), \
+             patch.object(agent, "_vlm_coords", return_value=None):
+            agent.ground("Save")
+            assert agent._no_find
+            agent.mark_dead("Save", 100, 100)
+            assert not agent._no_find
+
+    def test_new_screen_misses_negative_cache(self):
+        agent = self._agent()
+        with patch("agents.grounding._uia_ok", return_value=False), \
+             patch.object(agent, "_vlm_coords", return_value=None):
+            agent.ground("Save")
+            agent.capturer.capture.return_value = \
+                _PILImage.effect_noise((1852, 963), 64).convert("RGB")
+            again = agent.ground("Save")
+        assert again.method != "cached_miss"

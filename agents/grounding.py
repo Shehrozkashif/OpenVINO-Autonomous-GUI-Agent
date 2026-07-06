@@ -369,6 +369,12 @@ class UIGroundingAgent:
         # opened another app's window) still poisons the point on the screen
         # where it will be looked up again.
         self._ground_hash: dict[str, str] = {}
+        # Negative cache: (target, screen phash) pairs where EVERY stage
+        # already failed. Grounding is deterministic for an unchanged screen,
+        # so re-running the cascade (VLM call + rephrase LLM + tree searches,
+        # 15-20 s) to reproduce a known miss is pure latency. A new screen
+        # state is a new hash; mark_dead() also invalidates the entry.
+        self._no_find: dict[tuple[str, str], float] = {}
         logger.info(
             f"[GROUNDING] Ready. Screen: {self.screen_w}×{self.screen_h}. "
             f"OCR: {'on' if self.ocr.is_available() else 'off (pip install rapidocr-onnxruntime)'}"
@@ -409,7 +415,10 @@ class UIGroundingAgent:
             self._dead.pop(next(iter(self._dead)))
         # The cached entry points at the dead coordinate — drop it so the
         # retry re-grounds instead of re-serving the proven-inert point.
+        # The negative cache too: with a new dead point the stages may now
+        # fall through to a DIFFERENT (live) candidate.
         self.cache.drop(target)
+        self._no_find.pop((target.lower(), screen_hash), None)
         logger.info(
             f"[GROUNDING] ({x},{y}) marked DEAD for '{target}' on current "
             f"screen — next attempt must find a different point"
@@ -445,6 +454,14 @@ class UIGroundingAgent:
         """
         start = time.time()
         display, scale_x, scale_y, screen_hash, dead = self._prepare_screen(target)
+        if (target.lower(), screen_hash) in self._no_find:
+            logger.info(
+                f"[GROUNDING] '{target}' already failed every stage on this "
+                f"exact screen — cached miss (skipping the cascade)"
+            )
+            return GroundingResult(x=0, y=0, confidence=0.0, found=False,
+                                   latency_ms=(time.time() - start) * 1000,
+                                   target=target, method="cached_miss")
         cached = self.cache.get(target, screen_hash)
         if cached and dead and self._near_dead(cached[0], cached[1], dead):
             self.cache.drop(target)
@@ -508,6 +525,9 @@ class UIGroundingAgent:
                                        element_type=element_type)
 
         logger.warning(f"[GROUNDING] All stages failed for '{target}'")
+        self._no_find[(target.lower(), screen_hash)] = time.time()
+        if len(self._no_find) > 128:
+            self._no_find.pop(next(iter(self._no_find)))
         return GroundingResult(x=0, y=0, confidence=0.0, found=False,
                                latency_ms=(time.time() - start) * 1000,
                                target=target, method="failed")

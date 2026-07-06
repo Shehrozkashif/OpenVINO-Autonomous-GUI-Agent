@@ -103,6 +103,7 @@ class _SubtaskRun:
     cached_ocr: str = ""                   # reuse reflection's OCR for the next plan
     screen_context: str = ""               # OCR context the current step was planned on
     step_sig_counts: dict = field(default_factory=dict)  # (action_type, target, value, key) → successes
+    goal_check_cache: dict = field(default_factory=dict)  # hash(screen ctx) → (ok, evidence)
     typed_ok: bool = False                 # a type step succeeded in this subtask
     last_error: str = ""                   # most recent step failure reason
     # Steps planned ahead by the last plan_steps() call. Executing from this
@@ -958,6 +959,17 @@ class TaskOrchestrator:
         if (run.is_launch_goal or run.is_cmd_subtask
                 or run.save_target or run.type_payload):
             return False
+        # Same screen → same answer: don't re-pay a 6-10 s LLM call to re-ask
+        # a question about identical pixels. Keyed on the full context string
+        # (OCR + controls list), so any real change misses the cache.
+        ctx_key = hash(run.screen_context)
+        if ctx_key in run.goal_check_cache:
+            ok, evidence = run.goal_check_cache[ctx_key]
+            if not ok and evidence:
+                run.screen_context += (
+                    f"\nGOAL CHECK (what is still missing): {evidence}"
+                )
+            return ok
         try:
             messages = [
                 {
@@ -1001,6 +1013,7 @@ class TaskOrchestrator:
             # the planner in the same cycle so it works on the missing part
             # instead of redoing the whole subtask from step one.
             evidence = str(verdict.get("evidence", "")).strip()[:300]
+            run.goal_check_cache[ctx_key] = (ok, evidence)
             if not ok and evidence:
                 run.screen_context += (
                     f"\nGOAL CHECK (what is still missing): {evidence}"
@@ -1042,22 +1055,24 @@ class TaskOrchestrator:
         # imaginary name. Click targets must come from names that exist.
         run.screen_context += self._clickable_controls_block()
 
-        # Real date/time from the OS — the planner otherwise reasons from the
-        # model's frozen sense of "now" (it clicked 'Today' to select a date
-        # two days ahead, silently resetting a correctly-set date).
-        run.screen_context += time.strftime(
-            "\nSYSTEM CLOCK (ground truth): %A, %B %d, %Y %I:%M %p"
-        )
-
         # Ask "is this goal ALREADY met?" before planning another action.
         # Without this, "click X to open Y" subtasks loop after they succeed:
         # once Y is open, every further click is a no-op that state-describing
         # verifiers keep blessing ("the form is visible → success"), and the
         # planner re-plans the same click instead of returning []. Launches,
         # commands, saves and typing have their own deterministic checks.
+        # (Runs BEFORE the clock line is appended: the check is cached per
+        # screen-context and the clock changes every minute.)
         if self._goal_already_satisfied(run, subtask):
             self.log("  [GOAL-CHECK] Goal already satisfied on current screen")
             return ("done", None)
+
+        # Real date/time from the OS — the planner otherwise reasons from the
+        # model's frozen sense of "now" (it clicked 'Today' to select a date
+        # two days ahead, silently resetting a correctly-set date).
+        run.screen_context += time.strftime(
+            "\nSYSTEM CLOCK (ground truth): %A, %B %d, %Y %I:%M %p"
+        )
 
         # Pass failure hints so planner avoids repeating known-bad patterns
         failure_hints = []
@@ -1743,6 +1758,11 @@ class TaskOrchestrator:
                 return False
             result = self.grounder.ground(step.target)
             if not result.found or result.confidence < self.grounder.min_confidence:
+                # A cached miss means the FULL cascade — including the scroll
+                # hunt that follows it — already failed on this exact screen.
+                if result.method == "cached_miss":
+                    self.log(f"  '{step.target}' known-absent on this screen")
+                    return False
                 result = self._scroll_to_find(step.target)
             if not result.found or result.confidence < self.grounder.min_confidence:
                 self.log(f"  Could not find '{step.target}' (conf={result.confidence:.2f})")
