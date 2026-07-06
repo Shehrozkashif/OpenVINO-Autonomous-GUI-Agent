@@ -598,10 +598,18 @@ class RouterAgent:
             subtasks.append(SubTask(**item))
         return subtasks
 
-    def summarize_completion(self, task_id: str, completed: list, success: bool) -> str:
+    def summarize_completion(
+        self, task_id: str, completed: list, success: bool, blocker: str = ""
+    ) -> str:
+        content = f"Task {'succeeded' if success else 'failed'}. Sub-tasks completed: {completed}."
+        if blocker and not success:
+            content += (
+                f" Screen evidence of what blocked it: {blocker}. "
+                "State the blocker plainly so the user knows what to fix."
+            )
         messages = [
             {"role": "system", "content": "Write a brief one-line task summary. No JSON."},
-            {"role": "user", "content": f"Task {'succeeded' if success else 'failed'}. Sub-tasks completed: {completed}."},
+            {"role": "user", "content": content},
         ]
-        resp = self.client.query_llm(messages, max_tokens=80, temperature=0.3)
+        resp = self.client.query_llm(messages, max_tokens=120, temperature=0.3)
         return re.sub(r"<think>.*?</think>", "", resp.content, flags=re.DOTALL).strip()

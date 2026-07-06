@@ -1547,3 +1547,11 @@ class TestStopEventHaltsAttempts:
         run = _SubtaskRun(started_at=0.0)
         assert orch._run_step_attempts(run, MagicMock(), step) == "step_failed"
         orch.actor.execute.assert_not_called()
+
+    def test_unsatisfied_evidence_stored_for_final_report(self):
+        orch = _goal_check_orch(
+            '{"satisfied": false, "confidence": 0.9, '
+            '"evidence": "only a sign-in screen is visible"}'
+        )
+        orch._goal_already_satisfied(_run_state(), _subtask())
+        assert orch._last_goal_evidence == "only a sign-in screen is visible"

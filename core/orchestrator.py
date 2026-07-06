@@ -415,7 +415,12 @@ class TaskOrchestrator:
         self._disarm_kill_switch()
 
         elapsed = time.time() - start_time
-        summary = self.router.summarize_completion(task_id, completed_subtask_ids, not failed)
+        blocker = getattr(self, "_last_goal_evidence", "") if failed else ""
+        if blocker:
+            self.log(f"[BLOCKER] {blocker}")
+        summary = self.router.summarize_completion(
+            task_id, completed_subtask_ids, not failed, blocker=blocker
+        )
 
         # Append any extracted data to the summary log
         if self._extracted_data:
@@ -965,6 +970,11 @@ class TaskOrchestrator:
                 run.screen_context += (
                     f"\nGOAL CHECK (what is still missing): {evidence}"
                 )
+                # Keep the newest evidence for the final task report: when a
+                # run dies grinding against a screen that lacks the needed UI
+                # (e.g. an app stuck at its sign-in window), this line is the
+                # difference between "task failed" and knowing WHY.
+                self._last_goal_evidence = evidence
             return ok
         except Exception as e:
             logger.debug(f"[GOAL-CHECK] Error: {e}")

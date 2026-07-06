@@ -212,3 +212,38 @@ class TestAppHintWholeWordMatching:
     def test_zoom_by_name_still_works(self):
         hint = self._hint("start a zoom call with my friend")
         assert "Zoom Workplace" in hint
+
+
+class TestFailureSummaryCarriesBlocker:
+    """Live failure 2026-07-05 17:53-18:02: Teams sat at its sign-in window
+    for 9 minutes and the run ended with just 'task failed' — while the goal
+    check had named the blocker every cycle. The summary must surface it."""
+
+    def _router(self):
+        client = MagicMock()
+        resp = MagicMock()
+        resp.content = "Task failed: Teams is at a sign-in screen."
+        client.query_llm.return_value = resp
+        return RouterAgent(client), client
+
+    def test_blocker_included_on_failure(self):
+        router, client = self._router()
+        router.summarize_completion(
+            "t1", [1, 2], False,
+            blocker="the schedule-meeting form is not open; only "
+                    "'Switch to another account' is on screen",
+        )
+        sent = client.query_llm.call_args[0][0][1]["content"]
+        assert "Switch to another account" in sent
+        assert "blocker" in sent.lower()
+
+    def test_blocker_ignored_on_success(self):
+        router, client = self._router()
+        router.summarize_completion("t1", [1, 2], True, blocker="stale note")
+        sent = client.query_llm.call_args[0][0][1]["content"]
+        assert "stale note" not in sent
+
+    def test_backward_compatible_without_blocker(self):
+        router, client = self._router()
+        out = router.summarize_completion("t1", [1], False)
+        assert isinstance(out, str) and out
