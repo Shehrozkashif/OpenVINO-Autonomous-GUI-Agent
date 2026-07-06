@@ -146,6 +146,9 @@ class TaskOrchestrator:
         # When None the agent proceeds with the instruction as given.
         self.on_ask = on_ask
         self._stop_event = threading.Event()
+        self._invoke_dead = set()   # targets whose pattern-invoke provably no-ops
+        self._last_was_invoke = False
+        self._last_goal_evidence = ""
         # Set when a subtask completes via a degraded path (loop-guard recovery,
         # optimistic parse-failure success, etc.). Such a task is NOT stored in
         # success memory, so broken plans never poison future routing hints.
@@ -263,6 +266,8 @@ class TaskOrchestrator:
         self._launch_window_baseline = {}
         self._degraded = False
         self._app_anchor = None   # (hwnd, pid, exe) of the task's app window
+        self._invoke_dead = set()   # targets whose pattern-invoke provably no-ops
+        self._last_goal_evidence = ""
         self.log(f"[TASK START] '{instruction}'")
         start_time = time.time()
         self._arm_kill_switch()
@@ -1413,6 +1418,20 @@ class TaskOrchestrator:
                 and getattr(self, "_last_click_xy", None)
             ):
                 self.grounder.mark_dead(step.target, *self._last_click_xy)
+            # The pattern-invoke equivalent of a dead point: the provider
+            # accepted Invoke/Toggle but nothing happened. Coordinates are
+            # not involved, so blacklist the invoke PATH for this target —
+            # the retry then re-executes as a real pixel click.
+            if (
+                step.action_type in ("click", "right_click", "double_click")
+                and getattr(self, "_last_was_invoke", False)
+                and step.target
+            ):
+                self._invoke_dead.add(step.target.lower())
+                self.log(
+                    f"  [INVOKE-DEAD] Pattern invoke on '{step.target}' had no "
+                    f"verified effect — retries will use a pixel click"
+                )
             # A confidently-failed non-idempotent action must also not
             # be blind-retried (Fix C5) — same double-execution risk.
             if not reflection.should_retry or non_idempotent:
@@ -1700,6 +1719,7 @@ class TaskOrchestrator:
 
         # ── Click family ──────────────────────────────────────────────────────
         if step.action_type in ("click", "right_click", "double_click"):
+            self._last_was_invoke = False
             _coords = self._explicit_coords(step.value)
             if _coords is not None:
                 # Explicit pixel coordinates (visual planner / burst convention)
@@ -1731,9 +1751,19 @@ class TaskOrchestrator:
             # was perfectly invokable). Reflection still verifies the visible
             # outcome afterwards. Falls back to the pixel click whenever the
             # control exposes no pattern or the re-lookup misses.
-            if step.action_type == "click" and "uia" in (result.method or ""):
+            # ... unless invoking THIS target already failed verification once:
+            # WebView2 providers accept Invoke/Toggle without doing anything
+            # (live: 'Invite to Teams' invoked 6× with zero screen change —
+            # coordinate blacklists never fire because no pixel is involved).
+            # One failed verify per target sends retries down the pixel path.
+            if (
+                step.action_type == "click"
+                and "uia" in (result.method or "")
+                and (step.target or "").lower() not in self._invoke_dead
+            ):
                 from core import windows_uia
                 if windows_uia.invoke_element(step.target, timeout_s=2.5):
+                    self._last_was_invoke = True
                     return True
 
         # ── Drag ──────────────────────────────────────────────────────────────

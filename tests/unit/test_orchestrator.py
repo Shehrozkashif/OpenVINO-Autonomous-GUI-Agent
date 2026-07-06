@@ -1555,3 +1555,69 @@ class TestStopEventHaltsAttempts:
         )
         orch._goal_already_satisfied(_run_state(), _subtask())
         assert orch._last_goal_evidence == "only a sign-in screen is visible"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Invoke-dead blacklist
+#
+# Live failure (AI-PC 18:41-18:44): 'Invite to Teams' was pattern-invoked six
+# times with zero screen change — WebView2 providers accept Invoke/Toggle
+# without doing anything, and the coordinate blacklist never fires because no
+# pixel is involved. One failed verify must push retries onto the pixel path.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestInvokeDeadBlacklist:
+
+    def _orch(self):
+        orch = _make_orch_loop([])
+        orch.grounder.ground = MagicMock(return_value=GroundingResult(
+            found=True, confidence=1.0, x=533, y=752,
+            latency_ms=5.0, target="Invite to Teams", method="uia",
+            element_type="foreground_interactive",
+        ))
+        return orch
+
+    def _click_step(self):
+        return ActionStep(
+            id=1, subtask_id=1, action_type="click", target="Invite to Teams",
+            value=None, key=None, description="click invite", verification="",
+        )
+
+    def test_failed_invoke_blacklists_target_and_retry_uses_pixels(self):
+        orch = self._orch()
+        step = self._click_step()
+        with patch("core.windows_uia.invoke_element", return_value=True) as inv:
+            assert orch._execute_step(step) is True
+            assert orch._last_was_invoke is True
+
+        # Reflection says the screen never changed → invoke path goes dead.
+        run = _SubtaskRun(started_at=0.0)
+        run.last_error = "Screen unchanged after click"
+        reflection = MagicMock(success=False, confidence=0.98,
+                               should_retry=True, observation="unchanged")
+        orch.reflector.verify = MagicMock(return_value=reflection)
+        orch._judge_reflection(run, step, non_idempotent=False,
+                               pre_click_hash=None)
+        assert "invite to teams" in orch._invoke_dead
+
+        # Retry: invoke must be skipped; the actor performs a real click.
+        with patch("core.windows_uia.invoke_element", return_value=True) as inv2:
+            assert orch._execute_step(step) is True
+            inv2.assert_not_called()
+        orch.actor.execute.assert_called()
+
+    def test_other_targets_still_invoke(self):
+        orch = self._orch()
+        orch._invoke_dead.add("invite to teams")
+        step = ActionStep(
+            id=2, subtask_id=1, action_type="click", target="Calendar",
+            value=None, key=None, description="click calendar", verification="",
+        )
+        orch.grounder.ground = MagicMock(return_value=GroundingResult(
+            found=True, confidence=1.0, x=100, y=200,
+            latency_ms=5.0, target="Calendar", method="uia",
+            element_type="foreground_interactive",
+        ))
+        with patch("core.windows_uia.invoke_element", return_value=True) as inv:
+            assert orch._execute_step(step) is True
+            inv.assert_called_once()

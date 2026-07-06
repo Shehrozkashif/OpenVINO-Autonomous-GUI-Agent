@@ -390,7 +390,12 @@ class RouterAgent:
             f"still achieves the user's full intent. Use a DIFFERENT approach for "
             f"the failed part (different app, method, or route — e.g. GUI instead "
             f"of terminal, search launcher instead of icon, browser instead of a "
-            f"desktop app). depends_on may only reference ids inside this new array."
+            f"desktop app). depends_on may only reference ids inside this new array.\n"
+            f"THE OBJECTIVE NEVER CHANGES: every new plan must still end with the "
+            f"user's original goal accomplished (re-read the Instruction above). "
+            f"If the current screen is a dead end for that goal, plan to NAVIGATE "
+            f"AWAY (a different section, tab, or app) — do NOT reinterpret the "
+            f"goal as whatever the current screen happens to offer."
         )
         if screen_context:
             user_content += f"\n\nCurrently visible on screen: {screen_context}"
