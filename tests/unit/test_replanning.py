@@ -90,8 +90,9 @@ class TestTaskReplanning:
             SubTask(id=2, description="schedule the meeting", depends_on=[1]),
         ]
         orch.router.replan = MagicMock(return_value=recovery)
-        # First subtask fails; every recovery subtask succeeds.
-        orch._execute_subtask = MagicMock(side_effect=[False, True, True])
+        # First subtask fails; recovery subtasks AND the preserved queued
+        # subtask ("schedule the meeting") all succeed.
+        orch._execute_subtask = MagicMock(side_effect=[False, True, True, True])
 
         with _no_burst():
             result = orch.execute("schedule a zoom meeting")
@@ -102,6 +103,8 @@ class TestTaskReplanning:
         assert args[0] == "schedule a zoom meeting"
         assert args[1] == []                      # nothing completed yet
         assert args[2] == "open Zoom"             # the failed subtask
+        # The still-queued downstream work is named so the router excludes it.
+        assert kwargs["pending_descs"] == ["schedule the meeting"]
 
     def test_replanned_ids_are_renumbered_above_existing(self):
         orch = _make_orch()
@@ -115,13 +118,14 @@ class TestTaskReplanning:
             SubTask(id=2, description="b2", depends_on=[1]),
         ]
         orch.router.replan = MagicMock(return_value=recovery)
-        orch._execute_subtask = MagicMock(side_effect=[False, True, True])
+        orch._execute_subtask = MagicMock(side_effect=[False, True, True, True])
 
         with _no_burst():
             result = orch.execute("do the thing")
 
-        # Watermark is 2 (ids 1 and 2 already used) → recovery ids become 3, 4.
-        assert result["subtasks_completed"] == [3, 4]
+        # Watermark is 2 (ids 1 and 2 already used) → recovery ids become 3, 4;
+        # the preserved queued subtask "b" is renumbered above them (5).
+        assert result["subtasks_completed"] == [3, 4, 5]
 
     def test_completed_work_is_preserved_across_replan(self):
         orch = _make_orch()
@@ -355,3 +359,64 @@ class TestMissingParameters:
         assert router.missing_parameters(
             "schedule a zoom meeting tomorrow 3pm titled Sync with bob@x.com"
         ) == []
+
+
+class TestReplanPreservesDownstream:
+    """Regression (live AI-PC 08:20 run): the form was filled perfectly, then
+    a replan re-derived 'remaining work' and emitted only the fill subtask —
+    'click Save and send the invitation' vanished and the run declared success
+    with the form open and unsaved. Queued downstream subtasks must survive a
+    replan verbatim; only the failed subtask's work is rewritten.
+    """
+
+    def test_downstream_subtasks_survive_replan(self):
+        orch = _make_orch()
+        orch._clickable_controls_block = MagicMock(return_value="")
+        orch.router.replan = MagicMock(return_value=[
+            SubTask(id=1, description="fill the form via set_value", depends_on=[]),
+        ])
+        failed = SubTask(id=3, description="fill the form", depends_on=[2])
+        downstream = [
+            SubTask(id=4, description="click Save and send the invitation",
+                    depends_on=[3]),
+        ]
+        executed = [
+            SubTask(id=1, description="open Teams", depends_on=[]),
+            SubTask(id=2, description="open the form", depends_on=[1]),
+        ]
+        out = orch._replan_remaining(
+            "schedule a meeting", ["open Teams", "open the form"],
+            failed, executed, downstream,
+        )
+        assert [s.description for s in out] == [
+            "fill the form via set_value",
+            "click Save and send the invitation",
+        ]
+        # Save depends on the rewrite and keeps a higher id (ID-order safe).
+        assert out[1].depends_on == [out[0].id]
+        assert out[1].id > out[0].id
+
+    def test_empty_downstream_behaves_as_before(self):
+        orch = _make_orch()
+        orch._clickable_controls_block = MagicMock(return_value="")
+        orch.router.replan = MagicMock(return_value=[
+            SubTask(id=1, description="add attendee", depends_on=[]),
+            SubTask(id=2, description="click Save", depends_on=[1]),
+        ])
+        failed = SubTask(id=4, description="click Save", depends_on=[3])
+        out = orch._replan_remaining("instr", [], failed, [], [])
+        assert [s.description for s in out] == ["add attendee", "click Save"]
+
+    def test_router_prompt_names_queued_work_as_off_limits(self):
+        client = MagicMock()
+        client.query_llm = MagicMock(return_value=MagicMock(
+            content='[{"id":1,"description":"fix the fill","depends_on":[]}]'
+        ))
+        router = RouterAgent(client)
+        router.replan(
+            "schedule a meeting", ["open Teams"], "fill the form",
+            pending_descs=["click Save and send the invitation"],
+        )
+        prompt = client.query_llm.call_args[0][0][1]["content"]
+        assert "click Save and send the invitation" in prompt
+        assert "do NOT include them" in prompt

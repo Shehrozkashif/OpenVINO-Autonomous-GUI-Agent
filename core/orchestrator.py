@@ -528,7 +528,15 @@ class TaskOrchestrator:
         executed_subtasks: list[SubTask],
         old_queue: list[SubTask],
     ) -> list[SubTask]:
-        """Ask the router for a fresh plan covering only the remaining work.
+        """Ask the router for a fresh plan of the FAILED subtask's work; the
+        subtasks queued after it are preserved verbatim.
+
+        The replan LLM only ever rewrites the stuck part. Letting it re-derive
+        "everything remaining" from the instruction silently dropped the final
+        'click Save and send the invitation' subtask on a live run — the form
+        was filled perfectly and never saved. Downstream work is appended
+        deterministically; if the rewrite made it obsolete, its own goal check
+        skips it in one cycle.
 
         Returns the new subtask queue (ids renumbered above every id used so
         far, so logs and dependency references never collide), or [] when the
@@ -541,6 +549,7 @@ class TaskOrchestrator:
             fresh = self.router.replan(
                 instruction, completed_descs, failed_subtask.description,
                 screen_context=screen_context,
+                pending_descs=[s.description for s in old_queue],
             )
         except Exception as e:
             self.log(f"  [REPLAN] Router error: {e}")
@@ -560,7 +569,22 @@ class TaskOrchestrator:
             )
             for st in fresh
         ]
-        return self._topological_sort(renumbered)
+        last_new = max(s.id for s in renumbered)
+        # Re-append the untouched downstream queue after the rewrite, deps
+        # rewired: the failed id now means "the rewrite finished", and ids
+        # stay above every new one so the ID-order fallback keeps the order.
+        id_map = {failed_subtask.id: last_new}
+        for i, st in enumerate(old_queue):
+            id_map[st.id] = last_new + 1 + i
+        kept = [
+            SubTask(
+                id=id_map[st.id],
+                description=st.description,
+                depends_on=[id_map.get(d, last_new) for d in st.depends_on],
+            )
+            for st in old_queue
+        ]
+        return self._topological_sort(renumbered + kept)
 
     def _elicit_missing_parameters(self, instruction: str) -> str:
         """Ask the user (via on_ask) for required details the instruction omits,
@@ -1004,9 +1028,12 @@ class TaskOrchestrator:
                         "screen proves it>\"}. satisfied=true ONLY if the end "
                         "state the goal aims at is fully present (e.g. the "
                         "goal is to open a form and that form's controls are "
-                        "on screen). If the goal sets or fills specific "
-                        "values, every value must be visibly present exactly. "
-                        "When uncertain, satisfied=false."
+                        "on screen). In evidence, go REQUIREMENT BY "
+                        "REQUIREMENT: name each value/state the goal asks for "
+                        "and quote what on screen shows it present or "
+                        "missing. satisfied=true only when NONE are missing "
+                        "— a filled title never compensates for a wrong time "
+                        "zone. When uncertain, satisfied=false."
                     ),
                 },
                 {
@@ -1018,7 +1045,7 @@ class TaskOrchestrator:
                 },
             ]
             resp = self.reflector.client.query_llm(
-                messages, max_tokens=200, temperature=0.0
+                messages, max_tokens=280, temperature=0.0
             )
             text = re.sub(r"<think>.*?</think>", "", resp.content, flags=re.DOTALL)
             m = re.search(r"\{.*\}", text, re.DOTALL)
@@ -1033,7 +1060,7 @@ class TaskOrchestrator:
             # "subject is set, but start time is not 3:00 PM"). Hand that to
             # the planner in the same cycle so it works on the missing part
             # instead of redoing the whole subtask from step one.
-            evidence = str(verdict.get("evidence", "")).strip()[:300]
+            evidence = str(verdict.get("evidence", "")).strip()[:400]
             run.goal_check_cache[ctx_key] = (ok, evidence)
             if not ok and evidence:
                 run.screen_context += (

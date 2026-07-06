@@ -830,6 +830,7 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
 
         want = _norm_text(option)
         item_best: list = [None, 0.0]
+        seen_items: list = []   # for the no-match log — the planner's ground truth
 
         def _walk_items(c, depth: int):
             if depth > 8 or item_best[1] >= 1.0:
@@ -840,6 +841,8 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
                     "RadioButtonControl", "MenuItemControl",
                 ):
                     name = _norm_text(c.Name)
+                    if name and len(seen_items) < 15:
+                        seen_items.append(name[:40])
                     score = _match_score(want, name)
                     if score > item_best[1] and score >= 0.65:
                         item_best[0], item_best[1] = c, score
@@ -858,6 +861,14 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
             # search the whole foreground tree once more.
             _walk_items(_uia.GetForegroundControl(), 0)
         if item_best[0] is None:
+            # Name what WAS there: 'GST' matches nothing when the app lists
+            # '(UTC+04:00) Abu Dhabi, Muscat' — the log must show the real
+            # option names so the mismatch is diagnosable, not silent.
+            logger.info(
+                f"[UIA] select: no option matching '{option}' in '{target}'"
+                + (f"; visible items: {', '.join(seen_items)}"
+                   if seen_items else " (no items materialized)")
+            )
             return False
         item = item_best[0]
 

@@ -368,34 +368,47 @@ class RouterAgent:
         completed_descs: list[str],
         failed_desc: str,
         screen_context: str | None = None,
+        pending_descs: list[str] | None = None,
     ) -> list[SubTask]:
-        """Produce a fresh sub-task list covering ONLY the remaining work after a
-        subtask failed mid-task.
+        """Produce a fresh sub-task list for the work of the FAILED subtask.
 
         The router sees what already succeeded (never repeated), which subtask
-        failed (a different approach is required), and the live screen. Returns
-        [] when re-decomposition fails — the caller then aborts as before.
+        failed (a different approach is required), which subtasks are still
+        queued (the orchestrator preserves those verbatim — re-planning them
+        here would duplicate work, and on a live run the model re-deriving
+        "everything remaining" silently dropped the final 'click Save' step),
+        and the live screen. Returns [] when re-decomposition fails.
         """
         done_block = (
             "\n".join(f"  - {d}" for d in completed_descs)
             if completed_descs else "  (none)"
         )
+        pending_block = ""
+        if pending_descs:
+            listed = "\n".join(f"  - {d}" for d in pending_descs)
+            pending_block = (
+                f"\nThese sub-tasks are still QUEUED and will run AFTER your "
+                f"new plan, unchanged — do NOT include them or their work in "
+                f"your answer:\n{listed}\n"
+            )
         user_content = (
             f"Instruction: {instruction}\n{_today_line()}\n\n"
             f"This task is ALREADY IN PROGRESS. Sub-tasks completed successfully "
             f"(do NOT repeat them, their effects are already on the machine):\n"
             f"{done_block}\n\n"
             f"This sub-task FAILED: '{failed_desc}'\n"
-            f"Re-plan the REMAINING work as a fresh JSON array of sub-tasks that "
-            f"still achieves the user's full intent. Use a DIFFERENT approach for "
-            f"the failed part (different app, method, or route — e.g. GUI instead "
+            f"{pending_block}"
+            f"Re-plan the FAILED sub-task's work as a fresh JSON array of "
+            f"sub-tasks (you may split it into several). Use a DIFFERENT "
+            f"approach (different app, method, or route — e.g. GUI instead "
             f"of terminal, search launcher instead of icon, browser instead of a "
             f"desktop app). depends_on may only reference ids inside this new array.\n"
-            f"THE OBJECTIVE NEVER CHANGES: every new plan must still end with the "
-            f"user's original goal accomplished (re-read the Instruction above). "
-            f"If the current screen is a dead end for that goal, plan to NAVIGATE "
-            f"AWAY (a different section, tab, or app) — do NOT reinterpret the "
-            f"goal as whatever the current screen happens to offer."
+            f"THE OBJECTIVE NEVER CHANGES: your plan plus the completed and "
+            f"queued sub-tasks must still accomplish the user's original goal "
+            f"(re-read the Instruction above). If the current screen is a dead "
+            f"end for that goal, plan to NAVIGATE AWAY (a different section, "
+            f"tab, or app) — do NOT reinterpret the goal as whatever the "
+            f"current screen happens to offer."
         )
         if screen_context:
             user_content += f"\n\nCurrently visible on screen: {screen_context}"
