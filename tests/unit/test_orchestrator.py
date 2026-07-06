@@ -1780,3 +1780,105 @@ class TestOcclusionGate:
             outcome = orch._run_step_attempts(run, subtask, step)
         assert outcome == "step_failed"
         assert "Meeting created" in run.last_error
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Planner-done needs evidence + typed text must land in the NAMED field
+# (regression, live AI-PC run 2026-07-06 13:05: planner returned [] "goal
+# achieved" for 'set the date to 07/08/2026' while Start date read
+# '7/6/2026'; later an attendee email was typed into the Title field and the
+# content-only type verify blessed it).
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _plan_orch(planned):
+    orch = _make_orch_loop([])
+    orch.planner.plan_steps = MagicMock(return_value=planned)
+    orch._ensure_anchor_foreground = MagicMock()
+    return orch
+
+
+class TestPlannerDoneNeedsEvidence:
+
+    def test_empty_plan_with_no_actions_is_rejected(self):
+        orch = _plan_orch([])
+        run = _SubtaskRun(started_at=0.0)
+        subtask = SubTask(id=1, description="set the date to 07/08/2026",
+                          depends_on=[])
+        outcome, step = orch._plan_next_step(run, subtask, [])
+        assert outcome != "done"
+        assert step is None
+        assert any("no action was executed" in c for c in run.completed)
+
+    def test_empty_plan_after_real_action_is_trusted(self):
+        orch = _plan_orch([])
+        run = _SubtaskRun(started_at=0.0)
+        run.completed = ["[set_value] date set to 07/08/2026"]
+        subtask = SubTask(id=1, description="set the date to 07/08/2026",
+                          depends_on=[])
+        outcome, _ = orch._plan_next_step(run, subtask, [])
+        assert outcome == "done"
+
+    def test_excluded_kind_gets_forced_goal_check(self):
+        orch = _plan_orch([])
+        run = _SubtaskRun(started_at=0.0)
+        run.type_payload = "07/08/2026"
+        subtask = SubTask(id=1, description="set the date to 07/08/2026",
+                          depends_on=[])
+        # Pre-plan check (excluded kind) → False; forced confirm → True.
+        orch._goal_already_satisfied = MagicMock(side_effect=[False, True])
+        outcome, _ = orch._plan_next_step(run, subtask, [])
+        assert outcome == "done"
+        _, kwargs = orch._goal_already_satisfied.call_args
+        assert kwargs.get("skip_exclusions") is True
+
+    def test_skip_exclusions_reaches_the_llm(self):
+        orch = _goal_check_orch(
+            '{"satisfied": true, "confidence": 0.9, "evidence": "date shows"}'
+        )
+        run = _run_state()
+        run.type_payload = "07/08/2026"
+        # Excluded normally: no LLM call, plain False.
+        assert orch._goal_already_satisfied(run, _subtask()) is False
+        assert orch.reflector.client.query_llm.call_count == 0
+        # Forced: the LLM is consulted.
+        assert orch._goal_already_satisfied(
+            run, _subtask(), skip_exclusions=True
+        ) is True
+        assert orch.reflector.client.query_llm.call_count == 1
+
+
+class TestTypedTextTargetCheck:
+
+    def _info(self, name, value):
+        return {"name": name, "value": value,
+                "control_type": "EditControl", "rect": (0, 0, 10, 10)}
+
+    def test_wrong_field_rejected(self, monkeypatch):
+        orch = _make_orch_loop([])
+        monkeypatch.setattr(
+            "core.windows_uia.focused_element_info",
+            lambda **kw: self._info(
+                "Add title", "project discussionshehrozkashif57@gmail.com"),
+        )
+        assert orch._typed_text_in_focused_control(
+            "shehrozkashif57@gmail.com", "Add required attendees"
+        ) is False
+
+    def test_right_field_accepted(self, monkeypatch):
+        orch = _make_orch_loop([])
+        monkeypatch.setattr(
+            "core.windows_uia.focused_element_info",
+            lambda **kw: self._info(
+                "Add required attendees", "shehrozkashif57@gmail.com"),
+        )
+        assert orch._typed_text_in_focused_control(
+            "shehrozkashif57@gmail.com", "Add required attendees"
+        ) is True
+
+    def test_no_target_checks_content_only(self, monkeypatch):
+        orch = _make_orch_loop([])
+        monkeypatch.setattr(
+            "core.windows_uia.focused_element_info",
+            lambda **kw: self._info("Whatever", "hello world"),
+        )
+        assert orch._typed_text_in_focused_control("hello world") is True

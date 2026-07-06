@@ -140,6 +140,17 @@ class ActionExecutionAgent:
         if not step.value:
             logger.error(f"[ACTION] type step {step.id} has no value")
             return False
+        # When the step names its destination field, focus it through the
+        # accessibility tree first. Typing into "whatever holds focus" put an
+        # attendee email into the Title field on a live run — the click that
+        # was supposed to move focus never landed.
+        if step.target:
+            from core import windows_uia
+            if not windows_uia.focus_element(step.target):
+                logger.warning(
+                    f"[ACTION] type step {step.id}: could not focus "
+                    f"'{step.target}' via the tree — typing into current focus"
+                )
         value, sensitive = self._substitute_credentials(step.value)
         use_cb = self._should_use_clipboard(step, value)
         return self.controller.type_text(

@@ -287,7 +287,11 @@ real control and self-verify, where blind clicking on a dropdown is a guess:
   Checkbox / radio ("Waiting room", "AM/PM") →  invoke target="<label>"
   Confirm the form                           →  click "Save" / "Schedule" / "Done" (visible text)
 FALLBACK: when set_value/select FAILS on a field (custom-drawn control), use the
-mouse route instead: click the field → hotkey ctrl+a → type the value.
+mouse route instead: click the field → hotkey ctrl+a → type the value, and give
+the type step target="<field label>" too — typing without a target lands in
+whichever field happens to hold focus (an attendee email once landed in Title).
+NEVER use click+type on a field whose exact name is in CLICKABLE CONTROLS
+unless set_value already failed on it this subtask.
 Dropdown fallback: click the dropdown → wait "0.5" → click the option text.
 Fill ALL fields the goal names before clicking Save/Schedule — a form submitted
 half-filled is a failed subtask even if the dialog closes.

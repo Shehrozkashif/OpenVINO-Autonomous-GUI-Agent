@@ -402,3 +402,46 @@ class TestSetValueKeyboardFallback:
                                      value="project progress"))
         assert ok is True
         fe.assert_not_called()
+
+
+class TestTypeFocusesNamedTarget:
+    """Regression (live 13:05 run): a type step's text landed in the Title
+    field because the preceding click never moved focus. A type step that
+    names its field must focus it through the tree before typing.
+    """
+
+    def _agent(self):
+        from unittest.mock import MagicMock
+
+        from agents.action import ActionExecutionAgent
+        controller = MagicMock()
+        controller.type_text = MagicMock(return_value=True)
+        return ActionExecutionAgent(controller)
+
+    def _step(self, target):
+        from core.protocols import ActionStep
+        return ActionStep(id=1, subtask_id=1, action_type="type",
+                          target=target, value="a@b.com", key=None,
+                          description="type email", verification="")
+
+    def test_type_with_target_focuses_via_tree(self):
+        from unittest import mock
+        agent = self._agent()
+        with mock.patch("core.windows_uia.focus_element",
+                        return_value=True) as f:
+            assert agent.execute(self._step("Add required attendees")) is True
+        f.assert_called_once_with("Add required attendees")
+
+    def test_type_without_target_skips_focus(self):
+        from unittest import mock
+        agent = self._agent()
+        with mock.patch("core.windows_uia.focus_element") as f:
+            assert agent.execute(self._step(None)) is True
+        f.assert_not_called()
+
+    def test_focus_failure_still_types(self):
+        from unittest import mock
+        agent = self._agent()
+        with mock.patch("core.windows_uia.focus_element", return_value=False):
+            assert agent.execute(self._step("Add required attendees")) is True
+        agent.controller.type_text.assert_called_once()

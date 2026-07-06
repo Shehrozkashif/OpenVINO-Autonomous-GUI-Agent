@@ -593,15 +593,19 @@ class TestOrchestratorBurstIntegration:
         """Burst failure → orchestrator continues with the normal planning loop."""
         orch = self._make_orch(planner_side_effect=[None])
         orch.burst_executor.run.return_value = BurstResult(False, 0, "grounding failed")
+        # Planner-done with zero executed actions now demands screen proof:
+        # the goal check confirms on the cycle after the planner returns None.
+        orch._goal_already_satisfied = MagicMock(side_effect=[False, True])
 
         result = orch._execute_subtask(SubTask(id=1, description="create new folder", depends_on=[]))
 
-        assert result is True  # planner returned None → goal achieved
+        assert result is True  # planner returned None → goal check confirmed
         orch.planner.plan_steps.assert_called()
 
     def test_no_burst_pattern_goes_directly_to_planner(self):
         """Subtask with no burst pattern → burst_executor.run is never called."""
         orch = self._make_orch(planner_side_effect=[None])
+        orch._goal_already_satisfied = MagicMock(side_effect=[False, True])
         result = orch._execute_subtask(SubTask(id=1, description="open the file manager", depends_on=[]))
         assert result is True
         orch.burst_executor.run.assert_not_called()

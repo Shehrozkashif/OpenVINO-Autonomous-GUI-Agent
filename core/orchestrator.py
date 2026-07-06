@@ -298,9 +298,15 @@ class TaskOrchestrator:
             similar = self.memory.find_similar(instruction, threshold=0.80)
             if similar:
                 descs = [s.get("description", "") for s in similar.get("steps", [])]
+                # "Reuse if it fits" alone let a stored plan REPLACE proper
+                # decomposition: a past run's subtask list became the whole
+                # plan — no launch, no Save, no invite (live 13:05 run).
                 memory_hint = (
                     f"Similar past task (succeeded): '{similar['instruction']}'. "
-                    f"Subtasks used: {descs}. Reuse if it fits."
+                    f"Subtasks used: {descs}. Treat this only as a hint for "
+                    f"approach — your plan must still cover the ENTIRE current "
+                    f"instruction end to end (launching the app, every value "
+                    f"it names, and the final save/send/confirm step)."
                 )
                 self.log(f"[MEMORY] Similar past task found (sim={similar['similarity']:.2f})")
         except Exception:
@@ -991,7 +997,10 @@ class TaskOrchestrator:
         except Exception:
             return ""
 
-    def _goal_already_satisfied(self, run: "_SubtaskRun", subtask: SubTask) -> bool:
+    def _goal_already_satisfied(
+        self, run: "_SubtaskRun", subtask: SubTask,
+        skip_exclusions: bool = False,
+    ) -> bool:
         """One focused LLM question: does the current screen already show the
         state this subtask is trying to reach?
 
@@ -1001,7 +1010,8 @@ class TaskOrchestrator:
         else (uncertainty, parse failure, missing values) plans normally.
         Subtask kinds with deterministic completion checks are excluded.
         """
-        if (run.is_launch_goal or run.is_cmd_subtask
+        if not skip_exclusions and (
+                run.is_launch_goal or run.is_cmd_subtask
                 or run.save_target or run.type_payload):
             return False
         # Same screen → same answer: don't re-pay a 6-10 s LLM call to re-ask
@@ -1199,6 +1209,36 @@ class TaskOrchestrator:
                                 "target file is not on disk]"
                             )
                             return self._note_planning_failure(run), None
+                        # A planner returning [] before ANY action executed in
+                        # this subtask claims the work was already done by
+                        # someone else — demand screen evidence (live: 'set
+                        # the date to 07/08/2026' was declared achieved while
+                        # Start date read '7/6/2026'). Kinds normally excluded
+                        # from the goal check get a forced check here; for the
+                        # rest, this cycle's pre-plan check already said the
+                        # goal is NOT on screen.
+                        acted = any(
+                            not c.startswith("[FAILED") for c in run.completed
+                        )
+                        if not acted:
+                            _excluded = (
+                                run.is_launch_goal or run.is_cmd_subtask
+                                or run.save_target or run.type_payload
+                            )
+                            confirmed = _excluded and self._goal_already_satisfied(
+                                run, subtask, skip_exclusions=True
+                            )
+                            if not confirmed:
+                                self.log(
+                                    "  Planner declared done with no action "
+                                    "taken and no screen evidence — rejecting"
+                                )
+                                run.completed.append(
+                                    "[FAILED: planner declared done, but the "
+                                    "goal state is not on screen and no "
+                                    "action was executed]"
+                                )
+                                return self._note_planning_failure(run), None
                         return "done", None   # planner says goal is achieved
                     step, run.step_queue = planned[0], list(planned[1:])
         except PlanningParseError as e:
@@ -1293,7 +1333,7 @@ class TaskOrchestrator:
             # reflection when the control exposes no readable value.
             if step.action_type == "type":
                 time.sleep(0.3)   # let the control commit the input
-                if self._typed_text_in_focused_control(step.value):
+                if self._typed_text_in_focused_control(step.value, step.target):
                     self.log(
                         "  [TYPE-VERIFY] Focused control contains the typed "
                         "text — verified via accessibility tree"
@@ -2138,15 +2178,20 @@ class TaskOrchestrator:
         except OSError:
             return False
 
-    def _typed_text_in_focused_control(self, text: str | None) -> bool:
+    def _typed_text_in_focused_control(
+        self, text: str | None, target: str | None = None,
+    ) -> bool:
         """Deterministic type verification: the focused control's accessible
-        value contains the text that was just typed.
+        value contains the text that was just typed — and, when the step
+        names a destination field, the focused control IS that field.
 
-        Reads the real widget content from the accessibility tree — exact and
-        ~50 ms, versus the ~3-4 s OCR+LLM reflection call it replaces. Returns
-        False (fall back to reflection) when the text is trivial, contains a
-        credential placeholder (substituted at execution time, and secrets must
-        not be read back), or the control exposes no readable value.
+        Content alone is not enough: an attendee email typed into the Title
+        field still "contains the typed text" (seen live). Reads the real
+        widget from the accessibility tree — exact and ~50 ms, versus the
+        ~3-4 s OCR+LLM reflection call it replaces. Returns False (fall back
+        to reflection) when the text is trivial, contains a credential
+        placeholder, the control exposes no readable value, or the focused
+        control's name does not match the intended field.
         """
         if not text or len(text.strip()) < 2 or "{{cred:" in text:
             return False
@@ -2160,6 +2205,15 @@ class TaskOrchestrator:
             def _norm(s: str) -> str:
                 return re.sub(r"\s+", " ", s).strip().lower()
 
+            if target:
+                name = _norm((info or {}).get("name") or "")
+                want = _norm(target)
+                if not name or (want not in name and name not in want):
+                    self.log(
+                        f"  [TYPE-VERIFY] Focus is on '{name or '?'}', not "
+                        f"'{target}' — text landed in the wrong field"
+                    )
+                    return False
             return _norm(text) in _norm(value)
         except Exception:
             return False
