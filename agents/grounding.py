@@ -170,10 +170,6 @@ class OCREngine:
 
         return words
 
-    def invalidate_cache(self):
-        """Clear all cached OCR results (call after an action changes the screen)."""
-        self._cache.clear()
-
     def find_text(
         self,
         words: list[OCRWord],
@@ -272,9 +268,6 @@ class ElementCache:
         screen_hash: str, element_type: str = "foreground_interactive",
     ):
         self._cache[target] = (x, y, conf, method, element_type, time.time(), screen_hash)
-
-    def invalidate(self):
-        self._cache.clear()
 
     def drop(self, target: str):
         """Remove one target's entry (e.g. its coordinate was proven inert)."""
@@ -573,9 +566,6 @@ class UIGroundingAgent:
         return GroundingResult(x=0, y=0, confidence=0.0, found=False,
                                latency_ms=(time.time() - start) * 1000,
                                target=target, method="failed")
-
-    def ground_multiple(self, targets: list[str]) -> list[GroundingResult]:
-        return [self.ground(t) for t in targets]
 
     # ── grounding stages ──────────────────────────────────────────────────────
 

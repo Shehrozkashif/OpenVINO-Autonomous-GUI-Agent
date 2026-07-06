@@ -1530,3 +1530,20 @@ class TestGoalAlreadySatisfied:
         before = run.screen_context
         assert orch._goal_already_satisfied(run, _subtask()) is True
         assert run.screen_context == before
+
+
+class TestStopEventHaltsAttempts:
+    """Live failure 2026-07-05 16:06: EMERGENCY STOP fired mid-step, but the
+    agent kept grounding/clicking for 38 more seconds — only the outer step
+    loop checked the stop event. The attempt loop must bail immediately."""
+
+    def test_attempt_loop_exits_on_stop_event(self):
+        orch = _make_orch_loop([])
+        orch._stop_event.set()
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="click", target="New event",
+            value=None, key=None, description="click", verification="",
+        )
+        run = _SubtaskRun(started_at=0.0)
+        assert orch._run_step_attempts(run, MagicMock(), step) == "step_failed"
+        orch.actor.execute.assert_not_called()

@@ -1000,6 +1000,10 @@ class TaskOrchestrator:
             _elems = get_interactive_elements(max_elements=60, timeout_s=3.0)
             if _elems:
                 _names = ", ".join(f"'{n}' [{t}]" for n, t in _elems)
+                # Bound the prompt cost: ~3 KB ≈ 700 tokens ≈ seconds of
+                # prefill per planning cycle on the iGPU.
+                if len(_names) > 3000:
+                    _names = _names[:3000].rsplit(", ", 1)[0] + ", …(truncated)"
                 logger.info(
                     f"[PLANNING] UIA clickable controls ({len(_elems)}): {_names}"
                 )
@@ -1163,6 +1167,12 @@ class TaskOrchestrator:
         )
 
         for attempt in range(self.config.max_retries_per_step):
+            # The kill switch must halt attempts IMMEDIATELY: one verify round
+            # here costs 20-40 s of model calls, and a live run kept clicking
+            # for 38 s after EMERGENCY STOP because only the outer step loop
+            # checked the event.
+            if self._stop_event.is_set():
+                return "step_failed"
             if attempt > 0:
                 self.log(f"  Retry {attempt}/{self.config.max_retries_per_step}…")
 
@@ -2217,6 +2227,8 @@ class TaskOrchestrator:
         prev_ocr_text = ""
 
         for i in range(self.config.max_scroll_find_attempts):
+            if self._stop_event.is_set():
+                break
             self.log(
                 f"  [SCROLL-FIND] '{target}' not visible — scroll {i + 1}/"
                 f"{self.config.max_scroll_find_attempts}"

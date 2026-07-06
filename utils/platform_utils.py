@@ -234,11 +234,3 @@ def _detect_intel_gpus() -> list[GPUInfo]:
         pass
     return gpus
 
-
-def gpu_summary(gpus: list[GPUInfo]) -> str:
-    """One-line summary of detected GPUs."""
-    if not gpus:
-        return "No GPUs detected (CPU-only mode)"
-    total_vram = sum(g.vram_mb for g in gpus)
-    names = ", ".join(f"GPU{g.index} {g.name} ({g.vram_gb}GB)" for g in gpus)
-    return f"{len(gpus)}× {gpus[0].backend.upper()} — {names} — total {round(total_vram/1024,1)}GB VRAM"
