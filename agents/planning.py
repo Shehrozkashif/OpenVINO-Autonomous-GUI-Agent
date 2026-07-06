@@ -299,6 +299,10 @@ unless set_value already failed on it this subtask.
 Dropdown fallback: click the dropdown → wait "0.5" → click the option text.
 Fill ALL fields the goal names before clicking Save/Schedule — a form submitted
 half-filled is a failed subtask even if the dialog closes.
+Field values come from the TASK, verbatim. NEVER invent placeholders — no
+'example@example.com', no 'Conference Room 1' (a live run saved a real meeting
+that invited example@example.com). Fields the task does not mention stay
+untouched.
 
 ━━━ POPUP / DIALOG HANDLING ━━━
 If the screen shows an unexpected dialog, dismiss it BEFORE continuing:

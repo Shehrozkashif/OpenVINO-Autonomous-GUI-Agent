@@ -2008,3 +2008,46 @@ class TestGoalCheckSeesLastAction:
         orch._goal_already_satisfied(run, _subtask())
         prompt = orch.reflector.client.query_llm.call_args[0][0][1]["content"]
         assert "Last verified action" not in prompt
+
+
+class TestBlockingOverlayInContext:
+    """Regression (live 15:14-15:24 run): the occlusion gate correctly
+    refused to click Save under the 'Meeting created' popup, but its hint in
+    the step-failure record was ignored for six ~60 s planning cycles while
+    'Close' sat in the controls list. The proven overlay must enter the
+    SCREEN CONTEXT, the channel the planner reliably follows.
+    """
+
+    def test_gate_records_overlay_for_context(self):
+        orch = _make_orch_occl(method="uia")
+        step = _send_click()
+        with patch("core.windows_uia.covering_element",
+                   return_value="Meeting created"):
+            assert orch._execute_step(step) is False
+        assert orch._blocking_overlay == ("Send", "Meeting created")
+
+    def test_overlay_line_reaches_planner_context_once(self):
+        orch = _plan_orch([ActionStep(
+            id=1, subtask_id=1, action_type="click", target="Close",
+            value=None, key=None, description="close popup", verification="",
+        )])
+        orch._blocking_overlay = ("Save", "Meeting created")
+        run = _SubtaskRun(started_at=0.0)
+        outcome, _ = orch._plan_next_step(
+            run, SubTask(id=1, description="click Save", depends_on=[]), [],
+        )
+        assert outcome == "step"
+        assert "BLOCKING OVERLAY" in run.screen_context
+        assert "Meeting created" in run.screen_context
+        assert orch._blocking_overlay is None   # one-shot until re-blocked
+
+    def test_no_overlay_no_line(self):
+        orch = _plan_orch([ActionStep(
+            id=1, subtask_id=1, action_type="click", target="Save",
+            value=None, key=None, description="save", verification="",
+        )])
+        run = _SubtaskRun(started_at=0.0)
+        orch._plan_next_step(
+            run, SubTask(id=1, description="click Save", depends_on=[]), [],
+        )
+        assert "BLOCKING OVERLAY" not in run.screen_context

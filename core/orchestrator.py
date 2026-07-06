@@ -163,6 +163,7 @@ class TaskOrchestrator:
         self._last_goal_evidence = ""
         self._last_controls = None   # controls snapshot for verifier diffing
         self._exec_fail_reason = ""
+        self._blocking_overlay = None   # (target, cover) from the hit-test gate
         # Set when a subtask completes via a degraded path (loop-guard recovery,
         # optimistic parse-failure success, etc.). Such a task is NOT stored in
         # success memory, so broken plans never poison future routing hints.
@@ -283,6 +284,7 @@ class TaskOrchestrator:
         self._invoke_dead = set()   # targets whose pattern-invoke provably no-ops
         self._last_goal_evidence = ""
         self._last_controls = None
+        self._blocking_overlay = None
         self.log(f"[TASK START] '{instruction}'")
         start_time = time.time()
         self._arm_kill_switch()
@@ -1148,6 +1150,21 @@ class TaskOrchestrator:
         # imaginary name. Click targets must come from names that exist.
         run.screen_context += self._clickable_controls_block()
 
+        # A hit-test-proven overlay goes into the SCREEN CONTEXT, the one
+        # channel the planner reliably follows — the same fact in the step
+        # failure record was ignored for six straight cycles while the
+        # overlay's own 'Close' button sat in the controls list.
+        _overlay = getattr(self, "_blocking_overlay", None)
+        if _overlay:
+            run.screen_context += (
+                f"\nBLOCKING OVERLAY (hit-test ground truth): clicks on "
+                f"'{_overlay[0]}' physically land on '{_overlay[1]}' — a "
+                f"popup/overlay is on top of the form. NOTHING beneath it "
+                f"can react until it is dismissed via its own control "
+                f"(Close / Cancel / OK / X) from the list above."
+            )
+            self._blocking_overlay = None   # re-set by the next blocked click
+
         # Ask "is this goal ALREADY met?" before planning another action.
         # Without this, "click X to open Y" subtasks loop after they succeed:
         # once Y is open, every further click is a no-op that state-describing
@@ -1651,6 +1668,7 @@ class TaskOrchestrator:
                         f"'{step.target}': an overlay/dialog is on top; "
                         f"dismiss it before retrying"
                     )
+                    self._blocking_overlay = (step.target or "", _cover)
                     self.log(
                         f"  [OCCLUSION] '{step.target}' is covered by "
                         f"'{_cover}'"
@@ -1988,6 +2006,10 @@ class TaskOrchestrator:
                         f"overlay/dialog is on top; dismiss it (its Close/"
                         f"Cancel/OK button) before retrying"
                     )
+                    # Also surface it in the screen context: the failure
+                    # record alone was ignored for six planning cycles while
+                    # 'Close' sat in the controls list (live 15:14-15:24).
+                    self._blocking_overlay = (step.target or "", _cover)
                     self.log(
                         f"  [OCCLUSION] '{step.target}' at ({x},{y}) is "
                         f"covered by '{_cover}' — click would not reach it"
