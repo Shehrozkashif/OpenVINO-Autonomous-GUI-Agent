@@ -75,3 +75,36 @@ class TestCheckpointLifecycle:
         mem.clear_checkpoint("task one")
         assert mem.load_checkpoint("task one") is None
         assert mem.load_checkpoint("task two") == ["x", "y"]
+
+
+class TestFindSimilarStringRatio:
+    """find_similar is difflib-based — recognises the user re-running a
+    near-identical instruction without any embedding model."""
+
+    def test_near_identical_instruction_matches(self, tmp_path):
+        from unittest.mock import MagicMock
+        mem = TaskMemory(db_path=str(tmp_path / "m.db"))
+        sub = MagicMock()
+        sub.model_dump.return_value = {"description": "open Outlook"}
+        mem.store_successful_task("schedule a meeting in outlook at 3pm", [sub], 60.0)
+        hit = mem.find_similar("schedule a meeting in outlook at 4pm", threshold=0.80)
+        assert hit is not None
+        assert hit["steps"] == [{"description": "open Outlook"}]
+
+    def test_unrelated_instruction_returns_none(self, tmp_path):
+        from unittest.mock import MagicMock
+        mem = TaskMemory(db_path=str(tmp_path / "m.db"))
+        sub = MagicMock()
+        sub.model_dump.return_value = {"description": "open Notepad"}
+        mem.store_successful_task("write a note in notepad and save it", [sub], 30.0)
+        assert mem.find_similar("play music in spotify", threshold=0.80) is None
+
+    def test_repeat_run_increments_success_count(self, tmp_path):
+        from unittest.mock import MagicMock
+        mem = TaskMemory(db_path=str(tmp_path / "m.db"))
+        sub = MagicMock()
+        sub.model_dump.return_value = {"description": "open Outlook"}
+        mem.store_successful_task("schedule a meeting in outlook", [sub], 60.0)
+        mem.store_successful_task("schedule a meeting in outlook", [sub], 80.0)
+        rows = mem.conn.execute("SELECT success_count FROM tasks").fetchall()
+        assert rows == [(2,)]

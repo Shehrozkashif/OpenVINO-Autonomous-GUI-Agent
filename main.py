@@ -24,13 +24,11 @@ from memory.task_memory import TaskMemory
 from ui.main_window import DesktopGUIAgent
 
 
-def _warmup_models(client: OVMSClient, task_memory: TaskMemory | None = None) -> None:
-    """Fire cheap dummy requests to the LLM and VLM, and pre-load the
-    sentence-transformer embedder, in a background thread. The first real user
-    request would otherwise pay a cold-start penalty of several seconds (model
-    loading into device memory) or, for the embedder, a one-time ~80s
-    download/load mid-task. Failures are silently ignored — warmup is best-effort
-    and must not block or crash the UI.
+def _warmup_models(client: OVMSClient) -> None:
+    """Fire cheap dummy requests to the LLM and VLM in a background thread.
+    The first real user request would otherwise pay a cold-start penalty of
+    several seconds (model loading into device memory). Failures are silently
+    ignored — warmup is best-effort and must not block or crash the UI.
     """
     import threading
 
@@ -70,12 +68,6 @@ def _warmup_models(client: OVMSClient, task_memory: TaskMemory | None = None) ->
             logger.info("[STARTUP] VLM warmup done")
         except Exception as e:
             logger.debug(f"[STARTUP] VLM warmup skipped: {e}")
-        if task_memory is not None:
-            try:
-                _ = task_memory.embedder  # triggers SentenceTransformer download/load
-                logger.info("[STARTUP] Embedder warmup done")
-            except Exception as e:
-                logger.debug(f"[STARTUP] Embedder warmup skipped: {e}")
 
     threading.Thread(target=_do_warmup, daemon=True).start()
 
@@ -93,7 +85,7 @@ def build_orchestrator() -> TaskOrchestrator:
     ocr = OCREngine()
     task_memory = TaskMemory()
 
-    _warmup_models(client, task_memory)
+    _warmup_models(client)
 
     return TaskOrchestrator(
         router=RouterAgent(client),

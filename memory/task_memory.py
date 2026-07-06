@@ -5,14 +5,16 @@
   failure_patterns — steps/targets that failed and how they were recovered
                      (used as planning hints to avoid repeating known failures)
 
-First use downloads ~80MB sentence-transformer model (all-MiniLM-L6-v2).
+Similarity is plain difflib string matching: the feature exists to recognise
+the user re-running a near-identical instruction, which is exactly string
+similarity — no embedding model (and its torch stack, startup cost, and
+network dependency) needed for that.
 """
+import difflib
 import json
 import sqlite3
 import time
 from pathlib import Path
-
-import numpy as np
 
 
 class TaskMemory:
@@ -20,7 +22,6 @@ class TaskMemory:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self._create_tables()
-        self._embedder = None
 
     def _create_tables(self):
         self.conn.execute("""
@@ -58,16 +59,7 @@ class TaskMemory:
         """)
         self.conn.commit()
 
-    @property
-    def embedder(self):
-        if self._embedder is None:
-            from sentence_transformers import SentenceTransformer
-            self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
-        return self._embedder
-
     def store_successful_task(self, instruction: str, subtasks: list, duration_s: float):
-        embedding = self.embedder.encode(instruction).astype(np.float32).tobytes()
-        # FIX: use model_dump() for Pydantic models, not __dict__
         steps_json = json.dumps([s.model_dump() for s in subtasks])
 
         existing = self.find_similar(instruction, threshold=0.95)
@@ -79,23 +71,21 @@ class TaskMemory:
             """, (time.time(), duration_s, existing["id"]))
         else:
             self.conn.execute("""
-                INSERT INTO tasks (instruction, embedding, steps_json, last_used, avg_duration_s)
-                VALUES (?, ?, ?, ?, ?)
-            """, (instruction, embedding, steps_json, time.time(), duration_s))
+                INSERT INTO tasks (instruction, steps_json, last_used, avg_duration_s)
+                VALUES (?, ?, ?, ?)
+            """, (instruction, steps_json, time.time(), duration_s))
         self.conn.commit()
 
     def find_similar(self, instruction: str, threshold: float = 0.85) -> dict | None:
-        """Find a semantically similar past task. Returns None if nothing above threshold."""
-        query_emb = self.embedder.encode(instruction).astype(np.float32)
+        """Find a similar past task by string ratio. None if nothing above threshold."""
         rows = self.conn.execute(
-            "SELECT id, instruction, embedding, steps_json FROM tasks"
+            "SELECT id, instruction, steps_json FROM tasks"
         ).fetchall()
 
+        query = instruction.lower().strip()
         best_score, best_row = 0.0, None
-        for row_id, inst, emb_bytes, steps_json in rows:
-            stored = np.frombuffer(emb_bytes, dtype=np.float32)
-            score = float(np.dot(query_emb, stored) /
-                         (np.linalg.norm(query_emb) * np.linalg.norm(stored)))
+        for row_id, inst, steps_json in rows:
+            score = difflib.SequenceMatcher(None, query, inst.lower().strip()).ratio()
             if score > best_score:
                 best_score = score
                 best_row = {"id": row_id, "instruction": inst,

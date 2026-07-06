@@ -14,8 +14,8 @@ httpx>=0.25.0
 pydantic>=2.4.0
 
 # ── Memory ────────────────────────────────────────────────────────────────────
-sentence-transformers>=2.2.0
-numpy>=1.24.0
+# Task/failure memory is SQLite + difflib (stdlib) — no embedding model.
+numpy>=1.24.0                      # used directly by agents/grounding.py
 
 # ── Inference backend: OpenVINO™ Model Server (OVMS) ──────────────────────────
 # The server itself is external — installed as the native ovms/ovms.exe binary;
