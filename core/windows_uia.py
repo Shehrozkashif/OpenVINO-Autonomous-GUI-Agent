@@ -331,8 +331,17 @@ def get_interactive_elements(
             out: list = []
             seen: set = set()
 
-            native = _native_interactive_elements(_uia.GetForegroundControl())
-            if native is not None:
+            # All same-process windows, not just the foreground one — a picker
+            # popup or dropdown the user can plainly see must be in the
+            # planner's list too.
+            any_native = False
+            for root in _same_process_roots():
+                if len(out) >= max_elements:
+                    break
+                native = _native_interactive_elements(root)
+                if native is None:
+                    continue
+                any_native = True
                 for name, tname, rect, offscreen, _el in native:
                     if (
                         not name
@@ -348,6 +357,7 @@ def get_interactive_elements(
                         out.append((name, tname.replace("Control", "")))
                         if len(out) >= max_elements:
                             break
+            if any_native:
                 result[0] = out
                 return
 
@@ -531,6 +541,35 @@ def save_dialog_open(timeout_s: float = 1.2) -> bool | None:
 # can be verified by reading the control state straight back — no OCR, no VLM.
 
 
+def _same_process_roots():
+    """Search roots: the foreground window plus every other visible top-level
+    window OWNED BY THE SAME PROCESS.
+
+    Popups (date pickers, attendee-suggestion dropdowns, confirmation dialogs)
+    routinely open as sibling top-level windows — a foreground-only search is
+    blind to their controls even though the user sees them. General across
+    apps: same-process windows are, by construction, part of the app under
+    automation.
+    """
+    fg = _uia.GetForegroundControl()
+    roots = [fg]
+    try:
+        fg_pid = fg.ProcessId
+        for win in _uia.GetRootControl().GetChildren():
+            try:
+                if win.Handle == fg.Handle or win.ProcessId != fg_pid:
+                    continue
+                rect = win.BoundingRectangle
+                if (rect.right - rect.left) < 10 or (rect.bottom - rect.top) < 10:
+                    continue
+                roots.append(win)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return roots
+
+
 def _find_control(query: str, timeout_s: float, control_types: frozenset | None = None):
     """Locate the best-matching UIA control object for `query`.
 
@@ -545,9 +584,11 @@ def _find_control(query: str, timeout_s: float, control_types: frozenset | None 
     # Native batch first — the recursive walk below cannot reach controls
     # buried in WebView2/Electron trees. Offscreen elements are kept: UIA
     # patterns (Invoke/Value) work on them where a pixel click cannot.
-    native = _native_interactive_elements(_uia.GetForegroundControl())
-    if native is not None:
-        best_el, best_native = None, 0.0
+    best_el, best_native = None, 0.0
+    for root in _same_process_roots():
+        native = _native_interactive_elements(root)
+        if native is None:
+            continue
         for name, tname, _rect, _offscreen, el in native:
             if not name:
                 continue
@@ -556,12 +597,12 @@ def _find_control(query: str, timeout_s: float, control_types: frozenset | None 
             score = _match_score(query, name.lower())
             if score >= 0.65 and score > best_native:
                 best_el, best_native = el, score
-                if score >= 1.0:
-                    break
-        if best_el is not None:
-            ctrl = _control_from_element(best_el)
-            if ctrl is not None:
-                return ctrl
+        if best_native >= 1.0:
+            break
+    if best_el is not None:
+        ctrl = _control_from_element(best_el)
+        if ctrl is not None:
+            return ctrl
 
     best: list = [None, 0.0]   # control, score
 
@@ -743,6 +784,25 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
         return True
 
     return _run_uia_action(f"select('{option}' in '{target}')", _do, timeout_s)
+
+
+def focus_element(target: str, timeout_s: float = 3.0) -> bool:
+    """Give keyboard focus to the control named `target` via UIA SetFocus.
+
+    The general way into fields that expose no ValuePattern (date/time
+    segments, custom web widgets): focus them through the tree, then type.
+    Returns False when the control cannot be found — callers fall back to
+    click-based focusing.
+    """
+    def _do():
+        ctrl = _find_control(target, timeout_s, None)
+        if ctrl is None:
+            return False
+        ctrl.SetFocus()
+        logger.info(f"[UIA] focus '{target}' ({ctrl.ControlTypeName})")
+        return True
+
+    return _run_uia_action(f"focus('{target}')", _do, timeout_s)
 
 
 def invoke_element(target: str, timeout_s: float = 3.0) -> bool:

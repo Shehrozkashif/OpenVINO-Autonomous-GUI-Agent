@@ -2,12 +2,19 @@
 """Action Execution Agent — physically executes action steps on the desktop.
 Calls the Tool Server (not pyautogui directly) via DesktopController.
 """
+import re
 import time
 
 from loguru import logger
 
 from core.controller import DesktopController
 from core.protocols import ActionStep
+
+
+def _alnum(s: str) -> str:
+    """Lowercase alphanumerics only — read-back comparison that survives the
+    app reformatting input ('7/7/2026' shown back as 'Tue 7/7/2026')."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 _TERMINAL_WORDS = frozenset(
     ("terminal", "command", "shell", "bash", "sh", "prompt", "console", "run")
@@ -179,9 +186,32 @@ class ActionExecutionAgent:
         if not step.target or step.value is None:
             logger.error(f"[ACTION] set_value step {step.id} needs target and value")
             return False
-        value, _sensitive = self._substitute_credentials(step.value)
+        value, sensitive = self._substitute_credentials(step.value)
         from core import windows_uia
-        return windows_uia.set_element_value(step.target, value)
+        if windows_uia.set_element_value(step.target, value):
+            return True
+        # Fields without a writable ValuePattern (date/time segments, custom
+        # web widgets) still take keyboard input: focus via the tree, replace
+        # the content, verify by reading the focused control back.
+        if not windows_uia.focus_element(step.target):
+            return False
+        self.controller.hotkey("ctrl", "a")
+        if not self.controller.type_text(value, sensitive=sensitive):
+            return False
+        time.sleep(0.3)   # let the app commit the input before read-back
+        info = windows_uia.focused_element_info() or {}
+        typed = _alnum(value)
+        seen = _alnum(str(info.get("value", "")))
+        ok = bool(typed) and bool(seen) and (typed in seen or seen in typed)
+        if ok:
+            logger.info(f"[ACTION] set_value via focus+type '{step.target}' (verified)")
+        else:
+            logger.warning(
+                f"[ACTION] set_value focus+type read-back mismatch on "
+                f"'{step.target}': typed '{value[:40]}', field shows "
+                f"'{str(info.get('value', ''))[:40]}'"
+            )
+        return ok
 
     def _do_select(self, step, x, y, x2, y2) -> bool:
         if not step.target or not step.value:

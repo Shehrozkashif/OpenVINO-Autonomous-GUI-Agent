@@ -336,3 +336,69 @@ class TestInvokePatternChain:
     def test_all_patterns_fail_returns_false_for_click_fallback(self):
         ctrl = _fake_ctrl("ButtonControl", {})
         assert _run_invoke(ctrl) is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# set_value keyboard fallback (focus + type + read-back)
+#
+# Demo blocker (AI-PC 16:19 run): the Outlook event form's date/time fields
+# expose no writable ValuePattern — set_element_value fails, and clicking the
+# compound row is inert. Keyboard input still works: focus via the tree,
+# ctrl+a, type, verify against the focused control's value.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSetValueKeyboardFallback:
+
+    def _agent(self):
+        agent = ActionExecutionAgent(controller=MagicMock())
+        agent.controller.hotkey.return_value = True
+        agent.controller.type_text.return_value = True
+        return agent
+
+    def _run(self, agent, focused_value="Tue 7/7/2026"):
+        with patch("core.windows_uia.set_element_value", return_value=False), \
+             patch("core.windows_uia.focus_element", return_value=True) as fe, \
+             patch("core.windows_uia.focused_element_info",
+                   return_value={"value": focused_value}), \
+             patch("agents.action.time.sleep"):
+            ok = agent.execute(_step("set_value", target="Start date",
+                                     value="7/7/2026"))
+        return ok, fe
+
+    def test_focus_type_verified_by_reformatted_readback(self):
+        """App reformats '7/7/2026' to 'Tue 7/7/2026' — still a verify."""
+        agent = self._agent()
+        ok, fe = self._run(agent)
+        assert ok is True
+        fe.assert_called_once_with("Start date")
+        agent.controller.hotkey.assert_called_once_with("ctrl", "a")
+        agent.controller.type_text.assert_called_once()
+
+    def test_readback_mismatch_returns_false(self):
+        agent = self._agent()
+        ok, _ = self._run(agent, focused_value="1/1/2020")
+        assert ok is False
+
+    def test_empty_readback_returns_false(self):
+        """Unreadable field ≠ verified — the step must not claim success."""
+        agent = self._agent()
+        ok, _ = self._run(agent, focused_value="")
+        assert ok is False
+
+    def test_focus_failure_skips_typing(self):
+        agent = self._agent()
+        with patch("core.windows_uia.set_element_value", return_value=False), \
+             patch("core.windows_uia.focus_element", return_value=False):
+            ok = agent.execute(_step("set_value", target="Start date",
+                                     value="7/7/2026"))
+        assert ok is False
+        agent.controller.type_text.assert_not_called()
+
+    def test_value_pattern_success_skips_fallback(self):
+        agent = self._agent()
+        with patch("core.windows_uia.set_element_value", return_value=True), \
+             patch("core.windows_uia.focus_element") as fe:
+            ok = agent.execute(_step("set_value", target="Add title",
+                                     value="project progress"))
+        assert ok is True
+        fe.assert_not_called()
