@@ -3,16 +3,27 @@
 
 Execution flow:
   instruction
+    → elicit missing parameters from the user (time, recipient, …)
     → Router.decompose() → SubTasks (topologically sorted)
     → for each SubTask (dynamic loop, sees live screen every step):
-        screen_context + task_context → plan_next_step() → ActionStep
-        [click/drag]    Grounding.ground() → (x, y)
-        [grounding miss] _scroll_to_find() → retry ≤ max_scroll_find_attempts×
-        [extract]        _extract_data()   → LLM reads OCR → stores value
-        Action.execute(step)
-        Reflection.verify(step) → success?
-        failure embedded in history → next plan_next_step sees it and recovers
-    → Router.summarize_completion()
+        launch-skip: "open X" is done if X already owns the foreground
+        screen context = OCR + CLICKABLE CONTROLS (accessibility tree,
+          disabled controls labeled) + SYSTEM CLOCK + goal-check evidence
+        goal check: one LLM yes/no — is this subtask ALREADY satisfied?
+          (cached per screen state; a confident yes completes the subtask)
+        plan_next_step() → ActionStep
+        [click]          Grounding.ground() → (x, y); UIA-grounded clicks
+                         try pattern invoke first, pixel click as fallback
+                         (invoke blacklisted per target after a failed verify)
+        [grounding miss] _scroll_to_find(); misses cached per screen state
+        [set_value]      UIA ValuePattern, else focus + type + read-back
+        [extract]        _extract_data() → LLM reads OCR → stores value
+        Action.execute(step)  (action firewall vets typed text first)
+        Reflection.verify(step): phash delta → LLM on OCR (+ focused-control
+          ground truth) → VLM screenshot check on uncertainty
+        failures: dead-point + invoke blacklists, app-anchor refocus when a
+          click escapes to another process, replan with the objective pinned
+    → Router.summarize_completion() (+ [BLOCKER] evidence when failed)
     → return extracted_data alongside success/failure
 """
 import json
@@ -693,7 +704,8 @@ class TaskOrchestrator:
 
     def _maybe_set_app_anchor(self, description: str):
         """Record the foreground window as the task's app anchor after a
-        successful launch subtask ("open X" / "launch X" / "start X")."""
+        successful launch subtask ("open X" / "launch X" / "start X").
+        """
         desc = description.lower()
         if not self._LAUNCH_DESC_RX.match(desc) or "already" in desc:
             return
@@ -707,7 +719,8 @@ class TaskOrchestrator:
     def _ensure_anchor_foreground(self):
         """Bring the task's app window back to the foreground if something
         else has covered it. Same-process windows (dialogs, pickers) count as
-        the anchor being active. Drops the anchor when its window is gone."""
+        the anchor being active. Drops the anchor when its window is gone.
+        """
         anchor = getattr(self, "_app_anchor", None)
         if not anchor:
             return
@@ -2166,7 +2179,7 @@ class TaskOrchestrator:
         #    BACK the field through the accessibility tree to confirm the paste
         #    actually landed before pressing Enter (a too-early Enter saves
         #    under the default name and the dialog closes silently).
-        for attempt in range(2):
+        for _attempt in range(2):
             self._execute_step(_step("hotkey", key="ctrl+a", desc="Select filename field"))
             if not self._execute_step(_step("type", value=typed_path, desc="Type save path")):
                 return False

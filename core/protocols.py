@@ -1,37 +1,13 @@
 # core/protocols.py
 """Shared data models and the InferenceClient Protocol."""
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
 from core.ovms_client import InferenceResponse
 
-# ── Agent communication enums / models ───────────────────────────────────────
-
-class AgentRole(str, Enum):
-    ROUTER = "router"
-    PLANNING = "planning"
-    GROUNDING = "grounding"
-    ACTION = "action"
-    REFLECTION = "reflection"
-
-
-class A2AMessage(BaseModel):
-    from_agent: AgentRole
-    to_agent: AgentRole
-    message_type: str       # "task" | "result" | "error" | "status"
-    payload: dict
-    task_id: str
-    step_id: int | None = None
-
-
-class TaskRequest(BaseModel):
-    instruction: str
-    task_id: str
-    context: dict | None = None
-
+# ── Task decomposition models ─────────────────────────────────────────────────
 
 class SubTask(BaseModel):
     id: int

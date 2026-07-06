@@ -217,7 +217,8 @@ class TestAppHintWholeWordMatching:
 class TestFailureSummaryCarriesBlocker:
     """Live failure 2026-07-05 17:53-18:02: Teams sat at its sign-in window
     for 9 minutes and the run ended with just 'task failed' — while the goal
-    check had named the blocker every cycle. The summary must surface it."""
+    check had named the blocker every cycle. The summary must surface it.
+    """
 
     def _router(self):
         client = MagicMock()

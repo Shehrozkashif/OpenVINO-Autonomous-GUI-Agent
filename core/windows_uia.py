@@ -167,8 +167,8 @@ def _native_interactive_elements(root, max_items: int = 400) -> list | None:
 
 
 def _rect_tuple_valid(rect: tuple) -> bool:
-    l, t, r, b = rect
-    return r > l and b > t and r > 0 and b > 0
+    left, top, right, bottom = rect
+    return right > left and bottom > top and right > 0 and bottom > 0
 
 
 def _native_best_match(root, query: str, threshold: float):

@@ -79,7 +79,8 @@ class TestCheckpointLifecycle:
 
 class TestFindSimilarStringRatio:
     """find_similar is difflib-based — recognises the user re-running a
-    near-identical instruction without any embedding model."""
+    near-identical instruction without any embedding model.
+    """
 
     def test_near_identical_instruction_matches(self, tmp_path):
         from unittest.mock import MagicMock

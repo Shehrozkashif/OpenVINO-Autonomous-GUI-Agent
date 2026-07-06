@@ -452,14 +452,16 @@ class TestNegativeGroundingCache:
     (VLM + rephrase LLM + tree searches + scroll hunt, 15-20 s) re-ran ~15×
     for the same absent target on the same screen. A miss on an unchanged
     screen is deterministic — cache it; invalidate on screen change or when
-    a new dead point could change the outcome."""
+    a new dead point could change the outcome.
+    """
 
     def _agent(self):
         agent = _fast_agent()
         agent.ocr.is_available.return_value = False
         agent.min_confidence = 0.5
         agent.client = MagicMock()   # rephrase LLM
-        resp = MagicMock(); resp.content = '["A", "B", "C"]'
+        resp = MagicMock()
+        resp.content = '["A", "B", "C"]'
         agent.client.query_llm.return_value = resp
         agent.cache = ElementCache()
         agent.vlm = None
@@ -468,7 +470,7 @@ class TestNegativeGroundingCache:
     def test_second_miss_on_same_screen_skips_cascade(self):
         agent = self._agent()
         with patch("agents.grounding._uia_ok", return_value=False), \
-             patch.object(agent, "_vlm_coords", return_value=None) as vlm:
+             patch.object(agent, "_vlm_coords", return_value=None):
             first = agent.ground("Save")
             assert first.found is False
             calls_after_first = agent.client.query_llm.call_count

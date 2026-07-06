@@ -1,6 +1,11 @@
 # agents/action.py
-"""Action Execution Agent — physically executes action steps on the desktop.
-Calls the Tool Server (not pyautogui directly) via DesktopController.
+"""Action Execution Agent — physically executes ActionSteps on the desktop.
+
+Dispatches each step to a _do_<action_type> handler. Pointer/keyboard steps
+go through DesktopController (raw Win32 SendInput); the structured
+set_value / select / invoke steps go through the UIA patterns in
+core/windows_uia, with a focus-and-type keyboard fallback for fields that
+expose no writable ValuePattern.
 """
 import re
 import time
@@ -13,7 +18,8 @@ from core.protocols import ActionStep
 
 def _alnum(s: str) -> str:
     """Lowercase alphanumerics only — read-back comparison that survives the
-    app reformatting input ('7/7/2026' shown back as 'Tue 7/7/2026')."""
+    app reformatting input ('7/7/2026' shown back as 'Tue 7/7/2026').
+    """
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 _TERMINAL_WORDS = frozenset(

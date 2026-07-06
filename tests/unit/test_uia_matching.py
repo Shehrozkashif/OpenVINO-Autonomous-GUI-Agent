@@ -57,7 +57,8 @@ class TestInteractivePreference:
 
     def test_button_substring_beats_badge_exact(self):
         """'NEW' badge (TextControl, exact) must lose to the 'New meeting'
-        ButtonControl (substring) — decoration is unclickable."""
+        ButtonControl (substring) — decoration is unclickable.
+        """
         result = _walk_and_match(_root(BADGE, BUTTON), "new", 0.65, max_depth=5)
         assert result is not None
         x, y, conf = result
@@ -70,7 +71,8 @@ class TestInteractivePreference:
 
     def test_decorative_fallback_when_nothing_interactive(self):
         """A text-only match is still returned (discounted) when no
-        interactive control matches at all."""
+        interactive control matches at all.
+        """
         result = _walk_and_match(_root(BADGE), "new", 0.65, max_depth=5)
         assert result is not None
         x, y, conf = result
@@ -190,7 +192,8 @@ class TestGetInteractiveElementsNative:
 class TestDisabledControls:
     """Regression (live AI-PC 19:12-19:19): Teams' grayed 'Save' ate 10
     minutes — every stage kept serving a button that cannot respond. Disabled
-    controls must be skipped as click candidates and labeled for the planner."""
+    controls must be skipped as click candidates and labeled for the planner.
+    """
 
     def test_disabled_button_never_a_click_candidate(self):
         elems = _batch(

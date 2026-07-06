@@ -896,7 +896,7 @@ class TestInterleavedRepeats:
     """
 
     def test_type_repeat_survives_interleaved_click(self):
-        """type ×2 allowed (limit 1 = one repeat); an interleaved click does
+        """Type ×2 allowed (limit 1 = one repeat); an interleaved click does
         not reset the count, so the 3rd type total fires the guard.
         Planner called 4 times (guard fires while recording step 4).
         """
@@ -908,8 +908,9 @@ class TestInterleavedRepeats:
         assert orch.planner.plan_steps.call_count == 4
 
     def test_click_repeat_survives_interleaved_type(self):
-        """click ×3 allowed (limit 2); an interleaved type does not reset the
-        count, so the 4th click total fires the guard at step 5."""
+        """Click ×3 allowed (limit 2); an interleaved type does not reset the
+        count, so the 4th click total fires the guard at step 5.
+        """
         cs = _step_loop("click", target="Btn")
         ts = _step_loop("type", target=None, value="x")
         orch = _make_orch_loop([cs, cs, cs, ts, cs])
@@ -1391,7 +1392,8 @@ class TestPlanQueue:
 
     def test_queue_flushed_on_uncertain_nonidempotent(self):
         """An uncertain-but-accepted type drops the queue: the 'next step
-        verifies live' guarantee requires a fresh plan."""
+        verifies live' guarantee requires a fresh plan.
+        """
         t = _step_loop("type", target=None, value="hello world")
         b = _step_loop("key_press", target=None, key="enter")
         orch = _make_orch_loop([])
@@ -1405,7 +1407,8 @@ class TestPlanQueue:
 
 class TestSaveTargetDiskGate:
     """A "save as <path>" subtask has one ground truth: the file on disk.
-    The planner's "goal achieved" must never overrule its absence."""
+    The planner's "goal achieved" must never overrule its absence.
+    """
 
     def _save_subtask(self):
         return SubTask(
@@ -1512,7 +1515,8 @@ class TestGoalAlreadySatisfied:
     def test_unsatisfied_evidence_fed_to_planner_context(self):
         """Live failure 2026-07-05 16:31+: after a replan the planner redid the
         whole fill-details subtask (re-set the title, re-clicked the date)
-        because the goal check's "what's missing" evidence was discarded."""
+        because the goal check's "what's missing" evidence was discarded.
+        """
         orch = _goal_check_orch(
             '{"satisfied": false, "confidence": 0.9, '
             '"evidence": "subject is set, but start time is not 3:00 PM"}'
@@ -1535,7 +1539,8 @@ class TestGoalAlreadySatisfied:
 class TestStopEventHaltsAttempts:
     """Live failure 2026-07-05 16:06: EMERGENCY STOP fired mid-step, but the
     agent kept grounding/clicking for 38 more seconds — only the outer step
-    loop checked the stop event. The attempt loop must bail immediately."""
+    loop checked the stop event. The attempt loop must bail immediately.
+    """
 
     def test_attempt_loop_exits_on_stop_event(self):
         orch = _make_orch_loop([])
@@ -1586,7 +1591,7 @@ class TestInvokeDeadBlacklist:
     def test_failed_invoke_blacklists_target_and_retry_uses_pixels(self):
         orch = self._orch()
         step = self._click_step()
-        with patch("core.windows_uia.invoke_element", return_value=True) as inv:
+        with patch("core.windows_uia.invoke_element", return_value=True):
             assert orch._execute_step(step) is True
             assert orch._last_was_invoke is True
 
@@ -1624,7 +1629,8 @@ class TestInvokeDeadBlacklist:
 
     def test_same_screen_verdict_cached_no_second_llm_call(self):
         """Latency: identical screens must not re-pay the goal-check LLM call
-        (live: the same 'Save present but…' answer was recomputed ~10×)."""
+        (live: the same 'Save present but…' answer was recomputed ~10×).
+        """
         orch = _goal_check_orch(
             '{"satisfied": false, "confidence": 0.9, '
             '"evidence": "attendee field is empty"}'

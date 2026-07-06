@@ -84,9 +84,10 @@ The system is organised into five layers. Every agent depends only on the
 `InferenceClient` protocol — never on a concrete backend — so the inference
 engine is drop-in replaceable.
 
-> **New to the code?** Start with the [Code Tour](docs/CODE_TOUR.md) — a
-> guided reading order through the modules, the design principles behind
-> recurring patterns, and an end-to-end trace of a real task.
+> **New to the code?** Start with [ARCHITECTURE.md](ARCHITECTURE.md) — the
+> current end-to-end pipeline, the table of ground-truth mechanisms, and a
+> one-line map of every file. The [Code Tour](docs/CODE_TOUR.md) adds a
+> guided reading order through the modules.
 
 ```mermaid
 flowchart TB
