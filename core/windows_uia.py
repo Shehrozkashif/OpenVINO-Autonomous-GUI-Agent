@@ -861,6 +861,30 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
             # search the whole foreground tree once more.
             _walk_items(_uia.GetForegroundControl(), 0)
         if item_best[0] is None:
+            # Virtualized popups (WebView2 date/time combos) render their
+            # items OUTSIDE the accessibility tree — there is nothing to
+            # select, ever. But these combos accept a typed value: write it
+            # through ValuePattern, the same ground truth set_element_value
+            # uses (live: 'Start time' listed no items for 14 minutes while
+            # a direct '3:00 PM' write verified instantly).
+            try:
+                vp = ctrl.GetValuePattern()
+                if not getattr(vp, "IsReadOnly", False):
+                    vp.SetValue(option)
+                    readback = _norm_text(vp.Value or "")
+                    if want and (want in readback or readback in want):
+                        if expanded_here:
+                            try:
+                                ctrl.GetExpandCollapsePattern().Collapse()
+                            except Exception:
+                                pass
+                        logger.info(
+                            f"[UIA] select '{option}' in '{target}' (via "
+                            f"ValuePattern — no list items in the tree)"
+                        )
+                        return True
+            except Exception:
+                pass
             # Name what WAS there: 'GST' matches nothing when the app lists
             # '(UTC+04:00) Abu Dhabi, Muscat' — the log must show the real
             # option names so the mismatch is diagnosable, not silent.

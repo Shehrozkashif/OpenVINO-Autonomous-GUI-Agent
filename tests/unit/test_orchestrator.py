@@ -1882,3 +1882,57 @@ class TestTypedTextTargetCheck:
             lambda **kw: self._info("Whatever", "hello world"),
         )
         assert orch._typed_text_in_focused_control("hello world") is True
+
+
+class TestLatencyGuards:
+    """Two pure-waste patterns from the live 13:36 run: a 10-16 s goal check
+    between every queued step (the planner is not even consulted there), and
+    3 identical retries of deterministic tree actions.
+    """
+
+    def test_goal_check_skipped_while_queue_pending(self):
+        orch = _plan_orch([])
+        orch._goal_already_satisfied = MagicMock(return_value=True)
+        run = _SubtaskRun(started_at=0.0)
+        run.step_queue = [ActionStep(
+            id=9, subtask_id=1, action_type="click", target="X",
+            value=None, key=None, description="queued", verification="",
+        )]
+        outcome, step = orch._plan_next_step(
+            run, SubTask(id=1, description="fill the form", depends_on=[]), [],
+        )
+        assert outcome == "step"
+        assert step.description == "queued"
+        orch._goal_already_satisfied.assert_not_called()
+
+    def test_failed_tree_action_not_blind_retried(self):
+        orch = _make_orch_loop([])
+        orch.config.max_retries_per_step = 3
+        orch._execute_step = MagicMock(return_value=False)
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="select", target="Start time",
+            value="3:00 PM", key=None, description="set time", verification="",
+        )
+        out = orch._run_step_attempts(
+            _SubtaskRun(started_at=0.0),
+            SubTask(id=1, description="set the start time", depends_on=[]),
+            step,
+        )
+        assert out == "step_failed"
+        orch._execute_step.assert_called_once()
+
+    def test_failed_click_still_gets_retries(self):
+        orch = _make_orch_loop([])
+        orch.config.max_retries_per_step = 3
+        orch._execute_step = MagicMock(return_value=False)
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="click", target="Save",
+            value=None, key=None, description="click save", verification="",
+        )
+        out = orch._run_step_attempts(
+            _SubtaskRun(started_at=0.0),
+            SubTask(id=1, description="click Save", depends_on=[]),
+            step,
+        )
+        assert out == "step_failed"
+        assert orch._execute_step.call_count == 3

@@ -1121,7 +1121,11 @@ class TaskOrchestrator:
         # commands, saves and typing have their own deterministic checks.
         # (Runs BEFORE the clock line is appended: the check is cached per
         # screen-context and the clock changes every minute.)
-        if self._goal_already_satisfied(run, subtask):
+        # Skipped while queued steps remain: the queue was planned against
+        # this context moments ago and the planner is not consulted between
+        # queue pops — paying 10-16 s of LLM per queued step re-answers a
+        # question nobody reads (live: ~1 min of pure goal checks per form).
+        if not run.step_queue and self._goal_already_satisfied(run, subtask):
             self.log("  [GOAL-CHECK] Goal already satisfied on current screen")
             return ("done", None)
 
@@ -1322,6 +1326,12 @@ class TaskOrchestrator:
                     getattr(self, "_exec_fail_reason", "")
                     or "execution failed (element not found or action error)"
                 )
+                # Tree actions are deterministic: the same pattern call
+                # against the same tree gives the same result — blind
+                # retries only burn seconds (live: the same 'no option'
+                # miss re-ran 3× per cycle for minutes).
+                if step.action_type in ("set_value", "select", "invoke"):
+                    break
                 continue
 
             if skip_reflection:

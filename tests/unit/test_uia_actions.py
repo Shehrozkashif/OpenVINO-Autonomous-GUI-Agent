@@ -445,3 +445,56 @@ class TestTypeFocusesNamedTarget:
         with mock.patch("core.windows_uia.focus_element", return_value=False):
             assert agent.execute(self._step("Add required attendees")) is True
         agent.controller.type_text.assert_called_once()
+
+
+class TestSelectValuePatternFallback:
+    """Regression (live 13:36 run): Teams' 'Start time' combo materializes NO
+    list items in the tree ('visible items: system') — select failed 15× over
+    14 minutes while a direct ValuePattern write verifies instantly. When no
+    option matches, select_option must fall back to writing the value.
+    """
+
+    class _FakeVP:
+        IsReadOnly = False
+
+        def __init__(self):
+            self.Value = "2:00 PM"
+
+        def SetValue(self, v):
+            self.Value = v
+
+    class _FakeCombo:
+        ControlTypeName = "ComboBoxControl"
+        Name = "Start time"
+
+        def __init__(self, vp):
+            self._vp = vp
+
+        def GetValuePattern(self):
+            return self._vp
+
+        def GetExpandCollapsePattern(self):
+            raise RuntimeError("no pattern")
+
+        def GetChildren(self):
+            return []
+
+    def _run_select(self, vp):
+        import core.windows_uia as wu
+        combo = self._FakeCombo(vp)
+        with patch.object(wu, "_load", return_value=True), \
+             patch.object(wu, "_thread_com_init", return_value=None), \
+             patch.object(wu, "_uia", MagicMock()), \
+             patch.object(wu, "_find_control", return_value=combo):
+            return wu.select_option("Start time", "3:00 PM")
+
+    def test_no_items_falls_back_to_value_write(self):
+        vp = self._FakeVP()
+        assert self._run_select(vp) is True
+        assert vp.Value == "3:00 PM"
+
+    def test_readonly_value_still_fails_honestly(self):
+        vp = self._FakeVP()
+        vp.IsReadOnly = True
+        assert self._run_select(vp) is False
+        assert vp.Value == "2:00 PM"   # never written
