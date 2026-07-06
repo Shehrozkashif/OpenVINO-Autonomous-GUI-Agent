@@ -415,18 +415,13 @@ class UIGroundingAgent:
             f"screen — next attempt must find a different point"
         )
 
-    def ground(self, target: str, max_retries: int = 1) -> GroundingResult:
-        """Locate a UI element by natural language description.
-        Returns GroundingResult with screen (x, y). found=False if all stages fail.
-
-        On failure, asks the LLM for 3 alternative phrasings and retries each
-        before giving up — covers cases where the model used different label text
-        than what OCR actually detected on screen.
+    def _prepare_screen(self, target: str):
+        """Shared prelude of ground()/ground_fast(): capture, thumbnail,
+        scale factors, screen hash (recorded as the target's grounding
+        origin — mark_dead() keys the blacklist to it), and that screen's
+        dead points for this target.
         """
-        start = time.time()
-
-        screenshot = self.capturer.capture()
-        display = screenshot.copy()
+        display = self.capturer.capture().copy()
         display.thumbnail((self._DISPLAY_W, self._DISPLAY_H), Image.LANCZOS)
         dw, dh = display.width, display.height
         # Guard against zero-sized thumbnails (can happen on headless/virtual displays)
@@ -438,6 +433,18 @@ class UIGroundingAgent:
         if len(self._ground_hash) > 128:
             self._ground_hash.pop(next(iter(self._ground_hash)))
         dead = self._dead.get((target.lower(), screen_hash), [])
+        return display, scale_x, scale_y, screen_hash, dead
+
+    def ground(self, target: str, max_retries: int = 1) -> GroundingResult:
+        """Locate a UI element by natural language description.
+        Returns GroundingResult with screen (x, y). found=False if all stages fail.
+
+        On failure, asks the LLM for 3 alternative phrasings and retries each
+        before giving up — covers cases where the model used different label text
+        than what OCR actually detected on screen.
+        """
+        start = time.time()
+        display, scale_x, scale_y, screen_hash, dead = self._prepare_screen(target)
         cached = self.cache.get(target, screen_hash)
         if cached and dead and self._near_dead(cached[0], cached[1], dead):
             self.cache.drop(target)
@@ -513,18 +520,8 @@ class UIGroundingAgent:
         for 30-50 s just to confirm not-found; this method returns immediately.
         """
         start = time.time()
-        screenshot = self.capturer.capture()
-        display = screenshot.copy()
-        display.thumbnail((self._DISPLAY_W, self._DISPLAY_H), Image.LANCZOS)
-        dw, dh = display.width, display.height
-        scale_x = self.screen_w / dw if dw > 0 else 1.0
-        scale_y = self.screen_h / dh if dh > 0 else 1.0
-
+        display, scale_x, scale_y, _screen_hash, dead = self._prepare_screen(target)
         words = self.ocr.extract(display) if self.ocr.is_available() else []
-
-        screen_hash = str(imagehash.phash(display))
-        self._ground_hash[target.lower()] = screen_hash
-        dead = self._dead.get((target.lower(), screen_hash), [])
 
         if _uia_ok():
             r = _uia_find(target)
