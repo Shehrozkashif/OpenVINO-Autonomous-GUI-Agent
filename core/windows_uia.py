@@ -886,8 +886,13 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
             except Exception:
                 pass
             # Name what WAS there: 'GST' matches nothing when the app lists
-            # '(UTC+04:00) Abu Dhabi, Muscat' — the log must show the real
-            # option names so the mismatch is diagnosable, not silent.
+            # '(UTC+04:00) Abu Dhabi, Muscat' — the mismatch must reach the
+            # PLANNER (via pop_select_miss), not just the log, so it can pick
+            # the app's real label or scroll the list for more.
+            global _last_select_miss
+            _last_select_miss = {
+                "target": target, "option": option, "items": list(seen_items),
+            }
             logger.info(
                 f"[UIA] select: no option matching '{option}' in '{target}'"
                 + (f"; visible items: {', '.join(seen_items)}"
@@ -923,6 +928,19 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
         return True
 
     return _run_uia_action(f"select('{option}' in '{target}')", _do, timeout_s)
+
+
+_last_select_miss: dict | None = None
+
+
+def pop_select_miss() -> dict | None:
+    """The last select_option no-match details ({target, option, items}),
+    cleared on read. Ground truth for the planner's failure record: the
+    option the plan asked for versus the labels the app actually shows.
+    """
+    global _last_select_miss
+    miss, _last_select_miss = _last_select_miss, None
+    return miss
 
 
 def focus_element(target: str, timeout_s: float = 3.0) -> bool:

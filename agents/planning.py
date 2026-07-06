@@ -284,6 +284,10 @@ Forms are filled FIELD BY FIELD with the structured actions — they act on the
 real control and self-verify, where blind clicking on a dropdown is a guess:
   Text field ("Topic", "Title", "Search")    →  set_value target="<field label>" value="<text>"
   Dropdown / combo (date, time, duration)    →  select target="<control name>" value="<option>"
+  select values must be the app's FULL option label, not the user's shorthand:
+  a time zone is '(UTC+04:00) Abu Dhabi, Muscat', never 'GST'. If the exact
+  label is unknown, click the dropdown open and take it from CLICKABLE
+  CONTROLS (scroll the open list to reveal options beyond the first few).
   Checkbox / radio ("Waiting room", "AM/PM") →  invoke target="<label>"
   Confirm the form                           →  click "Save" / "Schedule" / "Done" (visible text)
 FALLBACK: when set_value/select FAILS on a field (custom-drawn control), use the

@@ -617,9 +617,16 @@ class RouterAgent:
         return subtasks
 
     def summarize_completion(
-        self, task_id: str, completed: list, success: bool, blocker: str = ""
+        self, task_id: str, completed: list, success: bool, blocker: str = "",
+        skipped: list | None = None,
     ) -> str:
         content = f"Task {'succeeded' if success else 'failed'}. Sub-tasks completed: {completed}."
+        if skipped:
+            content += (
+                f" These sub-tasks could NOT be completed and were skipped: "
+                f"{skipped}. The summary MUST say the task partially "
+                f"succeeded and name what was skipped."
+            )
         if blocker and not success:
             content += (
                 f" Screen evidence of what blocked it: {blocker}. "

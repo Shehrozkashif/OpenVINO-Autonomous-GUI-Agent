@@ -420,3 +420,46 @@ class TestReplanPreservesDownstream:
         prompt = client.query_llm.call_args[0][0][1]["content"]
         assert "click Save and send the invitation" in prompt
         assert "do NOT include them" in prompt
+
+
+class TestSkipExhaustedSubtask:
+    """Regression (live 14:12 run): the GST time-zone hunt burned the whole
+    replan budget and the task died with attendees + Save still queued — the
+    filled form was thrown away. A permanently-failed subtask with work
+    queued behind it is skipped (degraded, named in the summary); a failed
+    LAST subtask still fails the task (skipping it would fake success).
+    """
+
+    def _orch(self):
+        orch = _make_orch(OrchestratorConfig(max_task_replans=0))
+        plan = [
+            SubTask(id=1, description="set the time zone to GST", depends_on=[]),
+            SubTask(id=2, description="click Save to create the meeting",
+                    depends_on=[1]),
+        ]
+        orch.router.decompose = MagicMock(return_value=("t1", plan))
+        return orch
+
+    def test_failed_subtask_with_downstream_is_skipped(self):
+        orch = self._orch()
+        orch._execute_subtask = MagicMock(side_effect=[False, True])
+
+        with _no_burst():
+            result = orch.execute("schedule a meeting")
+
+        assert result["success"] is True          # Save ran and succeeded
+        assert result["subtasks_completed"] == [2]
+        assert orch._degraded is True             # never stored as clean
+        orch.memory.store_successful_task.assert_not_called()
+        # The summary is told exactly what was skipped.
+        _, kwargs = orch.router.summarize_completion.call_args
+        assert kwargs["skipped"] == ["set the time zone to GST"]
+
+    def test_failed_last_subtask_still_fails_task(self):
+        orch = self._orch()
+        orch._execute_subtask = MagicMock(side_effect=[True, False])
+
+        with _no_burst():
+            result = orch.execute("schedule a meeting")
+
+        assert result["success"] is False

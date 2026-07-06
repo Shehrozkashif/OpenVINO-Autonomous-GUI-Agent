@@ -1936,3 +1936,75 @@ class TestLatencyGuards:
         )
         assert out == "step_failed"
         assert orch._execute_step.call_count == 3
+
+
+class TestSelectMissReachesPlanner:
+    """Regression (live 14:12 run): 'select GST' failed with the real labels
+    visible only in the log — the planner's failure record said nothing, so
+    it retried 'GST' until the replan budget died.
+    """
+
+    def test_miss_details_land_in_last_error(self, monkeypatch):
+        orch = _make_orch_loop([])
+        orch._execute_step = MagicMock(return_value=False)
+        monkeypatch.setattr(
+            "core.windows_uia.pop_select_miss",
+            lambda: {"target": "Time zone", "option": "GST",
+                     "items": ["(UTC-12:00) International Date Line West",
+                               "(UTC-08:00) Pacific Time (US & Canada)"]},
+        )
+        run = _SubtaskRun(started_at=0.0)
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="select", target="Time zone",
+            value="GST", key=None, description="set tz", verification="",
+        )
+        out = orch._run_step_attempts(
+            run, SubTask(id=1, description="set tz to GST", depends_on=[]),
+            step,
+        )
+        assert out == "step_failed"
+        assert "GST" in run.last_error
+        assert "(UTC-08:00) Pacific Time (US & Canada)" in run.last_error
+
+    def test_no_miss_keeps_generic_error(self, monkeypatch):
+        orch = _make_orch_loop([])
+        orch._execute_step = MagicMock(return_value=False)
+        monkeypatch.setattr("core.windows_uia.pop_select_miss", lambda: None)
+        run = _SubtaskRun(started_at=0.0)
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="select", target="Time zone",
+            value="GST", key=None, description="set tz", verification="",
+        )
+        orch._run_step_attempts(
+            run, SubTask(id=1, description="set tz", depends_on=[]), step,
+        )
+        assert "execution failed" in run.last_error
+
+
+class TestGoalCheckSeesLastAction:
+    """Regression (live 14:12 run): the goal check re-failed an OPEN form
+    with 'the button was not clicked' — the planner re-clicked 4x and a
+    stray Escape closed the form. The check now sees the last verified
+    action and must judge its end state.
+    """
+
+    def test_last_verified_action_named_in_prompt(self):
+        orch = _goal_check_orch(
+            '{"satisfied": true, "confidence": 0.9, "evidence": "form open"}'
+        )
+        run = _run_state()
+        run.completed = ["[FAILED: something] earlier", "[click] Click 'Schedule a meeting'"]
+        assert orch._goal_already_satisfied(run, _subtask()) is True
+        prompt = orch.reflector.client.query_llm.call_args[0][0][1]["content"]
+        assert "Last verified action" in prompt
+        assert "Click 'Schedule a meeting'" in prompt
+
+    def test_no_verified_action_no_extra_line(self):
+        orch = _goal_check_orch(
+            '{"satisfied": false, "confidence": 0.9, "evidence": "x"}'
+        )
+        run = _run_state()
+        run.completed = ["[FAILED: y] only failures"]
+        orch._goal_already_satisfied(run, _subtask())
+        prompt = orch.reflector.client.query_llm.call_args[0][0][1]["content"]
+        assert "Last verified action" not in prompt

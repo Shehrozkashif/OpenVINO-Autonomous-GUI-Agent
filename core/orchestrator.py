@@ -363,6 +363,7 @@ class TaskOrchestrator:
         completed_subtask_ids = []
         completed_subtask_descs: list[str] = []   # for inter-subtask context
         executed_subtasks: list[SubTask] = []     # what actually ran (incl. replans)
+        skipped_descs: list[str] = []             # permanently-failed, skipped work
         failed = False
         replans_used = 0
 
@@ -434,6 +435,23 @@ class TaskOrchestrator:
                 if queue:
                     self._wait_for_settle(min_s=0.5, max_s=3.0)
             else:
+                # Replans exhausted (or none produced). When work is still
+                # QUEUED behind this subtask, dying here throws it away —
+                # live: the time-zone hunt burned the whole replan budget and
+                # the already-filled form was never Saved. Skip the stuck
+                # subtask, mark the run degraded, and let the queued work
+                # run; the summary names what was skipped. A subtask with
+                # NOTHING queued after it IS the remaining objective —
+                # skipping that would fake success, so it still fails.
+                if queue and not self._stop_event.is_set():
+                    self._degraded = True
+                    skipped_descs.append(subtask.description)
+                    self.log(
+                        f"[SKIP] Subtask {subtask.id} cannot be completed — "
+                        f"continuing with the {len(queue)} remaining "
+                        f"subtask(s) so finished work is not thrown away"
+                    )
+                    continue
                 self.log(f"[SUBTASK {subtask.id}] Failed — stopping task")
                 failed = True
                 break
@@ -444,8 +462,11 @@ class TaskOrchestrator:
         blocker = getattr(self, "_last_goal_evidence", "") if failed else ""
         if blocker:
             self.log(f"[BLOCKER] {blocker}")
+        for d in skipped_descs:
+            self.log(f"[SKIPPED] {d}")
         summary = self.router.summarize_completion(
-            task_id, completed_subtask_ids, not failed, blocker=blocker
+            task_id, completed_subtask_ids, not failed, blocker=blocker,
+            skipped=skipped_descs,
         )
 
         # Append any extracted data to the summary log
@@ -1049,8 +1070,22 @@ class TaskOrchestrator:
                 {
                     "role": "user",
                     "content": (
-                        f"Subtask goal: {subtask.description}\n\n"
-                        f"Current screen:\n{run.screen_context}"
+                        f"Subtask goal: {subtask.description}\n"
+                        # The check judges END STATE, not whether the action
+                        # "still needs doing" — without this line it re-failed
+                        # an OPEN form because "the button was not clicked",
+                        # and the planner re-clicked until Escape closed it.
+                        + (
+                            f"Last verified action in this subtask: "
+                            f"{_last_done} (it succeeded — judge whether its "
+                            f"end state is on the screen below, not whether "
+                            f"the action should be repeated).\n"
+                            if (_last_done := next(
+                                (c for c in reversed(run.completed)
+                                 if not c.startswith("[FAILED")), ""))
+                            else ""
+                        )
+                        + f"\nCurrent screen:\n{run.screen_context}"
                     ),
                 },
             ]
@@ -1331,6 +1366,25 @@ class TaskOrchestrator:
                 # retries only burn seconds (live: the same 'no option'
                 # miss re-ran 3× per cycle for minutes).
                 if step.action_type in ("set_value", "select", "invoke"):
+                    if step.action_type == "select":
+                        # Put the mismatch in the failure record the planner
+                        # reads: what the plan asked for vs. the labels the
+                        # app really shows ('GST' vs '(UTC+04:00) Abu
+                        # Dhabi, Muscat') — so it picks a real label or
+                        # scrolls the open list for more options.
+                        from core import windows_uia
+                        miss = windows_uia.pop_select_miss()
+                        if miss is not None:
+                            shown = ", ".join(miss["items"]) or (
+                                "none rendered yet — items appear as the "
+                                "open list is scrolled"
+                            )
+                            run.last_error = (
+                                f"no option named '{miss['option']}' exists "
+                                f"in '{miss['target']}'; the open list shows: "
+                                f"{shown}. Use the app's exact option label, "
+                                f"or scroll the open list to reveal more"
+                            )
                     break
                 continue
 

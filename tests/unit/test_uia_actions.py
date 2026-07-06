@@ -498,3 +498,34 @@ class TestSelectValuePatternFallback:
         vp.IsReadOnly = True
         assert self._run_select(vp) is False
         assert vp.Value == "2:00 PM"   # never written
+
+
+class TestSelectMissCapture:
+
+    def test_miss_is_captured_and_popped_once(self):
+        import core.windows_uia as wu
+
+        class _NoItems:
+            ControlTypeName = "MenuItemControl"
+            Name = "Time zone"
+
+            def GetValuePattern(self):
+                raise RuntimeError("none")
+
+            def GetExpandCollapsePattern(self):
+                raise RuntimeError("none")
+
+            def GetChildren(self):
+                return []
+
+        with patch.object(wu, "_load", return_value=True), \
+             patch.object(wu, "_thread_com_init", return_value=None), \
+             patch.object(wu, "_uia", MagicMock()), \
+             patch.object(wu, "_find_control", return_value=_NoItems()):
+            assert wu.select_option("Time zone", "GST") is False
+        miss = wu.pop_select_miss()
+        # The container MenuItem itself is an item-type control, so it shows
+        # up in the seen list — same shape as the live log.
+        assert miss == {"target": "Time zone", "option": "GST",
+                        "items": ["time zone"]}
+        assert wu.pop_select_miss() is None   # cleared on read
