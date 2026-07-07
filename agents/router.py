@@ -125,8 +125,19 @@ covering the user's FULL intent with the fewest steps that leave nothing out.
        Date to 07/10/2026, set Start time to 3:00 PM, set Duration to 30 min")
        — related fields of one form always belong in ONE sub-task, never one
        sub-task per field.
-    3. one sub-task to CONFIRM ("with the details filled, click Save") and, if
-       the user asked to invite people, one more to send/copy the invitation.
+       ATTENDEES / INVITEES / RECIPIENTS ARE FORM FIELDS, not a later action:
+       the email address(es) to invite go in THIS fill sub-task, with the exact
+       address from the instruction ("...add attendee alex@example.com"). NEVER
+       emit a separate "invite/add the attendee" sub-task AFTER the confirm
+       step — a meeting saved before its attendees are filled drops them, and
+       the confirm sub-task carries no email so the agent is forced to invent
+       one.
+    3. one sub-task to CONFIRM as the LAST step ("with the details filled,
+       click Save"), which runs only AFTER every field including attendees is
+       set. Add a further sub-task ONLY when the user asks to SEND/SHARE the
+       invitation as a distinct action that happens after the meeting exists
+       (e.g. "copy the join link and email it") — adding attendees to the form
+       is NOT that.
   Use concrete values: resolve "tomorrow" to the actual date, "3pm" to 3:00 PM.
 
 ━━━ AVAILABLE APPS ━━━
@@ -213,11 +224,11 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 → [{"id":1,"description":"open Thunderbird","depends_on":[]},
    {"id":2,"description":"with Thunderbird open, click the Write new message button","depends_on":[1]}]
 
-"schedule a zoom meeting titled Weekly Sync tomorrow at 3pm for 30 minutes" (today = 07/09/2026)
+"schedule a zoom meeting titled Weekly Sync tomorrow at 3pm for 30 minutes and invite alex@example.com" (today = 07/09/2026)
 → [{"id":1,"description":"open Zoom","depends_on":[]},
    {"id":2,"description":"with Zoom already open, click the Schedule button to open the schedule-meeting form","depends_on":[1]},
-   {"id":3,"description":"with the schedule-meeting form open, set Topic to 'Weekly Sync', set the date to 07/10/2026, set the start time to 3:00 PM, set the duration to 30 minutes","depends_on":[2]},
-   {"id":4,"description":"with the meeting details filled in, click Save to create the meeting","depends_on":[3]}]
+   {"id":3,"description":"with the schedule-meeting form open, set Topic to 'Weekly Sync', set the date to 07/10/2026, set the start time to 3:00 PM, set the duration to 30 minutes, add attendee alex@example.com","depends_on":[2]},
+   {"id":4,"description":"with the meeting details filled in including the attendee, click Save to create the meeting","depends_on":[3]}]
 
 "take a screenshot"
 → [{"id":1,"description":"take a screenshot using the Print Screen keyboard shortcut","depends_on":[]}]
