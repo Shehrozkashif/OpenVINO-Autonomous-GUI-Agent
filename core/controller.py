@@ -77,16 +77,19 @@ _MOUSE_UP_FLAG = {
 
 
 def _send_input(inp: "_INPUT") -> None:
+    """Inject one input event into the OS event queue via user32.SendInput."""
     ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
 def _mouse_event(flags: int, data: int = 0) -> None:
+    """Send one mouse event (a button down/up flag, or a wheel step in `data`)."""
     inp = _INPUT(type=_INPUT_MOUSE)
     inp.mi = _MOUSEINPUT(0, 0, data, flags, 0, 0)
     _send_input(inp)
 
 
 def _key_event(vk: int, keyup: bool = False, extended: bool = False) -> None:
+    """Press or release one virtual-key code (extended=True for nav/right-side keys)."""
     flags = _KEYEVENTF_KEYUP if keyup else 0
     if extended:
         flags |= _KEYEVENTF_EXTENDEDKEY
@@ -96,6 +99,11 @@ def _key_event(vk: int, keyup: bool = False, extended: bool = False) -> None:
 
 
 def _unicode_key_event(ch: str, keyup: bool = False) -> None:
+    """Type one Unicode character directly, bypassing the keyboard layout.
+
+    KEYEVENTF_UNICODE carries the codepoint itself (not a key code), so any
+    character types correctly regardless of the active layout.
+    """
     flags = _KEYEVENTF_UNICODE | (_KEYEVENTF_KEYUP if keyup else 0)
     inp = _INPUT(type=_INPUT_KEYBOARD)
     inp.ki = _KEYBDINPUT(0, ord(ch), flags, 0, 0)
@@ -212,6 +220,7 @@ def _resolve_key(name: str):
 # ── Key dispatch ──────────────────────────────────────────────────────────────
 
 def _send_key_name(name: str) -> None:
+    """Press and release a named key (e.g. "enter", "f5", "a"), shift-holding if needed."""
     resolved = _resolve_key(name)
     if resolved is None:
         logger.warning(f"[Controller] Unknown key '{name}' — skipping")
@@ -227,6 +236,10 @@ def _send_key_name(name: str) -> None:
 
 
 def _send_hotkey(*key_names: str) -> None:
+    """Press a chord like ctrl+shift+s: hold each modifier, tap the last key, release all.
+
+    A try/finally guarantees held modifiers are released even if the main key fails.
+    """
     names = [n.strip() for n in key_names if n and n.strip()]
     resolved = [_resolve_key(n) for n in names]
     modifiers, main = resolved[:-1], (resolved[-1] if resolved else None)
@@ -262,6 +275,7 @@ def _send_hotkey(*key_names: str) -> None:
 
 
 def _send_text(text: str, interval: float = 0.04) -> None:
+    """Type a string one Unicode character at a time, with a small inter-key delay."""
     for ch in text:
         _unicode_key_event(ch, keyup=False)
         time.sleep(interval * 0.4)

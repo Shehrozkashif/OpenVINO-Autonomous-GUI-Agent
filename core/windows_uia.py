@@ -45,6 +45,7 @@ def _load() -> bool:
 
 
 def is_available() -> bool:
+    """True if the uiautomation backend loaded — i.e. UIA grounding can be used."""
     return _load()
 
 
