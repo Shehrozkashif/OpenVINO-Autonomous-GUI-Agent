@@ -45,3 +45,6 @@ convention = "google"
 # Tests insert the repo root onto sys.path before importing project modules,
 # and live/e2e tests keep compact inline helpers.
 "tests/*" = ["E402"]
+# main.py MUST call enable_dpi_awareness() before importing Qt and the capture
+# modules, so those imports deliberately sit below that call (not at file top).
+"main.py" = ["E402"]
