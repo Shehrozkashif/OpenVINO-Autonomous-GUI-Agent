@@ -104,11 +104,10 @@ flowchart TB
     subgraph ORCH_LAYER["&nbsp;Orchestration Layer · core/&nbsp;"]
         direction LR
         ORCH["TaskOrchestrator<br/>retries · replanning ·<br/>deadlines · loop guard"]
-        BURST["BurstExecutor<br/>zero-LLM<br/>fast paths"]
         FIREWALL["Action Firewall<br/>injection-proof"]
         KILL["Kill Switch<br/>triple-Esc"]
         MEMORY[("Task Memory<br/>SQLite")]
-        ORCH --- BURST --- FIREWALL --- KILL --- MEMORY
+        ORCH --- FIREWALL --- KILL --- MEMORY
     end
 
     subgraph AGENT_LAYER["&nbsp;Agent Layer · agents/ — every agent depends only on the InferenceClient protocol&nbsp;"]
@@ -342,7 +341,6 @@ intel-openvino-desktop-agent/
 │   ├── capture/
 │   │   ├── screenshot.py      # Windows screen capture (GDI via PIL.ImageGrab)
 │   │   └── screen_snapshot.py # Foreground/background-aware OCR snapshot
-│   ├── burst_executor.py      # Fast multi-action sequences (no per-step LLM)
 │   ├── windows_uia.py         # Stage 0: Windows UIA accessibility tree
 │   ├── ovms_client.py         # OVMSClient — LLM + VLM via OpenVINO Model Server
 │   ├── protocols.py           # Shared data models + InferenceClient protocol

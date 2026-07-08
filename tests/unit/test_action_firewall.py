@@ -1,7 +1,5 @@
 # tests/unit/test_action_firewall.py
-"""Unit tests for the destructive-action firewall (Fix C7) and the instruction-level
-burst-deferral safety check (Fix C1).
-"""
+"""Unit tests for the destructive-action firewall (Fix C7)."""
 import sys
 
 sys.path.insert(0, ".")
@@ -9,10 +7,6 @@ sys.path.insert(0, ".")
 import pytest
 
 from core.action_firewall import Decision, Severity, decide, evaluate
-from core.burst_executor import (
-    _instruction_has_extra_clauses,
-    detect_burst_from_instruction,
-)
 
 # ── Firewall classification ───────────────────────────────────────────────────
 
@@ -81,34 +75,3 @@ class TestFirewallDecision:
 
     def test_safe_text_always_allowed(self):
         assert decide(evaluate("echo hi"), None) == Decision.ALLOW
-
-
-# ── Instruction-level burst deferral (Fix C1) ─────────────────────────────────
-
-class TestBurstDeferral:
-    def test_whole_instruction_burst_still_fires(self):
-        # A single folder-creation instruction should still burst.
-        b = detect_burst_from_instruction("create a folder called testfolder")
-        assert b is not None
-
-    def test_compound_then_defers_to_router(self):
-        b = detect_burst_from_instruction(
-            "create a folder called test, then open it in the file manager"
-        )
-        assert b is None
-
-    def test_compound_and_launch_defers(self):
-        b = detect_burst_from_instruction(
-            "create a folder called test and open vs code"
-        )
-        assert b is None
-
-    @pytest.mark.parametrize("text,expected", [
-        ("create a folder called test", False),
-        ("create a folder called test, then open notepad", True),
-        ("type hello and press enter", False),
-        ("type hello and press enter then launch firefox", True),
-        ("right-click the desktop and click New", False),
-    ])
-    def test_extra_clause_detection(self, text, expected):
-        assert _instruction_has_extra_clauses(text) is expected

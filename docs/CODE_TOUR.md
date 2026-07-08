@@ -30,7 +30,6 @@ locally on one OpenVINO Model Server endpoint.
 | `core/ovms_client.py` | HTTP client for OVMS; `query_llm()` / `query_vlm()` select the model per request |
 | `core/windows_uia.py` | Windows UI Automation: element search + structured actions (`set_value`, `select`, `invoke`) |
 | `core/controller.py` | Low-level mouse/keyboard via Win32 `SendInput` |
-| `core/burst_executor.py` | Zero-LLM fast path for recognised multi-step patterns |
 | `core/capture/` | Screenshots (GDI), OCR thumbnails, perceptual hashing |
 | `agents/router.py` | Instruction → subtasks; task-level **replanning**; missing-parameter questions |
 | `agents/planning.py` | Subtask + screen context → next `ActionStep`(s) |

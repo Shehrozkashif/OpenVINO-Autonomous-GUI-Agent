@@ -189,9 +189,6 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
         orch._extracted_data = {}
         orch._screen_w = 1920
         orch._screen_h = 1080
-        # Burst executor (needed by _execute_subtask but not _execute_step)
-        from core.burst_executor import BurstExecutor
-        orch.burst_executor = MagicMock(spec=BurstExecutor)
 
         return orch, grounder, actor
 

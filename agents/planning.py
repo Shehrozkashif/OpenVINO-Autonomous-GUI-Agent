@@ -456,8 +456,7 @@ def _parse_visual_action(
     """Parse a UI-TARS action line into an ActionStep.
 
     Click-family steps carry explicit screen-pixel coordinates in `value`
-    ("x,y" — the same convention the burst executor uses), so the orchestrator
-    executes them directly without grounding.
+    (as "x,y"), so the orchestrator executes them directly without grounding.
 
     Returns None for finished(). Raises PlanningParseError when nothing parses.
     """

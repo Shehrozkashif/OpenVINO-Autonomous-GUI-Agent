@@ -541,9 +541,9 @@ class UIGroundingAgent:
     def ground_fast(self, target: str) -> GroundingResult:
         """Stage 0 + Stage 1 only (UIA + OCR) — no VLM call.
 
-        Used during burst pre-grounding where transient elements (context-menu
-        items) may not be visible yet.  If they're absent, Stage 2 would block
-        for 30-50 s just to confirm not-found; this method returns immediately.
+        Used where a target may legitimately be absent (e.g. scroll-to-find
+        probing): a full ground() would spend 30-50 s in Stage 2 just to confirm
+        not-found, whereas this returns immediately when UIA + OCR miss.
         """
         start = time.time()
         display, scale_x, scale_y, _screen_hash, dead = self._prepare_screen(target)

@@ -87,10 +87,9 @@ a model's opinion alone:
 | `core/windows_uia.py` | Accessibility tree: native FindAll batch search (reaches WebView2/Electron content), find/invoke/set_value/select/focus, interactive-elements list, focused-control info |
 | `core/controller.py` | Raw SendInput mouse/keyboard, clipboard typing, kill switch |
 | `core/ovms_client.py` | OpenAI-compatible chat client for OVMS, retry with backoff |
-| `core/burst_executor.py` | Pre-grounded short action sequences with one verification at the end |
 | `core/action_firewall.py` | Deterministic destructive-command guard for typed text |
 | `core/capture/` | Screen capture (GDI), perceptual hashing, foreground-window-aware OCR snapshot |
-| `core/protocols.py` | `SubTask`, `ActionStep`, burst primitives, `InferenceClient` protocol |
+| `core/protocols.py` | `SubTask`, `ActionStep`, `InferenceClient` protocol |
 | `agents/router.py` | Decompose / replan / missing-parameter elicitation / completion summary |
 | `agents/planning.py` | Next-step planning prompts (text + visual paths) |
 | `agents/grounding.py` | 3-stage grounding, caches and blacklists, OCR engine |

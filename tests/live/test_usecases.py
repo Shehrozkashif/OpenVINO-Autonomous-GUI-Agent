@@ -1,11 +1,11 @@
 """Live end-to-end use-case test suite.
 
-Runs real tasks through the full orchestrator pipeline (router → burst/planner →
+Runs real tasks through the full orchestrator pipeline (router → planner →
 grounder → actor → reflector) and verifies each outcome independently.
 
 Use cases tested
 ----------------
-1. Create a folder on the desktop          (burst path, no LLM)
+1. Create a folder on the desktop          (LLM planning path)
 2. Open Notepad                            (LLM planning path)
 3. Open Calculator                         (LLM planning path)
 4. Open Windows Terminal                   (LLM planning path)
@@ -80,7 +80,6 @@ class UCResult:
     name: str
     passed: bool
     elapsed_s: float
-    burst_used: bool = False
     planning_calls: int = 0
     grounding_calls: int = 0
     reflection_calls: int = 0
@@ -98,7 +97,7 @@ class LiveUseCaseTester:
 
     def _instrument(self):
         """Attach lightweight timing wrappers. Returns a stats dict (reset each call)."""
-        stats = {"burst": False, "plan": 0, "ground": 0, "reflect": 0}
+        stats = {"plan": 0, "ground": 0, "reflect": 0}
 
         _orig_plan = self.orch.planner.plan_steps
         def _p(*a, **kw):
@@ -117,12 +116,6 @@ class LiveUseCaseTester:
             stats["reflect"] += 1
             return _orig_verify(*a, **kw)
         self.orch.reflector.verify = _r
-
-        _orig_burst = self.orch.burst_executor.run
-        def _b(burst, *a, **kw):
-            stats["burst"] = True
-            return _orig_burst(burst, *a, **kw)
-        self.orch.burst_executor.run = _b
 
         return stats
 
@@ -159,7 +152,6 @@ class LiveUseCaseTester:
             name=name,
             passed=passed,
             elapsed_s=elapsed,
-            burst_used=stats["burst"],
             planning_calls=stats["plan"],
             grounding_calls=stats["ground"],
             reflection_calls=stats["reflect"],
@@ -167,8 +159,7 @@ class LiveUseCaseTester:
         )
         status = "PASSED" if passed else "FAILED"
         print(f"\n  Result : {status} in {elapsed:.1f}s")
-        print(f"  Burst  : {'yes' if stats['burst'] else 'no'}  |  "
-              f"Plan calls: {stats['plan']}  |  "
+        print(f"  Plan calls: {stats['plan']}  |  "
               f"Ground calls: {stats['ground']}  |  "
               f"Reflect calls: {stats['reflect']}")
         if notes:
@@ -315,7 +306,7 @@ class LiveUseCaseTester:
         for r in self.results:
             mark = "PASS" if r.passed else "FAIL"
             print(f"  [{mark}] {r.name}")
-            print(f"         {r.elapsed_s:.1f}s  |  burst={'yes' if r.burst_used else 'no '}  |  "
+            print(f"         {r.elapsed_s:.1f}s  |  "
                   f"plan={r.planning_calls}  ground={r.grounding_calls}  reflect={r.reflection_calls}")
             if r.notes:
                 print(f"         note: {r.notes}")

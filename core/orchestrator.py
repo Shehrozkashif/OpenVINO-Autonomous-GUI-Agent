@@ -42,7 +42,6 @@ from agents.grounding import GroundingResult, UIGroundingAgent
 from agents.planning import PlanningAgent, PlanningParseError
 from agents.reflection import ReflectionAgent
 from agents.router import RouterAgent
-from core.burst_executor import BurstExecutor, detect_burst, detect_burst_from_instruction
 from core.capture.screen_snapshot import capture_snapshot
 from core.capture.screenshot import OCR_THUMB, ScreenCapture, _screen_size
 from core.protocols import ActionStep, SubTask
@@ -168,11 +167,6 @@ class TaskOrchestrator:
         # optimistic parse-failure success, etc.). Such a task is NOT stored in
         # success memory, so broken plans never poison future routing hints.
         self._degraded = False
-        self.burst_executor = BurstExecutor(
-            grounder=self.grounder,
-            actor=self.actor,
-            reflector=self.reflector,
-        )
 
         if ocr is not None:
             self._ocr = ocr
@@ -335,21 +329,9 @@ class TaskOrchestrator:
 
         screen_context = self._get_screen_context()
 
-        # Attempt instruction-level burst detection before invoking the LLM router.
-        # Compound sequences (right-click → New → Folder → type → Enter) produce a
-        # single synthetic subtask, skipping router latency entirely.
-        _instr_burst = detect_burst_from_instruction(instruction)
-        if _instr_burst is not None:
-            self.log(
-                f"[BURST] Instruction-level burst detected "
-                f"({len(_instr_burst.steps)} steps) — skipping router"
-            )
-            synthetic = SubTask(id=1, description=instruction, depends_on=[], burst=_instr_burst)
-            task_id, subtasks = "burst_direct", [synthetic]
-        else:
-            task_id, subtasks = self.router.decompose(
-                instruction, screen_context=screen_context, memory_hint=memory_hint
-            )
+        task_id, subtasks = self.router.decompose(
+            instruction, screen_context=screen_context, memory_hint=memory_hint
+        )
         self.log(f"[ROUTER] {len(subtasks)} sub-task(s)")
 
         queue: list[SubTask] = self._topological_sort(subtasks)
@@ -645,35 +627,6 @@ class TaskOrchestrator:
             self.log(f"[CLARIFY] Instruction enriched with {len(answers)} detail(s)")
         return instruction
 
-    # ── Subtask execution loop ────────────────────────────────────────────────
-
-    def _try_burst(self, subtask: SubTask) -> bool:
-        """Run a recognised zero-LLM burst pattern for this subtask, if any.
-
-        Prefers a pre-attached burst (set by instruction-level detection in
-        execute()) over per-subtask pattern matching; falls back to
-        detect_burst(). Returns True only when a burst ran AND succeeded — in
-        which case the subtask is complete. Otherwise returns False and the
-        caller falls back to the planning loop.
-        """
-        _burst = (
-            subtask.burst
-            if getattr(subtask, "burst", None) is not None
-            else detect_burst(subtask)
-        )
-        if _burst is None:
-            return False
-        self.log(f"  [BURST] {len(_burst.steps)}-step burst pattern detected")
-        _burst_result = self.burst_executor.run(_burst)
-        if _burst_result.success:
-            self.log(f"  [BURST] Succeeded ({len(_burst.steps)} steps, no LLM required)")
-            return True
-        self.log(
-            f"  [BURST] Failed at step {_burst_result.failed_at_step}: "
-            f"{_burst_result.reason} — falling back to planning loop"
-        )
-        return False
-
     # ── Task app anchor ───────────────────────────────────────────────────────
     # Ground truth for "which window are we working in". After a successful
     # "open <app>" subtask, the window owning the foreground IS the launched
@@ -887,10 +840,6 @@ class TaskOrchestrator:
         # window — anchor it and skip the launch entirely (zero LLM calls,
         # zero keystrokes). See _launch_already_satisfied.
         if self._launch_already_satisfied(subtask):
-            return True
-
-        # Fast path: recognised multi-step patterns run with zero LLM calls.
-        if self._try_burst(subtask):
             return True
 
         _is_launch_goal, _goal_proc, _baseline_windows, task_context = (
@@ -1890,8 +1839,8 @@ class TaskOrchestrator:
     def _explicit_coords(value: str | None) -> tuple | None:
         """Parse an explicit "x,y" pixel pair from a step's value field.
 
-        Visual-planner click steps (and burst steps) carry direct screen
-        coordinates this way, bypassing grounding entirely.
+        Visual-planner click steps carry direct screen coordinates this way,
+        bypassing grounding entirely.
         """
         if not value or "," not in value:
             return None
@@ -1966,7 +1915,7 @@ class TaskOrchestrator:
             self._last_was_invoke = False
             _coords = self._explicit_coords(step.value)
             if _coords is not None:
-                # Explicit pixel coordinates (visual planner / burst convention)
+                # Explicit pixel coordinates (visual-planner convention)
                 x, y = _coords
                 self._last_click_xy = (x, y)
                 return self.actor.execute(step, x=x, y=y)

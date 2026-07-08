@@ -35,7 +35,6 @@ BUSY_STATES = frozenset({
 
 _RX_TASK_START   = re.compile(r"\[TASK START\] '(.*)'")
 _RX_ROUTER       = re.compile(r"\[ROUTER\] (\d+) sub-task")
-_RX_BURST        = re.compile(r"\[BURST\] .*?(\d+) steps?\)")
 _RX_SUBTASK      = re.compile(r"\[SUBTASK (\d+)\] (.+)")
 _RX_STEP         = re.compile(r"^\s*Step (\d+): \[(\w+)\] (.*)")
 _RX_VERIFIED     = re.compile(r"^\s*Verified \(conf=([\d.]+)\)")
@@ -193,7 +192,7 @@ class AgentEventBus(QObject):
             self.detail.emit("Breaking the mission into subtasks...")
             return True
 
-        m = _RX_ROUTER.search(line) or _RX_BURST.search(line)
+        m = _RX_ROUTER.search(line)
         if m:
             self._set_state(AgentState.PLANNING)
             self.plan_ready.emit(int(m.group(1)))

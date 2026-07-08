@@ -12,7 +12,7 @@ progress, or the agent invents a meeting time the user never gave.
 """
 import json
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 sys.path.insert(0, ".")
 
@@ -44,7 +44,11 @@ def _make_orch(config: OrchestratorConfig | None = None) -> TaskOrchestrator:
 
 
 def _no_burst():
-    return patch("core.orchestrator.detect_burst_from_instruction", return_value=None)
+    # Historical guard: the orchestrator once had a burst fast path that could
+    # skip the router. That path is gone (the router always runs now), so this
+    # is a no-op context kept only so the call sites below read unchanged.
+    import contextlib
+    return contextlib.nullcontext()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
