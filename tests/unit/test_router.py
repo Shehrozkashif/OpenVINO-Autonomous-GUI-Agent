@@ -38,9 +38,9 @@ class TestMissingActionDetection:
             "Open Notepad and write a haiku and save the file", subs) == []
 
     def test_no_finalizing_verb_means_nothing_missing(self):
-        subs = _subs("open Firefox", "navigate to github.com")
+        subs = _subs("open Microsoft Teams", "open the calendar")
         assert RouterAgent._missing_actions(
-            "open firefox and go to github", subs) == []
+            "open teams and go to the calendar", subs) == []
 
     def test_close_requested_but_dropped(self):
         subs = _subs("open Notepad", "type text")

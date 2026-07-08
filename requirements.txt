@@ -1,7 +1,17 @@
-# ── GUI Framework ─────────────────────────────────────────────────────────────
+# ── RUNTIME dependencies ──────────────────────────────────────────────────────
+# Everything the agent needs to RUN against an OVMS that already serves the
+# models. Inference goes over HTTP (httpx) — the app imports NO ML framework
+# (no torch / transformers / openvino). Installing this file alone is enough on
+# a machine that receives pre-converted models.
+#
+# One-time model CONVERSION deps (optimum, nncf, torch, …) live in
+# requirements-export.txt — install that ONLY on a machine that must convert
+# UI-TARS to OpenVINO IR itself. Dev/test tools live in requirements-dev.txt.
+
+# ── GUI framework ─────────────────────────────────────────────────────────────
 PyQt6>=6.6.0
 
-# ── Desktop Control ───────────────────────────────────────────────────────────
+# ── Desktop control & capture ─────────────────────────────────────────────────
 # Mouse/keyboard injection is raw Win32 SendInput via ctypes (core/controller.py)
 # — no third-party input library needed.
 Pillow>=10.0.0
@@ -9,31 +19,14 @@ imagehash>=4.3.0
 rapidocr-onnxruntime>=1.4.0
 uiautomation>=2.0.18; sys_platform == "win32"   # Windows UIA Stage 0 grounding
 
-# ── Networking ────────────────────────────────────────────────────────────────
+# ── Networking (the only link to the models) ──────────────────────────────────
 httpx>=0.25.0
 pydantic>=2.4.0
 
-# ── Memory ────────────────────────────────────────────────────────────────────
-# Task/failure memory is SQLite + difflib (stdlib) — no embedding model.
+# ── Numerics ──────────────────────────────────────────────────────────────────
 numpy>=1.24.0                      # used directly by agents/grounding.py
-
-# ── Inference backend: OpenVINO™ Model Server (OVMS) ──────────────────────────
-# The server itself is external — installed as the native ovms/ovms.exe binary;
-# start.py launches it. The Python client only needs httpx (above).
-#
-# FIRST-RUN REQUIREMENT: UI-TARS → OpenVINO INT4 conversion needs the optimum
-# toolchain. Install BEFORE running start.py for the first time:
-#   pip install "optimum-intel[openvino]" nncf
-optimum-intel[openvino]>=1.18.0
-nncf>=2.11.0
-jinja2>=3.0.0                      # used by OVMS export tool for graph.pbtxt templates
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 loguru>=0.7.0
 pyperclip>=1.8.0   # Windows clipboard support
 keyring>=24.0.0    # OS-encrypted credential storage (falls back to JSON if absent)
-
-# ── Testing & Linting ─────────────────────────────────────────────────────────
-pytest>=7.4.0
-pytest-cov>=4.1.0
-ruff>=0.6.0        # lint/format per Google style guide: `ruff check .`

@@ -195,9 +195,6 @@ class TestExistingCriteriaPreserved:
     def test_run_command_criterion_present(self):
         assert "run:" in self._msg().lower() or "key_press enter" in self._msg().lower()
 
-    def test_open_browser_criterion_present(self):
-        assert "open browser" in self._msg().lower()
-
     def test_click_menu_item_criterion_present(self):
         assert "submenu" in self._msg().lower()
 

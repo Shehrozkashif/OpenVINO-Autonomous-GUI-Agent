@@ -1,0 +1,6 @@
+# ── Dev / test tooling ────────────────────────────────────────────────────────
+# Not needed to run or deploy the agent — only for the test suite and linting.
+#   pip install -r requirements-dev.txt
+pytest>=7.4.0
+pytest-cov>=4.1.0
+ruff>=0.6.0        # lint/format per Google style guide: `ruff check .`

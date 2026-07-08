@@ -130,7 +130,7 @@ flowchart TB
     subgraph INFER_LAYER["&nbsp;Inference Layer · core/ovms_client.py — 100% local&nbsp;"]
         direction LR
         CLIENT["OVMSClient<br/>implements<br/>InferenceClient"]
-        OVMS["OpenVINO™ Model Server<br/>qwen3-14b-int4-ov LLM ·<br/>ui-tars-1.5-7b-int4-ov VLM<br/>OpenAI API · :8000"]
+        OVMS["OpenVINO™ Model Server<br/>qwen3-8b-int4-ov LLM ·<br/>ui-tars-1.5-7b-int8-ov VLM<br/>OpenAI API · :8000"]
         CLIENT -- "/v3/chat/completions" --> OVMS
     end
 
@@ -196,19 +196,21 @@ Model ids live in [`config.py`](config.py) — the single source of truth.
 
 | Role | Model (OVMS servable) | Source | Purpose |
 |------|-----------------------|--------|---------|
-| **LLM** | `qwen3-14b-int4-ov` | [`OpenVINO/Qwen3-14B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3-14B-int4-ov) (pre-converted) | Routing, planning, reflection reasoning |
-| **VLM** | `ui-tars-1.5-7b-int4-ov` | [`ByteDance-Seed/UI-TARS-1.5-7B`](https://huggingface.co/ByteDance-Seed/UI-TARS-1.5-7B) (converted to INT4 on first run) | GUI grounding, visual verification |
+| **LLM** | `qwen3-8b-int4-ov` | [`OpenVINO/Qwen3-8B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3-8B-int4-ov) (pre-converted) | Routing, planning, reflection reasoning |
+| **VLM** | `ui-tars-1.5-7b-int8-ov` | [`ByteDance-Seed/UI-TARS-1.5-7B`](https://huggingface.co/ByteDance-Seed/UI-TARS-1.5-7B) (converted to INT8 on first run) | GUI grounding, visual verification |
 
 Both models are served by a **single OpenVINO™ Model Server instance** on one
 OpenAI-compatible endpoint (`http://localhost:8000/v3/chat/completions`) and
 selected per request by the `model` field. The default sizing targets a
-**24 GB Intel® GPU**: 14B LLM weights (~9.7 GB) + 7B VLM weights (~5 GB) +
-KV-caches (4 GB LLM / 2 GB VLM) stay resident — no model swapping. On a
-16 GB GPU switch the LLM to `qwen3-8b-int4-ov` / `OpenVINO/Qwen3-8B-int4-ov`
-and set `LLM_KV_CACHE_GB = 2` (the swap is two lines in `config.py`;
-`start.py` re-exports and unregisters the old servable automatically).
-Adjust `LLM_KV_CACHE_GB`, `VLM_KV_CACHE_GB`, and `TARGET_DEVICE`
-(GPU / CPU / NPU / AUTO) in [`config.py`](config.py) for your hardware.
+**27 GB Intel® GPU**: 8B LLM weights (~5.5 GB) + 7B VLM weights at **INT8**
+(~7.5 GB) + KV-caches (4 GB LLM / 2 GB VLM) stay resident — no model swapping,
+~6 GB spare. The 8B reasoning model runs faster on the iGPU than the 14B and
+frees the VRAM to ground with the more accurate INT8 UI-TARS. For stronger
+reasoning, swap in `qwen3-14b-int4-ov` / `OpenVINO/Qwen3-14B-int4-ov` — it
+still fits alongside the INT8 VLM (~24.7 GB). Adjust `LLM_WEIGHT_FORMAT`,
+`VLM_WEIGHT_FORMAT`, `LLM_KV_CACHE_GB`, `VLM_KV_CACHE_GB`, and `TARGET_DEVICE`
+(GPU / CPU / NPU / AUTO) in [`config.py`](config.py) for your hardware
+(`start.py` re-exports and unregisters old servables automatically).
 
 ---
 
@@ -219,7 +221,7 @@ Adjust `LLM_KV_CACHE_GB`, `VLM_KV_CACHE_GB`, and `TARGET_DEVICE`
 | OS | Windows 10 | Windows 11 |
 | Python | 3.10 | 3.12 |
 | RAM | 16 GB | 32 GB |
-| GPU VRAM | 16 GB Intel Arc / iGPU (with `qwen3-8b-int4-ov`) | 24 GB (default config: 14B LLM + larger KV-cache) |
+| GPU VRAM | 16 GB Intel Arc / iGPU (8B LLM + INT4 VLM, smaller KV-cache) | 27 GB (default config: 8B LLM + INT8 VLM) |
 | Disk | 20 GB free | 30 GB free |
 
 ---
@@ -233,8 +235,14 @@ cd intel-openvino-desktop-agent
 python -m venv venv
 venv\Scripts\activate
 
-# 2. Install Python dependencies (includes the model conversion toolchain)
+# 2. Install Python dependencies
+#    Runtime only (talks to OVMS over HTTP — no torch/transformers):
 pip install -r requirements.txt
+#    First run also needs the one-time UI-TARS conversion toolchain.
+#    Install CPU-only torch first (this is an Intel-GPU target — skips ~3.4 GB
+#    of unused NVIDIA CUDA + Triton wheels):
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-export.txt
 
 # 3. Install OpenVINO™ Model Server — native binary (ovms.exe)
 #    Prerequisite: Microsoft Visual C++ Redistributable (x64)
@@ -282,17 +290,19 @@ recorded during missions), and **Settings**.
 <summary><b>Manual setup, without start.py</b></summary>
 
 ```powershell
-pip install -r requirements.txt   # includes optimum-intel[openvino] and nncf
+pip install -r requirements.txt              # runtime
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-export.txt       # one-time conversion (optimum-intel, nncf)
 
 # 1. Pull / convert both models into the OVMS repository (writes models/config.json)
 python tools/ovms/export_model.py text_generation `
-  --source_model OpenVINO/Qwen3-14B-int4-ov  --model_name qwen3-14b-int4-ov `
+  --source_model OpenVINO/Qwen3-8B-int4-ov  --model_name qwen3-8b-int4-ov `
   --weight-format int4 --config_file_path models/config.json `
   --model_repository_path models --target_device GPU --cache_size 4
 
 python tools/ovms/export_model.py text_generation `
-  --source_model ByteDance-Seed/UI-TARS-1.5-7B --model_name ui-tars-1.5-7b-int4-ov `
-  --weight-format int4 --config_file_path models/config.json `
+  --source_model ByteDance-Seed/UI-TARS-1.5-7B --model_name ui-tars-1.5-7b-int8-ov `
+  --weight-format int8 --config_file_path models/config.json `
   --model_repository_path models --target_device GPU --cache_size 2
 
 # 2. Serve both from one OVMS instance. The device is baked into each servable
@@ -347,7 +357,9 @@ intel-openvino-desktop-agent/
 │   ├── unit/                  # Unit tests — fast, no backend or desktop required
 │   ├── e2e/                   # End-to-end pipeline checks (require a running OVMS)
 │   └── live/                  # Live tests against a real desktop (require OVMS + display)
-└── requirements.txt
+├── requirements.txt           # runtime deps (no ML framework — HTTP to OVMS)
+├── requirements-export.txt    # one-time model-conversion toolchain
+└── requirements-dev.txt       # pytest + ruff
 ```
 
 ---
@@ -404,7 +416,7 @@ python tests/live/test_longhorizon.py
 | Native `ovms.exe` not found | Set `OVMS_DIR` to the folder containing `ovms.exe` |
 | `ModuleNotFoundError: No module named 'config'` | You ran OVMS's `setupvars` in your agent shell — it hijacks the venv's Python. Open a fresh terminal, activate the venv, and run `python start.py` |
 | `Requested KV-cache size is larger than available memory` | Lower `LLM_KV_CACHE_GB` / `VLM_KV_CACHE_GB` in `config.py` (defaults: 4 / 2 GB). Total must satisfy: caches + ~15 GB model weights < your GPU's VRAM |
-| Model files have `Access is denied` | Delete the model folder from an **elevated** terminal: `rd /s /q models\ui-tars-1.5-7b-int4-ov`, then re-run `python start.py` to re-export |
+| Model files have `Access is denied` | Delete the model folder from an **elevated** terminal: `rd /s /q models\ui-tars-1.5-7b-int8-ov`, then re-run `python start.py` to re-export |
 | Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers |
 | Agent clicks wrong place | Lower screen scaling in Windows display settings |
 | First run takes very long | Expected — UI-TARS conversion (INT4 quantization of a 7B model) takes 30–60 minutes. The LLM (Qwen3) is pre-converted and downloads in minutes. Subsequent runs skip this step |

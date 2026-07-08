@@ -68,31 +68,6 @@ def installed_apps() -> list[str]:
     return apps
 
 
-# ── Firefox ───────────────────────────────────────────────────────────────────
-
-def detect_firefox() -> str:
-    """Return the best available Firefox launch command."""
-    try:
-        import winreg
-        with winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\firefox.exe",
-        ) as k:
-            path = winreg.QueryValue(k, None)
-            if path and os.path.exists(path):
-                return f'"{path}"'
-    except Exception:
-        pass
-    for path in [
-        os.path.expandvars(r"%ProgramFiles%\Mozilla Firefox\firefox.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe"),
-    ]:
-        if os.path.exists(path):
-            return f'"{path}"'
-    return "firefox"
-
-
 # ── Desktop path ──────────────────────────────────────────────────────────────
 
 def get_desktop_path() -> str:

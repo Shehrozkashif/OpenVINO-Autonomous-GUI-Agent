@@ -9,7 +9,7 @@ import uuid
 from loguru import logger
 
 from core.protocols import InferenceClient, SubTask
-from utils.platform_utils import detect_firefox, get_desktop_path
+from utils.platform_utils import get_desktop_path
 
 _SUBTASK_SCHEMA = {
     "type": "array",
@@ -57,9 +57,6 @@ _CALC_APP     = "Calculator"
 _FILES_APP    = "File Explorer"
 _SETTINGS_APP = "Settings"
 
-_FIREFOX_CMD = detect_firefox()
-_FIREFOX_LAUNCH = _FIREFOX_CMD
-
 # ── Router system prompt ───────────────────────────────────────────────────────
 
 ROUTER_SYSTEM_PROMPT = """You are a desktop automation coordinator on ROUTER_OS_PLACEHOLDER.
@@ -85,7 +82,7 @@ covering the user's FULL intent with the fewest steps that leave nothing out.
 5. Descriptions must be SPECIFIC — include exact URLs, filenames, commands, and app names.
 6. STATE CONTEXT in every dependent sub-task description so the planner knows what is already open:
      "with the terminal already open, run: <command>"
-     "with Firefox already open, navigate to <url>"
+     "with Teams already open, open the schedule-meeting form"
      "with VS Code already open, create a new file named <name>"
    This is MANDATORY for any sub-task that depends_on an app-launch sub-task.
 
@@ -104,7 +101,6 @@ covering the user's FULL intent with the fewest steps that leave nothing out.
                          File Explorer, or right-click — honor that and describe the
                          GUI route instead (e.g. "right click on the desktop, click New,
                          click Text Document, type <name>, press enter").
-  Web browsing        →  the browser named in the instruction, else Firefox (specify exact URL or search query)
   Code editing        →  VS Code
   Documents           →  LibreOffice Writer / Calc / Impress
   Email               →  Thunderbird
@@ -112,39 +108,41 @@ covering the user's FULL intent with the fewest steps that leave nothing out.
   System settings     →  SETTINGS_APP_PLACEHOLDER
   Screenshot          →  Print Screen key (one sub-task, no app needed)
   Simple text files   →  echo command in terminal (single line) or nano (multi-line)
-  Meetings / calls    →  the app the user names (Zoom, Teams, Skype, …), else the
-                         browser. Launch it → open its New/Schedule form → fill the
+  Meetings / calls    →  the app the user names (Teams, Zoom, Skype, …).
+                         Launch it → open its New/Schedule form → fill the
                          form → confirm. See FORM FILLING below.
 
 ━━━ FORM FILLING (schedule a meeting, compose an email, create an event) ━━━
-  Decompose form work into exactly THREE kinds of sub-task:
+  Decompose form work into exactly TWO kinds of sub-task:
     1. one sub-task to OPEN the form ("with Zoom already open, click the
        Schedule button to open the schedule-meeting form")
-    2. ONE sub-task that fills ALL the fields, listing each field and its exact
-       value ("with the schedule form open, set Topic to 'Weekly Sync', set
-       Date to 07/10/2026, set Start time to 3:00 PM, set Duration to 30 min")
-       — related fields of one form always belong in ONE sub-task, never one
-       sub-task per field.
+    2. ONE sub-task that fills ALL the fields AND saves as its final action:
+       list each field with its exact value, then end with the confirm/Save
+       ("with the schedule form open, set Topic to 'Weekly Sync', set Date to
+       07/10/2026, set Start time to 3:00 PM, set Duration to 30 min, add
+       attendee alex@example.com, then click Save to create the meeting").
+       Related fields of one form always belong in ONE sub-task, never one
+       sub-task per field. NEVER emit a SEPARATE trailing "click Save" sub-task:
+       fill and Save live in this single sub-task, because after the form saves
+       it closes, so a fresh Save sub-task re-opens a blank form and creates a
+       half-filled DUPLICATE.
        ATTENDEES / INVITEES / RECIPIENTS ARE FORM FIELDS, not a later action:
-       the email address(es) to invite go in THIS fill sub-task, with the exact
-       address from the instruction ("...add attendee alex@example.com"). NEVER
-       emit a separate "invite/add the attendee" sub-task AFTER the confirm
-       step — a meeting saved before its attendees are filled drops them, and
-       the confirm sub-task carries no email so the agent is forced to invent
-       one.
-    3. one sub-task to CONFIRM as the LAST step ("with the details filled,
-       click Save"), which runs only AFTER every field including attendees is
-       set. Add a further sub-task ONLY when the user asks to SEND/SHARE the
+       the email address(es) to invite go in THIS sub-task with the exact
+       address from the instruction ("...add attendee alex@example.com"), filled
+       BEFORE the Save. NEVER emit a separate "invite/add the attendee" sub-task
+       — a meeting saved before its attendees are filled drops them, and a bare
+       Save sub-task carries no email so the agent is forced to invent one.
+       Add a further sub-task ONLY when the user asks to SEND/SHARE the
        invitation as a distinct action that happens after the meeting exists
        (e.g. "copy the join link and email it") — adding attendees to the form
        is NOT that.
   Use concrete values: resolve "tomorrow" to the actual date, "3pm" to 3:00 PM.
 
 ━━━ AVAILABLE APPS ━━━
-Trust the app name the user gives you (browsers, meeting apps, games,
+Trust the app name the user gives you (meeting apps, games,
 utilities — anything installed): an app the user NAMES is always allowed.
 When the instruction names no specific app for a generic task, default to:
-Firefox, VS Code, LibreOffice Writer/Calc/Impress, Thunderbird,
+VS Code, LibreOffice Writer/Calc/Impress, Thunderbird,
 TERMINAL_APP_PLACEHOLDER, CALC_APP_PLACEHOLDER, SETTINGS_APP_PLACEHOLDER, FILES_APP_PLACEHOLDER.
 NEVER invent an app the user did not name and that is not in the defaults
 (no gedit, mousepad, kate, VLC, GIMP, …).
@@ -162,9 +160,6 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 "open calculator"
 → [{"id":1,"description":"open CALC_APP_PLACEHOLDER","depends_on":[]}]
 
-"open brave browser"
-→ [{"id":1,"description":"open Brave Browser","depends_on":[]}]
-
 "open terminal"
 → [{"id":1,"description":"open TERMINAL_APP_PLACEHOLDER","depends_on":[]}]
 
@@ -179,20 +174,6 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 "delete file notes.txt from the desktop"
 → [{"id":1,"description":"open TERMINAL_APP_PLACEHOLDER","depends_on":[]},
    {"id":2,"description":"with the terminal already open, run: rm DESKTOP_PATH_PLACEHOLDER/notes.txt","depends_on":[1]}]
-
-"open firefox and go to github.com"
-→ [{"id":1,"description":"open Firefox","depends_on":[]},
-   {"id":2,"description":"with Firefox already open, navigate to https://github.com","depends_on":[1]}]
-
-"search for openai on google and click the first result"
-→ [{"id":1,"description":"open Firefox","depends_on":[]},
-   {"id":2,"description":"with Firefox already open, search for openai on Google","depends_on":[1]},
-   {"id":3,"description":"with Google results open in Firefox, click the first search result link","depends_on":[2]}]
-
-"open youtube and search for python tutorial"
-→ [{"id":1,"description":"open Firefox","depends_on":[]},
-   {"id":2,"description":"with Firefox already open, navigate to https://www.youtube.com","depends_on":[1]},
-   {"id":3,"description":"with YouTube open in Firefox, search for python tutorial","depends_on":[2]}]
 
 "open vs code and create a new python file named app.py"
 → [{"id":1,"description":"open Visual Studio Code","depends_on":[]},
@@ -227,8 +208,12 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 "schedule a zoom meeting titled Weekly Sync tomorrow at 3pm for 30 minutes and invite alex@example.com" (today = 07/09/2026)
 → [{"id":1,"description":"open Zoom","depends_on":[]},
    {"id":2,"description":"with Zoom already open, click the Schedule button to open the schedule-meeting form","depends_on":[1]},
-   {"id":3,"description":"with the schedule-meeting form open, set Topic to 'Weekly Sync', set the date to 07/10/2026, set the start time to 3:00 PM, set the duration to 30 minutes, add attendee alex@example.com","depends_on":[2]},
-   {"id":4,"description":"with the meeting details filled in including the attendee, click Save to create the meeting","depends_on":[3]}]
+   {"id":3,"description":"with the schedule-meeting form open, set Topic to 'Weekly Sync', set the date to 07/10/2026, set the start time to 3:00 PM, set the duration to 30 minutes, add attendee alex@example.com, then click Save to create the meeting","depends_on":[2]}]
+
+"schedule a teams meeting titled Standup tomorrow at 10am for 15 minutes and invite sam@example.com" (today = 07/09/2026)
+→ [{"id":1,"description":"open Microsoft Teams","depends_on":[]},
+   {"id":2,"description":"with Teams already open, open the calendar and click New meeting to open the schedule-meeting form","depends_on":[1]},
+   {"id":3,"description":"with the schedule-meeting form open, set the title to 'Standup', add attendee sam@example.com, set the date to 07/10/2026, set the start time to 10:00 AM, set the end time to 10:15 AM, then click Save to create the meeting","depends_on":[2]}]
 
 "take a screenshot"
 → [{"id":1,"description":"take a screenshot using the Print Screen keyboard shortcut","depends_on":[]}]
@@ -254,7 +239,6 @@ C:/Users/Public — they require admin rights."""
 ROUTER_SYSTEM_PROMPT = (
     ROUTER_SYSTEM_PROMPT
     .replace("ROUTER_OS_PLACEHOLDER", _ROUTER_OS_CONTEXT)
-    .replace("FIREFOX_LAUNCH_PLACEHOLDER", _FIREFOX_LAUNCH)
     .replace("DESKTOP_PATH_PLACEHOLDER", _DESKTOP_PATH)
     .replace("TERMINAL_APP_PLACEHOLDER", _TERMINAL_APP)
     .replace("CALC_APP_PLACEHOLDER", _CALC_APP)
@@ -412,8 +396,8 @@ class RouterAgent:
             f"Re-plan the FAILED sub-task's work as a fresh JSON array of "
             f"sub-tasks (you may split it into several). Use a DIFFERENT "
             f"approach (different app, method, or route — e.g. GUI instead "
-            f"of terminal, search launcher instead of icon, browser instead of a "
-            f"desktop app). depends_on may only reference ids inside this new array.\n"
+            f"of terminal, or the search launcher instead of clicking an icon). "
+            f"depends_on may only reference ids inside this new array.\n"
             f"THE OBJECTIVE NEVER CHANGES: your plan plus the completed and "
             f"queued sub-tasks must still accomplish the user's original goal "
             f"(re-read the Instruction above). If the current screen is a dead "

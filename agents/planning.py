@@ -10,7 +10,7 @@ import re
 from loguru import logger
 
 from core.protocols import ActionStep, InferenceClient, SubTask
-from utils.platform_utils import detect_firefox, get_desktop_path
+from utils.platform_utils import get_desktop_path
 
 
 class PlanningParseError(Exception):
@@ -37,8 +37,6 @@ _OS_CONTEXT     = "Microsoft Windows 11 desktop"
 _LAUNCHER_KEY   = "winleft"
 _LAUNCHER_NAME  = "Windows Start menu search"
 _CLOSE_WIN      = "alt+f4"
-_NEW_TAB        = "ctrl+t"
-_REOPEN_TAB     = "ctrl+shift+t"
 # Resolved LITERAL path from the shell (handles OneDrive-redirected
 # Desktops, where $env:USERPROFILE\Desktop does not exist). Forward
 # slashes on purpose: backslashes need \\ escaping inside the JSON the
@@ -59,9 +57,6 @@ _USER = os.getenv("USERNAME") or "user"
 # and OCR reliably finds the short username portion of the shell prompt.
 _SHELL_PROMPT = _USER
 
-
-_FIREFOX_CMD    = detect_firefox()
-_FIREFOX_LAUNCH = _FIREFOX_CMD
 
 _TERM_APP  = "cmd"
 _ECHO_CMD  = f"echo 'hello' > {_DESKTOP_PATH}/hello.txt"
@@ -134,7 +129,7 @@ Turn each sub-task into the SHORTEST correct sequence of atomic actions.
    CRITICAL: NEVER click an app icon using your training-data knowledge of where
    it "should" be. Only click it if its name appears in the screen context text.
    If the app name is NOT in the visible text → skip to step 3.
-2. USE a keyboard shortcut if one exists (ctrl+l for browser bar, etc.).
+2. USE a keyboard shortcut if one exists for the action (ctrl+s to save, etc.).
 3. OPEN the search launcher when the app is not visible in the screen text.
    This is the correct default for launching any app not shown in screen context.
 
@@ -186,7 +181,7 @@ PRIMARY — click a visible icon (ONLY when the exact app name appears in screen
   treat it as absent and use the search launcher.
   CRITICAL: Company names ("Microsoft", "Google", "Apple") in copyright text,
   window headers, or log output are NOT app icons. Only the EXACT short app name
-  (e.g. "Notepad", "Firefox") visible as a taskbar/desktop element counts.
+  (e.g. "Notepad", "Teams") visible as a taskbar/desktop element counts.
   CRITICAL: A taskbar button labelled like "Terminal - 1 running window" switches
   to an EXISTING window that may be busy running another program. If the context
   contains a [NOTE] saying the app is already running, NEVER click such a button —
@@ -204,21 +199,8 @@ FALLBACK → PREFERRED — search launcher (use whenever the app is not in scree
   names the target app (e.g. WindowsTerminal.exe, notepad.exe), the app IS focused —
   type or press keys directly. Do NOT add a click step just to focus it.
 • Click a window before typing in it ONLY when it is not the foreground window.
-• Focus browser address bar  →  hotkey ctrl+l  (NEVER click the address bar visually)
 • Focus a terminal that is NOT foreground  →  click the username visible in the shell prompt (e.g. {_SHELL_PROMPT})
 • After alt+tab or clicking taskbar  →  always click target window before typing
-
-━━━ FIREFOX ━━━
-Focus address bar  :  hotkey ctrl+l
-Navigate to URL    :  ctrl+l → type URL → key_press enter
-Web search         :  ctrl+l → type query → key_press enter
-New tab            :  hotkey ctrl+t
-Close tab          :  hotkey ctrl+w
-Find on page       :  hotkey ctrl+f → type → key_press enter → key_press escape
-Scroll page        :  scroll target="page content" value="down"
-Go back            :  hotkey alt+left
-Bookmark           :  hotkey ctrl+d
-Downloads          :  hotkey ctrl+j
 
 ━━━ TERMINAL ━━━
 Desktop path : {_DESKTOP_PATH}
@@ -361,7 +343,6 @@ CRITICAL: After typing the filename (step a), your very next step MUST be key_pr
 ✓ Exact visible text as click target — never "button", "icon", "link"
 ✓ Click a window before typing in it (except fresh terminal)
 ✓ Combine all related text into ONE type step — never chain two type steps
-✓ ctrl+l to focus browser address bar — never click the bar visually
 ✓ Handle any dialog/popup you see before doing the next planned step
 ✓ When the goal says "right click" or "right-click", ALWAYS output action_type: "right_click" — NEVER output "click" for a right-click action
 ✗ Never use gedit, mousepad, kate, VLC, GIMP — use nano or LibreOffice
@@ -406,11 +387,10 @@ EXAMPLE 3 — terminal already open AND foreground (screen context shows
   {{"id":2,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute","verification":"New prompt, no error"}}
 ]
 
-EXAMPLE 4 — browser already open, navigate to URL:
+EXAMPLE 4 — fill a labelled form field directly through the accessibility tree:
 [
-  {{"id":1,"action_type":"hotkey","target":null,"value":null,"key":"ctrl+l","description":"Focus address bar","verification":"Address bar highlighted"}},
-  {{"id":2,"action_type":"type","target":null,"value":"https://github.com","key":null,"description":"Type URL","verification":"URL visible in address bar"}},
-  {{"id":3,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Navigate","verification":"GitHub page loads"}}
+  {{"id":1,"action_type":"set_value","target":"Title","value":"Weekly Sync","key":null,"description":"Set the meeting title field","verification":"Title field reads 'Weekly Sync'"}},
+  {{"id":2,"action_type":"set_value","target":"Add required attendees","value":"alex@example.com","key":null,"description":"Add the attendee","verification":"Attendee pill shows alex@example.com"}}
 ]
 
 EXAMPLE 5 — launch app with search (no icon visible, no shortcut):
@@ -563,7 +543,6 @@ _COMPLETION_RULES = (
     "  • ‘run: <command>’ in terminal: The command has been TYPED (in history) AND "
     "Enter has been pressed (in history). If a shell prompt is now visible = goal achieved. "
     "Do NOT press Enter again.\n"
-    "  • ‘open browser’: the URL/address bar or browser tab is visible = achieved.\n"
     "  • ‘open <any app>’: the app’s actual running content is on screen "
     "(document area, file list, settings panel, etc.) = achieved.\n"
     "  • ‘click <menu item>’: if a submenu panel or dialog opened AFTER the click = "

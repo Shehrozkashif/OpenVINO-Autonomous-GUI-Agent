@@ -24,7 +24,8 @@ venv\Scripts\activate
 ### 3. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt       # runtime
+pip install -r requirements-dev.txt   # pytest + ruff (to run the test suite)
 ```
 
 ### 4. Prepare the models (only needed for live/e2e testing)
@@ -34,12 +35,14 @@ LLM and converts UI-TARS into the OpenVINO Model Server repository, then launche
 OVMS serving both on port 8000:
 
 ```bash
-# The conversion toolchain (optimum-intel, nncf) is included in requirements.txt.
+# The one-time conversion toolchain lives in requirements-export.txt:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-export.txt
 # Install the native ovms/ovms.exe binary and set OVMS_DIR (see README.md).
 python start.py                              # prepares models + starts OVMS + UI
 ```
 
-> **First run takes 30–60 minutes** for the UI-TARS INT4 conversion. Subsequent
+> **First run takes 30–60 minutes** for the UI-TARS INT8 conversion. Subsequent
 > runs skip this step. If conversion produces files with broken permissions on
 > Windows, delete the model folder from an elevated terminal and re-run `start.py`.
 

@@ -11,23 +11,39 @@
 # These names must match the servable names registered in the OVMS config.json
 # that start.py generates (model_repository_path below).
 
-LLM_MODEL = "qwen3-14b-int4-ov"         # text reasoning — routing, planning, reflection
-VLM_MODEL = "ui-tars-1.5-7b-int4-ov"    # GUI grounding & visual verification (UI-TARS)
+LLM_MODEL = "qwen3-8b-int4-ov"          # text reasoning — routing, planning, reflection
+VLM_MODEL = "ui-tars-1.5-7b-int8-ov"    # GUI grounding & visual verification (UI-TARS)
 
-# Sized for a 24 GB GPU: 14B LLM weights (~9.7 GB) + 7B VLM weights (~5 GB)
-# + KV caches (4 + 2 GB) + runtime overhead ≈ 22 GB.
-# On a 16 GB GPU use the smaller LLM instead:
-#   LLM_MODEL  = "qwen3-8b-int4-ov"
-#   LLM_SOURCE = "OpenVINO/Qwen3-8B-int4-ov"
-#   LLM_KV_CACHE_GB = 2
+# The 8B LLM (INT4) is the default: it generates markedly faster on the iGPU
+# than the 14B and is enough for routing/planning/reflection. Using the 8B for
+# reasoning frees VRAM to run the grounding VLM at INT8 instead of INT4 — INT8
+# UI-TARS regresses UI coordinates with less quantization error (fewer misclicks
+# on the visual grounding path, which the Teams/WebView2 flow leans on).
+# Budget on a 27 GB GPU: 8B-int4 (~5.5 GB) + 7B-int8 VLM (~7.5 GB) + KV caches
+# (4 + 2 GB) + runtime overhead ≈ 20.5 GB — ~6 GB spare.
+# FP16 UI-TARS (~15 GB weights) does NOT fit alongside the LLM + KV on 27 GB.
+# For higher reasoning accuracy (at a speed cost) the 14B still fits with the
+# INT8 VLM (14B-int4 ~9.7 + int8 VLM ~7.5 + KV 6 ≈ 24.7 GB):
+#   LLM_MODEL  = "qwen3-14b-int4-ov"
+#   LLM_SOURCE = "OpenVINO/Qwen3-14B-int4-ov"
 
 # ── Model sources (where start.py fetches / converts them from) ─────────────────
 # LLM_SOURCE is a pre-converted OpenVINO IR repo on Hugging Face — OVMS pulls it
-# directly. VLM_SOURCE is the upstream UI-TARS checkpoint; start.py converts it to
-# OpenVINO INT4 IR with optimum-cli on first run (no pre-built OV build exists).
+# directly (already INT4, so LLM_WEIGHT_FORMAT is a no-op for it). VLM_SOURCE is
+# the upstream UI-TARS checkpoint; start.py converts it to OpenVINO IR at
+# VLM_WEIGHT_FORMAT with optimum-cli on first run (no pre-built OV build exists).
 
-LLM_SOURCE = "OpenVINO/Qwen3-14B-int4-ov"
+LLM_SOURCE = "OpenVINO/Qwen3-8B-int4-ov"
 VLM_SOURCE = "ByteDance-Seed/UI-TARS-1.5-7B"
+
+# Quantization each model is exported at. The VLM is converted locally, so this
+# is where its precision is chosen: "int8" trades ~2.5 GB more VRAM for more
+# accurate coordinate grounding than "int4". "fp16" is too large to co-reside
+# with the LLM on 27 GB. Changing VLM_WEIGHT_FORMAT requires the servable name
+# (VLM_MODEL above) to change too, so start.py re-exports instead of reusing the
+# old precision's directory.
+LLM_WEIGHT_FORMAT = "int4"
+VLM_WEIGHT_FORMAT = "int8"
 
 # ── Endpoint ────────────────────────────────────────────────────────────────────
 
@@ -60,9 +76,11 @@ MODEL_REPOSITORY_PATH = "models"
 
 # ── Grounding ───────────────────────────────────────────────────────────────────
 # Coordinate convention of the served UI-TARS build. The prompt asks for the
-# native 0-1000 scale, but INT4 conversions sometimes emit raw pixels of the
-# input image instead — and values ≤ 1000 fit both readings, so "auto" has to
-# guess (heuristic in grounding._parse_coords). To make parsing deterministic:
+# native 0-1000 scale, but quantized conversions sometimes emit raw pixels of
+# the input image instead — and values ≤ 1000 fit both readings, so "auto" has
+# to guess (heuristic in grounding._parse_coords). To make parsing deterministic:
 # run tests/live/test_vlm_coordinates.py on the target machine once, see which
 # convention the model actually uses, and pin this to "norm1000" or "pixels".
+# NOTE: re-run that test after changing VLM_WEIGHT_FORMAT — a different
+# quantization can change which convention the model emits.
 VLM_COORD_SPACE = "auto"   # "auto" | "norm1000" | "pixels"

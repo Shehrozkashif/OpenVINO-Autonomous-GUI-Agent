@@ -386,7 +386,7 @@ class ReflectionAgent:
         )
         is_snap_launch = (
             step.action_type == "type" and
-            any(w in (step.value or "").lower() for w in ("firefox", "thunderbird"))
+            any(w in (step.value or "").lower() for w in ("teams", "thunderbird"))
         )
         if is_app_launch:
             return 1.5, 3.0

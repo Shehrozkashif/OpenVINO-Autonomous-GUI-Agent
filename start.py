@@ -26,6 +26,7 @@ from config import (
     LLM_KV_CACHE_GB,
     LLM_MODEL,
     LLM_SOURCE,
+    LLM_WEIGHT_FORMAT,
     MODEL_REPOSITORY_PATH,
     OVMS_BASE_URL,
     OVMS_REST_PORT,
@@ -33,6 +34,7 @@ from config import (
     VLM_KV_CACHE_GB,
     VLM_MODEL,
     VLM_SOURCE,
+    VLM_WEIGHT_FORMAT,
 )
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -259,24 +261,29 @@ def _ensure_cache_size(model_name: str, cache_gb: int):
 
 
 def _export_model(export_tool: str, source_model: str, model_name: str,
-                  device: str, cache_gb: int) -> bool:
+                  device: str, cache_gb: int, weight_format: str) -> bool:
     """Run export_model.py to convert/pull a model into the OVMS repository.
 
     The `text_generation` subcommand handles both plain LLMs and vision-language
     models — it runs optimum-cli for non-prebuilt sources (e.g. UI-TARS), writes
     a graph.pbtxt, and appends the servable to config.json.
+
+    weight_format is the export precision (int4/int8/fp16). For a source that is
+    already a converted IR (the pre-quantized LLM repo) it is a consistency no-op;
+    for the upstream UI-TARS checkpoint it selects the VLM's quantization.
     """
     if _model_already_exported(model_name):
         print(_green(f"  [OK] {model_name:<24} already in repository"))
         _ensure_cache_size(model_name, cache_gb)
         return True
 
-    print(_yellow(f"  [..] {model_name:<24} preparing from {source_model} (first run is slow)..."))
+    print(_yellow(f"  [..] {model_name:<24} preparing from {source_model} "
+                  f"({weight_format}, first run is slow)..."))
     cmd = [
         sys.executable, export_tool, "text_generation",
         "--source_model", source_model,
         "--model_name", model_name,
-        "--weight-format", "int4",
+        "--weight-format", weight_format,
         "--config_file_path", _CONFIG_JSON,
         "--model_repository_path", _REPO,
         "--target_device", device,
@@ -299,13 +306,15 @@ def ensure_models(device: str) -> bool:
     if not export_tool:
         return False
 
-    ok = _export_model(export_tool, LLM_SOURCE, LLM_MODEL, device, LLM_KV_CACHE_GB)
-    ok = _export_model(export_tool, VLM_SOURCE, VLM_MODEL, device, VLM_KV_CACHE_GB) and ok
+    ok = _export_model(export_tool, LLM_SOURCE, LLM_MODEL, device,
+                       LLM_KV_CACHE_GB, LLM_WEIGHT_FORMAT)
+    ok = _export_model(export_tool, VLM_SOURCE, VLM_MODEL, device,
+                       VLM_KV_CACHE_GB, VLM_WEIGHT_FORMAT) and ok
     if not ok:
         print(_yellow("  Model export failed. Check the output above for the specific error."))
         print(_yellow("  Common causes:"))
         print(_yellow("    - First-run UI-TARS conversion needs ~16 GB RAM and internet access"))
-        print(_yellow("    - Missing toolchain: pip install -r requirements.txt"))
+        print(_yellow("    - Missing toolchain: pip install -r requirements-export.txt"))
         print(_yellow("  On Windows: if model files have 'Access denied', delete the model folder"))
         print(_yellow("  from an elevated terminal and re-run this script."))
     return ok

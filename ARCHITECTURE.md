@@ -7,7 +7,7 @@ acts through raw Win32 input, and verifies every step against ground truth.
 
 ```
                 ┌────────────────────────────── OVMS (localhost:8000) ─┐
-                │  qwen3-14b-int4-ov (LLM)   ui-tars-1.5-7b-int4 (VLM) │
+                │  qwen3-8b-int4-ov (LLM)   ui-tars-1.5-7b-int8 (VLM) │
                 └───▲───────────▲───────────▲──────────────▲───────────┘
                     │           │           │              │
  instruction ─► Router ─► Orchestrator ─► Planner      Grounding S2 / verify
@@ -104,8 +104,8 @@ a model's opinion alone:
 
 | Role | Model | Why |
 |---|---|---|
-| Reasoning: decompose, plan, verify text, goal check, rephrase | `qwen3-14b-int4-ov` | strongest JSON/instruction following that fits the iGPU |
-| Visual: grounding coordinates, screenshot verification, visual planning | `ui-tars-1.5-7b-int4-ov` | purpose-trained GUI grounding |
+| Reasoning: decompose, plan, verify text, goal check, rephrase | `qwen3-8b-int4-ov` | fast JSON/instruction following on the iGPU; frees VRAM for an INT8 VLM |
+| Visual: grounding coordinates, screenshot verification, visual planning | `ui-tars-1.5-7b-int8-ov` | purpose-trained GUI grounding; INT8 for more accurate coordinates |
 
 Both stay resident in OVMS simultaneously; all calls go through one
 OpenAI-compatible endpoint (`core/ovms_client.py`).
