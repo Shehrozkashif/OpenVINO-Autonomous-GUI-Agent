@@ -237,6 +237,12 @@ class OCREngine:
 
 @dataclass
 class GroundingResult:
+    """Where an element was found on screen (or found=False if it wasn't).
+
+    (x, y) is the click point; `method` records which stage found it
+    (uia / ocr / vlm) for logging and dead-point bookkeeping.
+    """
+
     x: int
     y: int
     confidence: float

@@ -9,7 +9,7 @@ lives and why it was built that way.
 ## 1. The one-paragraph mental model
 
 The agent runs a **See → Plan → Act → Verify** loop against a real Windows
-desktop. A user instruction ("schedule a Zoom meeting tomorrow at 3pm") is
+desktop. A user instruction ("schedule a Teams meeting tomorrow at 3pm") is
 decomposed by the **Router** into subtasks; each subtask is executed by
 planning **one step at a time** against the live screen; every step is
 **verified** before the next one is planned — preferably by ground truth
@@ -39,7 +39,7 @@ locally on one OpenVINO Model Server endpoint.
 | `agents/reflection.py` | LLM/OCR verification when no deterministic check applies |
 | `memory/task_memory.py` | SQLite: success plans, failure patterns, per-subtask **checkpoints** |
 | `ui/` | PyQt6 Mission Control. `events.py` parses orchestrator log lines into typed signals |
-| `tests/unit/` | 430 tests, run anywhere: `venv` python + `pytest tests/unit` |
+| `tests/unit/` | 546 tests, run anywhere: `venv` python + `pytest tests/unit` |
 | `tests/live/` | Real-desktop suites (Windows + OVMS required); verified by disk/process ground truth |
 
 ## 3. Reading order
@@ -98,20 +98,24 @@ defined in their system prompts (`ROUTER_SYSTEM_PROMPT`, the planner's
 ACTION REFERENCE). If the agent decomposes or plans badly, fix the prompt
 next to the parsing code that enforces it.
 
-## 5. How a Zoom meeting actually happens (end to end)
+## 5. How a Teams meeting actually happens (end to end)
+
+This is the flagship flow — trace it once and the whole pipeline clicks.
 
 ```
-"schedule a zoom meeting with the team tomorrow at 3pm"
+"schedule a teams meeting with the team tomorrow at 3pm"
   → orchestrator.execute()
       → router.missing_parameters()  → dialog asks for topic/duration if absent
       → memory.load_checkpoint()     → resume hint if a recent run was interrupted
-      → router.decompose()           → [launch Zoom, open schedule form,
+      → router.decompose()           → [launch Teams, open the calendar & New meeting form,
                                         fill all fields, save & confirm]
       → per subtask: _execute_subtask()
-          launch    → verified by Zoom.exe in the process list
+          launch    → verified by ms-teams.exe in the process list
           form fill → planner emits set_value/select/invoke;
                       windows_uia sets each control and reads it back
-          save      → invoke "Save"; verified in Zoom's meeting list via UIA
+                      (Teams is a WebView2 app — the accessibility tree, not OCR,
+                       is what proves the title/attendees/time actually landed)
+          save      → invoke "Save"; verified in the Teams calendar via UIA
       → on a subtask failure: router.replan(completed, failed) → new queue
       → memory.save_checkpoint() after each subtask; cleared on success
 ```

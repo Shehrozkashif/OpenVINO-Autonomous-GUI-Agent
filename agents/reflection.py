@@ -26,6 +26,12 @@ from core.protocols import ActionStep, InferenceClient
 
 @dataclass
 class ReflectionResult:
+    """Verdict on whether one action step succeeded, returned by the verifier.
+
+    `should_retry` and `recovery_hint` steer the orchestrator's next move when
+    `success` is False; `ocr_text` is handed back so the next plan can reuse it.
+    """
+
     success: bool
     confidence: float
     observation: str
