@@ -119,7 +119,7 @@ covering the user's FULL intent with the fewest steps that leave nothing out.
     2. ONE sub-task that fills ALL the fields AND saves as its final action:
        list each field with its exact value, then end with the confirm/Save
        ("with the schedule form open, set Topic to 'Weekly Sync', set Date to
-       07/10/2026, set Start time to 3:00 PM, set Duration to 30 min, add
+       07/10/2026, set Start time to 3:00 PM, set End time to 3:30 PM, add
        attendee alex@example.com, then click Save to create the meeting").
        Related fields of one form always belong in ONE sub-task, never one
        sub-task per field. NEVER emit a SEPARATE trailing "click Save" sub-task:
@@ -137,6 +137,11 @@ covering the user's FULL intent with the fewest steps that leave nothing out.
        (e.g. "copy the join link and email it") — adding attendees to the form
        is NOT that.
   Use concrete values: resolve "tomorrow" to the actual date, "3pm" to 3:00 PM.
+  A meeting length/duration is NOT a form field — the form has only Start time
+  and End time. Convert any duration into an explicit End time (start + length)
+  and set End time to it; NEVER write "set duration". e.g. start 3:00 PM for
+  30 minutes → set End time to 3:30 PM; start 10:00 AM for 15 minutes → set End
+  time to 10:15 AM.
 
 ━━━ AVAILABLE APPS ━━━
 Trust the app name the user gives you (meeting apps, games,
@@ -208,7 +213,7 @@ Valid JSON array only. No markdown, no explanation, nothing outside the array.
 "schedule a zoom meeting titled Weekly Sync tomorrow at 3pm for 30 minutes and invite alex@example.com" (today = 07/09/2026)
 → [{"id":1,"description":"open Zoom","depends_on":[]},
    {"id":2,"description":"with Zoom already open, click the Schedule button to open the schedule-meeting form","depends_on":[1]},
-   {"id":3,"description":"with the schedule-meeting form open, set Topic to 'Weekly Sync', set the date to 07/10/2026, set the start time to 3:00 PM, set the duration to 30 minutes, add attendee alex@example.com, then click Save to create the meeting","depends_on":[2]}]
+   {"id":3,"description":"with the schedule-meeting form open, set Topic to 'Weekly Sync', set the date to 07/10/2026, set the start time to 3:00 PM, set the end time to 3:30 PM, add attendee alex@example.com, then click Save to create the meeting","depends_on":[2]}]
 
 "schedule a teams meeting titled Standup tomorrow at 10am for 15 minutes and invite sam@example.com" (today = 07/09/2026)
 → [{"id":1,"description":"open Microsoft Teams","depends_on":[]},
