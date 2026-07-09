@@ -976,6 +976,41 @@ class TaskOrchestrator:
         except Exception:
             return ""
 
+    def _first_action_targets_live_control(
+        self, run: "_SubtaskRun", subtask: SubTask,
+    ) -> bool:
+        """True when this subtask has done NOTHING yet but the control it must
+        actuate is present and enabled in the live tree.
+
+        Grounded in UIA truth (control still there = click not yet made) and
+        bounded to the first cycle, so it forces exactly one real action for an
+        actuation subtask and can never loop (after the action run.completed is
+        non-empty). This is what stops a pre-action goal-check from silently
+        skipping a Save/Submit/Create the model wrongly judged 'already done'.
+        """
+        # Only the first cycle: any successful (non-[FAILED) step means the
+        # subtask has already acted, and the normal goal-check governs.
+        if any(not c.startswith("[FAILED") for c in run.completed):
+            return False
+        desc = subtask.description.lower()
+        if not any(v in desc for v in
+                   ("click", "press", "save", "submit", "create", "invoke", "select")):
+            return False
+        # Match the subtask against the exact, enabled controls the planner sees
+        # ("'Save' [Button]"; disabled ones are tagged "(disabled)").
+        for m in re.finditer(r"'([^']+)' \[([^\]]*)\]", run.screen_context or ""):
+            name, meta = m.group(1), m.group(2)
+            if "disabled" in meta.lower():
+                continue
+            nl = name.lower()
+            # Whole-word/phrase match only: substring matching let 'Meet'
+            # fire inside "meeting", forcing an action on the wrong control.
+            if len(nl) >= 3 and re.search(
+                r"(?<![a-z0-9])" + re.escape(nl) + r"(?![a-z0-9])", desc
+            ):
+                return True
+        return False
+
     def _goal_already_satisfied(
         self, run: "_SubtaskRun", subtask: SubTask,
         skip_exclusions: bool = False,
@@ -1141,9 +1176,25 @@ class TaskOrchestrator:
         # this context moments ago and the planner is not consulted between
         # queue pops — paying 10-16 s of LLM per queued step re-answers a
         # question nobody reads (live: ~1 min of pure goal checks per form).
-        if not run.step_queue and self._goal_already_satisfied(run, subtask):
-            self.log("  [GOAL-CHECK] Goal already satisfied on current screen")
-            return ("done", None)
+        if not run.step_queue:
+            # Ground-truth override, checked BEFORE paying for the goal-check
+            # LLM: on a subtask's FIRST cycle (nothing actioned yet), an
+            # "already satisfied" verdict is not trustworthy while the very
+            # control the subtask must actuate is still sitting in the tree
+            # ENABLED — that is proof the action has NOT happened. Live: the
+            # 8B blessed "click Save to create the meeting" as done because the
+            # form was filled and 'Save' was present, so the meeting was never
+            # created and the run falsely reported success. Act once here; once
+            # a step has run, run.completed is non-empty and this guard is off,
+            # so a nav button that stays visible after its click cannot loop.
+            if self._first_action_targets_live_control(run, subtask):
+                self.log(
+                    "  [GOAL-CHECK] Target control present and unactuated — "
+                    "acting once before trusting a 'done' verdict"
+                )
+            elif self._goal_already_satisfied(run, subtask):
+                self.log("  [GOAL-CHECK] Goal already satisfied on current screen")
+                return ("done", None)
 
         # Real date/time from the OS — the planner otherwise reasons from the
         # model's frozen sense of "now" (it clicked 'Today' to select a date
