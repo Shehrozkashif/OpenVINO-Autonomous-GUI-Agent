@@ -116,16 +116,17 @@ covering the user's FULL intent with the fewest steps that leave nothing out.
   Decompose form work into exactly TWO kinds of sub-task:
     1. one sub-task to OPEN the form ("with Zoom already open, click the
        Schedule button to open the schedule-meeting form")
-    2. ONE sub-task that fills ALL the fields AND saves as its final action:
-       list each field with its exact value, then end with the confirm/Save
+    2. ONE final sub-task that fills ALL the fields AND ends by clicking Save —
+       the Save is the LAST action of this SAME sub-task, never its own:
        ("with the schedule form open, set Topic to 'Weekly Sync', set Date to
        07/10/2026, set Start time to 3:00 PM, set End time to 3:30 PM, add
        attendee alex@example.com, then click Save to create the meeting").
-       Related fields of one form always belong in ONE sub-task, never one
-       sub-task per field. NEVER emit a SEPARATE trailing "click Save" sub-task:
-       fill and Save live in this single sub-task, because after the form saves
-       it closes, so a fresh Save sub-task re-opens a blank form and creates a
-       half-filled DUPLICATE.
+       So form work is exactly TWO sub-tasks — RIGHT: [open the form],
+       [set every field …, then click Save]. WRONG: [open the form],
+       [set every field …], [click Save] ← that trailing Save sub-task is a
+       bug: Save CLOSES the form, so it lands on the "meeting created"
+       confirmation, finds no form to save, and loops. Related fields of one
+       form always belong in ONE sub-task, never one sub-task per field.
        ATTENDEES / INVITEES / RECIPIENTS ARE FORM FIELDS, not a later action:
        the email address(es) to invite go in THIS sub-task with the exact
        address from the instruction ("...add attendee alex@example.com"), filled
