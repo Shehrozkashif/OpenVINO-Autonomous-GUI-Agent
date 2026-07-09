@@ -924,9 +924,24 @@ class CommandInput(QPlainTextEdit):
         self._adjust_height()
 
     def _adjust_height(self, *_):
+        # Size by the number of REAL laid-out visual lines, not blockCount().
+        # Shift+Enter (the only way to add a line here — plain Enter submits)
+        # inserts a *soft* line break that stays inside one block, so counting
+        # blocks left the box stuck at one line: everything the user typed
+        # below line 1 was invisible AND unscrollable (scrollbar was off).
+        # Line-layout counting also handles a long line that word-wraps.
         line_h = self.fontMetrics().lineSpacing()
-        lines = max(1, min(4, self.document().blockCount()))
-        self.setFixedHeight(int(line_h * lines + 18))
+        lines = 0
+        block = self.document().begin()
+        while block.isValid():
+            lines += max(1, block.layout().lineCount())
+            block = block.next()
+        capped = lines > 4
+        self.setFixedHeight(int(line_h * max(1, min(4, lines)) + 18))
+        # Once past the 4-line cap, let the user scroll to what's hidden.
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if capped
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def keyPressEvent(self, e):
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and \

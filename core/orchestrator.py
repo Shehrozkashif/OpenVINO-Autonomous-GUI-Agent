@@ -436,7 +436,14 @@ class TaskOrchestrator:
                         f"subtask(s) so finished work is not thrown away"
                     )
                     continue
-                self.log(f"[SUBTASK {subtask.id}] Failed — stopping task")
+                # A subtask returns failure the moment Stop is pressed mid-step;
+                # report that as a user stop (not a task failure) so the UI shows
+                # "Stopped", the summary reads right, and the run is not recorded
+                # as a genuine failure pattern.
+                if self._stop_event.is_set():
+                    self.log("[TASK] Stopped by user.")
+                else:
+                    self.log(f"[SUBTASK {subtask.id}] Failed — stopping task")
                 failed = True
                 break
 
@@ -1883,6 +1890,13 @@ class TaskOrchestrator:
         return False
 
     def _execute_step(self, step: ActionStep) -> bool:
+        # Stop pressed: never BEGIN a new action. The step loop already checks
+        # between steps, but grounding one target can block 30-60 s on a VLM
+        # call — without a check here (and before each dispatch below) the
+        # agent finished grounding and still fired the click after the user
+        # hit Stop, which is exactly why the button felt dead.
+        if self._stop_event.is_set():
+            return False
         x, y, x2, y2 = None, None, None, None
         # Where the last click-family step actually landed — lets the
         # reflector's "screen unchanged" verdict blacklist the exact point.
@@ -1918,6 +1932,8 @@ class TaskOrchestrator:
                 # Explicit pixel coordinates (visual-planner convention)
                 x, y = _coords
                 self._last_click_xy = (x, y)
+                if self._stop_event.is_set():
+                    return False
                 return self.actor.execute(step, x=x, y=y)
             if not step.target:
                 self.log(f"  {step.action_type} has no target")
@@ -1984,6 +2000,8 @@ class TaskOrchestrator:
                 and (step.target or "").lower() not in self._invoke_dead
             ):
                 from core import windows_uia
+                if self._stop_event.is_set():
+                    return False
                 if windows_uia.invoke_element(step.target, timeout_s=2.5):
                     self._last_was_invoke = True
                     return True
@@ -2050,6 +2068,10 @@ class TaskOrchestrator:
                 )
                 return False
 
+        # Final stop gate: grounding above may have blocked for seconds on a
+        # model call during which the user hit Stop — do not fire the action.
+        if self._stop_event.is_set():
+            return False
         return self.actor.execute(step, x=x, y=y, x2=x2, y2=y2)
 
     # ── Deterministic terminal-command verification ─────────────────────────────

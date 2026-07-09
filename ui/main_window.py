@@ -353,11 +353,24 @@ class DesktopGUIAgent(QMainWindow):
         return bool(ctx["answer"][0])
 
     def _start_screen_timer(self):
+        self._capturing = False
         self._screen_timer = QTimer(self)
         self._screen_timer.timeout.connect(self._refresh_screen)
         self._screen_timer.start(1000)  # 1 FPS live view
 
     def _refresh_screen(self):
+        # Grab + PNG-encode the whole desktop OFF the UI thread. At 1440p/4K a
+        # full GDI capture + LANCZOS resize + PNG encode is 150-400 ms; running
+        # it on the Qt event loop once a second stalled clicks and keystrokes
+        # (buttons felt dead, typing stuttered). Only the cheap QPixmap decode
+        # stays on the UI thread (_show_screenshot). Skip the cycle if a prior
+        # grab is still in flight so slow frames never pile up.
+        if self._capturing:
+            return
+        self._capturing = True
+        threading.Thread(target=self._grab_screen_frame, daemon=True).start()
+
+    def _grab_screen_frame(self):
         from core.capture.screenshot import ScreenCapture
         try:
             img = ScreenCapture().capture_resized(960, 540)
@@ -366,6 +379,8 @@ class DesktopGUIAgent(QMainWindow):
             self.signals.screenshot_update.emit(buf.getvalue())
         except Exception:
             pass
+        finally:
+            self._capturing = False
 
     def _show_screenshot(self, img_bytes: bytes):
         px = QPixmap()
@@ -452,6 +467,13 @@ class DesktopGUIAgent(QMainWindow):
     def _stop_task(self):
         if self.orchestrator:
             self.orchestrator.stop()
+            # Instant feedback: the worker may still be finishing an in-flight
+            # model call for a few seconds, so the mission does not end on this
+            # exact click. Tell the user their Stop registered instead of
+            # leaving a dead-looking button.
+            self.hud.state_label.setText("Stopping…")
+            self.hud.detail.setText("Finishing the current step, then halting…")
+            self.status_chip.set_state("Stopping…", C.WARNING)
 
     def _on_done(self, result: dict):
         self._running = False
