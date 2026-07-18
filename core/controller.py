@@ -56,6 +56,7 @@ class _INPUT(ctypes.Structure):
 _INPUT_MOUSE = 0
 _INPUT_KEYBOARD = 1
 
+_MOUSEEVENTF_MOVE = 0x0001
 _MOUSEEVENTF_LEFTDOWN = 0x0002
 _MOUSEEVENTF_LEFTUP = 0x0004
 _MOUSEEVENTF_RIGHTDOWN = 0x0008
@@ -63,6 +64,8 @@ _MOUSEEVENTF_RIGHTUP = 0x0010
 _MOUSEEVENTF_MIDDLEDOWN = 0x0020
 _MOUSEEVENTF_MIDDLEUP = 0x0040
 _MOUSEEVENTF_WHEEL = 0x0800
+_MOUSEEVENTF_VIRTUALDESK = 0x4000
+_MOUSEEVENTF_ABSOLUTE = 0x8000
 
 _KEYEVENTF_EXTENDEDKEY = 0x0001
 _KEYEVENTF_KEYUP = 0x0002
@@ -118,6 +121,51 @@ def _get_cursor_pos() -> tuple:
     pt = wintypes.POINT()
     ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
     return pt.x, pt.y
+
+
+def _mouse_move_abs(x: int, y: int) -> None:
+    """Move the cursor via a real SendInput MOVE event (not SetCursorPos).
+
+    WebView2/Electron apps hit-test and fire hover (pointerover) from events
+    that arrive through the input pipeline; a SetCursorPos teleport does not
+    always register. Coordinates are normalized to the 0-65535 virtual-desktop
+    space SendInput expects for absolute moves.
+    """
+    u = ctypes.windll.user32
+    vx, vy = u.GetSystemMetrics(76), u.GetSystemMetrics(77)      # SM_X/YVIRTUALSCREEN
+    vw, vh = u.GetSystemMetrics(78), u.GetSystemMetrics(79)      # SM_C X/Y VIRTUALSCREEN
+    if vw <= 0 or vh <= 0:
+        _set_cursor_pos(x, y)
+        return
+    nx = int((x - vx) * 65535 / (vw - 1))
+    ny = int((y - vy) * 65535 / (vh - 1))
+    inp = _INPUT(type=_INPUT_MOUSE)
+    inp.mi = _MOUSEINPUT(nx, ny, 0,
+                         _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK,
+                         0, 0)
+    _send_input(inp)
+
+
+def _focus_window_at(x: int, y: int) -> None:
+    """Bring the top-level window under (x, y) to the foreground before clicking.
+
+    A click into a background window is delivered but web engines frequently
+    use the first click only to take focus, swallowing the action (live: Teams'
+    'New meeting' ignored repeated pixel clicks). Best-effort — foreground
+    rules can deny the request, and the click proceeds regardless.
+    """
+    try:
+        u = ctypes.windll.user32
+        pt = wintypes.POINT(int(x), int(y))
+        hwnd = u.WindowFromPoint(pt)
+        if not hwnd:
+            return
+        root = u.GetAncestor(hwnd, 2)   # GA_ROOT
+        if root and root != u.GetForegroundWindow():
+            u.SetForegroundWindow(root)
+            time.sleep(0.15)
+    except Exception:
+        pass
 
 
 # ── Cursor glide ──────────────────────────────────────────────────────────────
@@ -307,7 +355,15 @@ class DesktopController:
         up = _MOUSE_UP_FLAG.get(button, _MOUSEEVENTF_LEFTUP)
         self._notify_pointer(x, y, button)
         _glide_cursor(x, y)
-        time.sleep(0.12)
+        # Real-input hover sequence: focus the target window, then deliver the
+        # position through SendInput MOVE events so hover-driven UIs (web
+        # engines, custom toolkits) register pointer-over before the press.
+        # A 1px settle move guarantees at least one WM_MOUSEMOVE at the target.
+        _focus_window_at(x, y)
+        _mouse_move_abs(x + 1, y)
+        time.sleep(0.03)
+        _mouse_move_abs(x, y)
+        time.sleep(0.15)
         _mouse_event(down)
         time.sleep(0.08)
         _mouse_event(up)
@@ -322,7 +378,11 @@ class DesktopController:
         x, y = int(x), int(y)
         self._notify_pointer(x, y, "double")
         _glide_cursor(x, y)
-        time.sleep(0.12)
+        _focus_window_at(x, y)
+        _mouse_move_abs(x + 1, y)
+        time.sleep(0.03)
+        _mouse_move_abs(x, y)
+        time.sleep(0.15)
         _mouse_event(_MOUSEEVENTF_LEFTDOWN)
         time.sleep(0.08)
         _mouse_event(_MOUSEEVENTF_LEFTUP)

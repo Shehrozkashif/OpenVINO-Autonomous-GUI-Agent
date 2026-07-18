@@ -180,11 +180,12 @@ class ReflectionAgent:
         # Capture once — reuse for both paths
         screenshot = self.capturer.capture()
 
+        _after_hash = frame_phash(screenshot) if _before_hash is not None else None
         if _before_hash is not None:
             # High-fidelity frame comparison (H2). delta==0 now genuinely means
             # "nothing changed on screen", so a click that opened a small menu is
             # no longer mis-scored as a no-op.
-            if (_before_hash - frame_phash(screenshot)) == 0:
+            if (_before_hash - _after_hash) == 0:
                 result = ReflectionResult(
                     success=False,
                     confidence=0.98,
@@ -254,7 +255,33 @@ class ReflectionAgent:
                 vlm_result = self._verify_with_vlm(
                     step, self._encode(screenshot), verification
                 )
-                result = self._reconcile(result, vlm_result)
+                # Pixel evidence outranks the VLM's judgement: a click that was
+                # supposed to reveal new UI cannot have succeeded when the
+                # screen is near-identical to the pre-click frame (≤2 of 64
+                # phash bits — cursor/hover noise). VLM verifiers hallucinate
+                # "the dialog appeared" on such frames (seen live, 4×), which
+                # cascades into false task completion.
+                if (
+                    vlm_result.success
+                    and _before_hash is not None
+                    and (_before_hash - _after_hash) <= 2
+                ):
+                    logger.info(
+                        "[REFLECTION] VLM claims success but the screen is "
+                        "nearly unchanged since before the click — distrusting"
+                    )
+                    result.success = False
+                    result.should_retry = True
+                    result.error_description = (
+                        result.error_description
+                        or "Screen barely changed after the click"
+                    )
+                    result.recovery_hint = (
+                        result.recovery_hint
+                        or "Re-ground the target element; it may have moved or become inactive"
+                    )
+                else:
+                    result = self._reconcile(result, vlm_result)
                 result.ocr_text = ocr_text   # preserve OCR for orchestrator reuse
             except Exception as e:
                 logger.debug(
