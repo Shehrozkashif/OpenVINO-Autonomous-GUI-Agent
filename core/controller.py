@@ -12,6 +12,7 @@ so the module can still be imported (and its higher-level methods mocked)
 on a non-Windows host for unit testing.
 """
 import ctypes
+import os
 import threading
 import time
 from ctypes import wintypes
@@ -161,6 +162,23 @@ def _focus_window_at(x: int, y: int) -> None:
         if not hwnd:
             return
         root = u.GetAncestor(hwnd, 2)   # GA_ROOT
+        # Own-window trap: the agent's GUI is capture-EXCLUDED, so screenshots
+        # (and therefore grounding) see the app BEHIND it — but a physical
+        # click at that point lands on the GUI and silently does nothing
+        # (live: 16 minutes of delta=0 clicks with Teams "visible" in OCR).
+        # If the window that would receive this click belongs to our own
+        # process, minimize it so the click reaches the app underneath.
+        pid = wintypes.DWORD()
+        u.GetWindowThreadProcessId(root, ctypes.byref(pid))
+        if pid.value == os.getpid():
+            logger.warning(
+                f"[Controller] Own GUI window is covering the click point "
+                f"({x},{y}) — minimizing it so the click reaches the app behind"
+            )
+            u.ShowWindow(root, 6)   # SW_MINIMIZE
+            time.sleep(0.4)
+            hwnd = u.WindowFromPoint(pt)
+            root = u.GetAncestor(hwnd, 2) if hwnd else 0
         if root and root != u.GetForegroundWindow():
             u.SetForegroundWindow(root)
             time.sleep(0.15)
