@@ -202,7 +202,12 @@ class OCREngine:
                     # e.g. "folder" inside a 100-char Monitor event line → ~0.25, rejected.
                     length_penalty = min(1.0, (len(q) / max(len(combined), 1)) * 4)
                     score = 0.95 * length_penalty
-                elif combined in q and len(combined) >= 4:
+                elif combined in q and len(combined) >= 4 and re.search(
+                    rf"(?:^|\s){re.escape(combined)}(?:$|\s)", q
+                ):
+                    # Whole-word containment only: "save" may stand in for
+                    # "save button", but "meet" must NOT match "new meeting"
+                    # (fragment of "meeting" — a different control entirely).
                     score = 0.90
                 else:
                     len_ratio = min(len(q), len(combined)) / max(len(q), len(combined))
