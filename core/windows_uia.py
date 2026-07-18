@@ -16,18 +16,29 @@ Why UIA beats OCR for grounding:
   - 10-20x faster than OCR + VLM inference chain
 """
 import difflib
+import os
 import threading
 
 from loguru import logger
 
 _uia = None          # lazy-loaded uiautomation module reference
 _available: bool | None = None
+_disabled_logged = False     # AGENT_DISABLE_UIA notice printed once
 
 
 # ── Module availability ───────────────────────────────────────────────────────
 
 def _load() -> bool:
     global _uia, _available
+    # Kill switch: AGENT_DISABLE_UIA=1 turns off every UIA path (Stage 0
+    # grounding, planner control hints, set_value, hit-testing) so the
+    # OCR/VLM stages can be exercised on machines where UIA would win.
+    if os.environ.get("AGENT_DISABLE_UIA", "").strip().lower() in ("1", "true", "yes"):
+        global _disabled_logged
+        if not _disabled_logged:
+            _disabled_logged = True
+            logger.info("[UIA] disabled via AGENT_DISABLE_UIA — OCR/VLM stages take over")
+        return False
     if _available is not None:
         return _available
     try:
@@ -45,7 +56,11 @@ def _load() -> bool:
 
 
 def is_available() -> bool:
-    """True if the uiautomation backend loaded — i.e. UIA grounding can be used."""
+    """True if the uiautomation backend loaded — i.e. UIA grounding can be used.
+
+    Set AGENT_DISABLE_UIA=1 to force this off, e.g. to exercise the OCR/VLM
+    grounding stages on machines where UIA would otherwise always win.
+    """
     return _load()
 
 
