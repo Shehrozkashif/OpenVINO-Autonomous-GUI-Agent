@@ -41,6 +41,18 @@ from ui.widgets import (
     relative_time,
 )
 
+# One-click demo prompt: always shown as the FIRST suggestion chip. Used to
+# test all three grounding stages (UIA / OCR / VLM) with the exact same task —
+# it names every navigation step so the agent works even without the UIA
+# control list (OCR/VLM modes).
+DEMO_PROMPT = (
+    "open Microsoft Teams, click the Calendar button in the left sidebar, "
+    "click the New meeting button, set the title to 'PROJECT DISCUSSION', "
+    "set the date to 07/10/2026, set the start time to 3:00 PM, set the end "
+    "time to 3:30 PM, add attendee shehrozbaloch005@gmail.com, then click "
+    "Save to create the meeting"
+)
+
 _SUGGESTIONS = [
     "Open Notepad and write a haiku about automation",
     "Open Chrome and search for OpenVINO",
@@ -234,10 +246,12 @@ class HomePage(QWidget):
             it = self.sug_row.takeAt(0)
             if it.widget():
                 it.widget().deleteLater()
-        chips = [t["instruction"] for t in tasks[:2]]
+        chips = [DEMO_PROMPT]
+        chips += [t["instruction"] for t in tasks[:2] if t["instruction"] != DEMO_PROMPT]
         chips += [s for s in _SUGGESTIONS if s not in chips]
         for text in chips[:4]:
-            b = QPushButton(text if len(text) <= 52 else text[:50] + "...")
+            label = "Demo: schedule Teams meeting" if text == DEMO_PROMPT else text
+            b = QPushButton(label if len(label) <= 52 else label[:50] + "...")
             b.setProperty("kind", "chip")
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(text)
