@@ -27,6 +27,7 @@ Execution flow:
     → return extracted_data alongside success/failure
 """
 import json
+import os
 import re
 import subprocess
 import threading
@@ -2053,10 +2054,15 @@ class TaskOrchestrator:
             # (live: 'Invite to Teams' invoked 6× with zero screen change —
             # coordinate blacklists never fire because no pixel is involved).
             # One failed verify per target sends retries down the pixel path.
+            # AGENT_FORCE_MOUSE=1 skips the pattern-invoke shortcut entirely:
+            # UIA still supplies the exact coordinates, but the click is
+            # always performed with the real mouse (demo / requirement mode).
             if (
                 step.action_type == "click"
                 and "uia" in (result.method or "")
                 and (step.target or "").lower() not in self._invoke_dead
+                and os.environ.get("AGENT_FORCE_MOUSE", "").strip().lower()
+                not in ("1", "true", "yes")
             ):
                 from core import windows_uia
                 if self._stop_event.is_set():
