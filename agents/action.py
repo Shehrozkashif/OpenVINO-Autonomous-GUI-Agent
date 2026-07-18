@@ -211,6 +211,26 @@ class ActionExecutionAgent:
         # web widgets) still take keyboard input: focus via the tree, replace
         # the content, verify by reading the focused control back.
         if not windows_uia.focus_element(step.target):
+            # Pixel fallback: the orchestrator grounds the field label and
+            # passes its coordinates — click the field to focus it, then
+            # replace the content by typing. No read-back is possible without
+            # the accessibility tree; the reflection agent verifies the
+            # visible outcome instead.
+            if x is not None and y is not None:
+                logger.info(
+                    f"[ACTION] set_value '{step.target}': tree focus failed — "
+                    f"falling back to click-to-focus at ({x},{y}) + type"
+                )
+                self.controller.click(x, y)
+                time.sleep(0.3)
+                self.controller.hotkey("ctrl", "a")
+                if self.controller.type_text(value, sensitive=sensitive):
+                    logger.info(
+                        f"[ACTION] set_value via click+type '{step.target}' "
+                        f"(reflection verifies the result)"
+                    )
+                    return True
+                return False
             logger.warning(
                 f"[ACTION] set_value '{step.target}': ValuePattern write "
                 f"failed and the control could not be focused"
@@ -239,7 +259,25 @@ class ActionExecutionAgent:
             logger.error(f"[ACTION] select step {step.id} needs target and value")
             return False
         from core import windows_uia
-        return windows_uia.select_option(step.target, step.value)
+        if windows_uia.select_option(step.target, step.value):
+            return True
+        # Pixel fallback (mirrors set_value): click the combobox, replace its
+        # text with the wanted option, commit with Enter. Editable comboboxes
+        # (date/time pickers) accept typed values; the reflector verifies.
+        if x is not None and y is not None:
+            logger.info(
+                f"[ACTION] select '{step.target}': tree select failed — "
+                f"falling back to click + type '{step.value}' + enter at ({x},{y})"
+            )
+            self.controller.click(x, y)
+            time.sleep(0.3)
+            self.controller.hotkey("ctrl", "a")
+            if not self.controller.type_text(step.value):
+                return False
+            time.sleep(0.2)
+            self.controller.press_key("enter")
+            return True
+        return False
 
     def _do_invoke(self, step, x, y, x2, y2) -> bool:
         if not step.target:

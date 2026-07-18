@@ -2132,6 +2132,20 @@ class TaskOrchestrator:
                     "step aborted for safety"
                 )
                 return False
+            # Ground the field label (UIA+OCR only, no VLM) so set_value has a
+            # pixel fallback: when the accessibility tree cannot focus the
+            # control (UIA disabled, or web widgets with no writable pattern),
+            # the actor clicks the field and types instead of failing outright.
+            if step.action_type == "set_value" and step.target:
+                _r = self.grounder.ground_fast(step.target)
+                if _r.found and _r.confidence >= self.grounder.min_confidence:
+                    x, y = _r.x, _r.y
+
+        # select shares set_value's pixel fallback and needs coordinates too
+        elif step.action_type == "select" and step.target:
+            _r = self.grounder.ground_fast(step.target)
+            if _r.found and _r.confidence >= self.grounder.min_confidence:
+                x, y = _r.x, _r.y
 
         # Final stop gate: grounding above may have blocked for seconds on a
         # model call during which the user hit Stop — do not fire the action.
