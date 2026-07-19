@@ -48,7 +48,7 @@ from ui.widgets import (
 DEMO_PROMPT = (
     "open Microsoft Teams, click the Calendar button in the left sidebar, "
     "click the New meeting button, set the title to 'PROJECT DISCUSSION', "
-    "set the date to 07/10/2026, set the start time to 3:00 PM, set the end "
+    "set the date to 07/29/2026, set the start time to 3:00 PM, set the end "
     "time to 3:30 PM, add attendee shehrozbaloch005@gmail.com, then click "
     "Save to create the meeting"
 )

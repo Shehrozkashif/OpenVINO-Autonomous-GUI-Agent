@@ -1396,6 +1396,37 @@ class TaskOrchestrator:
             )
         run.last_error = ""
 
+        # COMMIT-GUARD: never let a form COMMIT (Save/Submit/Create/Send) fire
+        # before the values the subtask names are actually IN the form. The 8B
+        # planner sometimes orders the Save click early, and a queue-flush
+        # re-plan can promote it — a Save on a half-filled form creates nothing
+        # (or a wrong entry) yet 'verifies' as a successful click, so the run
+        # reports success while the calendar stays empty. This is deterministic
+        # ground truth: read each required value back from the live UIA control
+        # list; if any is still missing, block the commit and make the planner
+        # fill the fields first. Only fires when the control list is readable
+        # (UIA on) — on the OCR/VLM path we can't prove a field is empty, so we
+        # don't block.
+        _submit_t = self._subtask_submit_target(subtask)
+        if (
+            _submit_t
+            and step.action_type in ("click", "invoke", "double_click")
+            and self._targets_match(step.target, _submit_t)
+        ):
+            _missing = self._unfilled_form_values(subtask, run.screen_context)
+            if _missing:
+                run.last_error = (
+                    f"the form is NOT fully filled yet — {', '.join(_missing)} "
+                    f"still missing from the form; set every field BEFORE "
+                    f"clicking {_submit_t}"
+                )
+                self.log(
+                    f"  [COMMIT-GUARD] Blocking '{_submit_t}' — form still "
+                    f"missing: {', '.join(_missing)}"
+                )
+                run.step_queue = []   # re-plan against the live, half-filled form
+                return "step_failed"
+
         # Fix C5: classify whether re-executing this exact step is safe.
         # Non-idempotent actions change state every time they run: typing
         # appends text again ("hellohello"), Enter submits/creates twice,
@@ -2406,6 +2437,62 @@ class TaskOrchestrator:
         if not matches:
             return None
         return matches[-1].group(1)
+
+    @staticmethod
+    def _required_form_values(subtask) -> list[str]:
+        """Concrete values a form-fill subtask must place before it commits.
+
+        Parsed from the router's "set X to '<v>' / set the date to <v> / add
+        attendee <v>" phrasing: quoted strings (title), dates, times, and email
+        addresses. Used by the COMMIT-GUARD to refuse a Save/Submit until every
+        one of these is actually present in the live form.
+        """
+        desc = subtask.description or ""
+        vals: list[str] = []
+        vals += re.findall(r"'([^']{2,})'", desc)                       # quoted (title)
+        vals += re.findall(r'"([^"]{2,})"', desc)
+        # dates m/d/yyyy → normalised to the un-padded form the app displays
+        vals += [f"{int(mo)}/{int(da)}/{yr}"
+                 for mo, da, yr in re.findall(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", desc)]
+        vals += re.findall(r"\b\d{1,2}:\d{2}\s*[AaPp]\.?[Mm]\.?\b", desc)  # times
+        vals += re.findall(r"[\w.+-]+@[\w.-]+\.\w+", desc)                # emails
+        seen, out = set(), []
+        for v in vals:
+            k = v.strip().lower()
+            if k and k not in seen:
+                seen.add(k)
+                out.append(v.strip())
+        return out
+
+    @staticmethod
+    def _value_in_controls(value: str, controls_text: str) -> bool:
+        """Is `value` currently present in the UIA control readback text?
+
+        Field values surface as "[Edit = 'PROJECT DISCUSSION']" /
+        "[ComboBox = '7/29/2026']". Dates are matched in both padded and
+        un-padded forms (07/29/2026 vs 7/29/2026)."""
+        t = (controls_text or "").lower()
+        v = value.strip().lower()
+        if v and v in t:
+            return True
+        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})$", value.strip())
+        if m:
+            mo, da, yr = m.groups()
+            for var in (f"{int(mo)}/{int(da)}/{yr}", f"{int(mo):02d}/{int(da):02d}/{yr}"):
+                if var.lower() in t:
+                    return True
+        return False
+
+    def _unfilled_form_values(self, subtask, controls_text: str) -> list[str]:
+        """Required form values NOT yet present in the live control readback.
+
+        Only meaningful when the UIA CLICKABLE CONTROLS list (with "= '…'"
+        readbacks) is available; without it (OCR/VLM path) a field's emptiness
+        can't be proven, so return [] and never block."""
+        if "CLICKABLE CONTROLS" not in (controls_text or ""):
+            return []
+        return [v for v in self._required_form_values(subtask)
+                if not self._value_in_controls(v, controls_text)]
 
     @staticmethod
     def _targets_match(a: str | None, b: str | None) -> bool:
