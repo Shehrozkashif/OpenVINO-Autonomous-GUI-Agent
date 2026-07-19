@@ -576,6 +576,22 @@ def covering_element(x: int, y: int, target: str, timeout_s: float = 1.5) -> str
         _com = _thread_com_init()
         try:
             ctrl = _uia.ControlFromPoint(int(x), int(y))
+            # WebView2/Electron content roots hand back their DocumentControl
+            # for ANY inner point — ControlFromPoint cannot descend into the
+            # browser tree the way FindAll can. When the hit-test bottoms out
+            # at a Document, it has NOT found an overlay: the target the caller
+            # grounded (via FindAll, which DOES reach WebView2 content) lives
+            # inside that very document. Treating the container as an occluder
+            # falsely blocked legitimate clicks/invokes on the Teams
+            # scheduling form's Save button (form filled, but Save never fired
+            # → meeting not created). A real overlay surfaces as a Window /
+            # Pane / Menu / Dialog on top, never as the content root. "Can't
+            # tell" must never be read as proof of occlusion.
+            try:
+                if ctrl is not None and ctrl.ControlTypeName == "DocumentControl":
+                    return
+            except Exception:
+                pass
             names, hops = [], 0
             while ctrl is not None and hops < 8:
                 try:
