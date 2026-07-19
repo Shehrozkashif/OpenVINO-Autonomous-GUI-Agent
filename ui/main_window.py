@@ -395,6 +395,25 @@ class DesktopGUIAgent(QMainWindow):
 
     # ── Task lifecycle ────────────────────────────────────────────────────────
 
+    def _emit_log(self, msg: str):
+        """Route an orchestrator decision to loguru, which reaches both places.
+
+        The GUI wired orchestrator.log straight to the HUD signal, so every
+        routing decision ([SUBTASK]/[GOAL-CHECK]/[CLICK-CHECK]/…) was invisible
+        in the terminal — the log the dev loop actually pastes. Emitting through
+        loguru puts it in the terminal (and file sink) AND still reaches the HUD
+        via the always-installed LoguruBridge (events.py) → bus.feed. Going
+        through loguru only — not also signals.log_update — avoids feeding
+        bus.feed twice (LoguruBridge + log_update), which would double the line.
+        """
+        try:
+            from loguru import logger
+            logger.opt(depth=1).info(msg)
+        except Exception:
+            # Loguru unavailable for some reason — fall back to the HUD signal
+            # so a decision is never silently dropped.
+            self.signals.log_update.emit(msg)
+
     def _run_task(self):
         if self._running:
             return
@@ -424,8 +443,7 @@ class DesktopGUIAgent(QMainWindow):
         # dialogs run on a prep thread while the window is still visible;
         # _launch_mission then minimizes and starts the worker with the
         # enriched instruction.
-        self.orchestrator.log = \
-            lambda msg: self.signals.log_update.emit(msg)
+        self.orchestrator.log = self._emit_log
         self.orchestrator.on_ask = self._ask_blocking
 
         def _prep():
@@ -452,8 +470,7 @@ class DesktopGUIAgent(QMainWindow):
 
     def _worker(self, instruction: str):
         try:
-            self.orchestrator.log = \
-                lambda msg: self.signals.log_update.emit(msg)
+            self.orchestrator.log = self._emit_log
             # Elicitation already ran pre-minimize (_run_task) — disable it in
             # execute() so the mission never pops a dialog under a minimized
             # window. Destructive-command confirmation stays wired.
