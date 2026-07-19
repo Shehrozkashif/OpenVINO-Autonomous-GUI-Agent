@@ -2193,9 +2193,42 @@ class TaskOrchestrator:
                 from core import windows_uia
                 if self._stop_event.is_set():
                     return False
+                # WebView2 providers often THROW from Invoke (0x80040201,
+                # 'event unable to invoke any of the subscribers') while the
+                # button is STILL PRESSED. Treating the throw as "invoke did
+                # nothing" and firing the pixel fallback at the PRE-invoke
+                # coordinates then clicks whatever the actuation put there —
+                # live: invoking 'New meeting' (1591,78) opened the scheduling
+                # form whose Save button sits at (1566,77), so the fallback
+                # clicked Save on the EMPTY form before any field was filled.
+                # Hash the screen before the invoke; if it changed afterwards
+                # the invoke landed — skip the stale-coordinate click and let
+                # reflection judge the real effect. A provably inert invoke
+                # (delta=0, e.g. Teams' Save button) still falls through to
+                # the pixel click as before.
+                _pre_invoke = None
+                try:
+                    from core.capture.screenshot import frame_phash
+                    _pre_invoke = frame_phash(self.capturer.capture())
+                except Exception:
+                    pass
                 if windows_uia.invoke_element(step.target, timeout_s=2.5):
                     self._last_was_invoke = True
                     return True
+                if _pre_invoke is not None:
+                    try:
+                        time.sleep(0.4)   # let a real actuation repaint
+                        if (frame_phash(self.capturer.capture()) - _pre_invoke) != 0:
+                            self.log(
+                                f"  [INVOKE-LANDED] Invoke on '{step.target}' "
+                                "reported an error but the screen changed — the "
+                                "button was pressed; skipping the stale-"
+                                "coordinate pixel click"
+                            )
+                            self._last_was_invoke = True
+                            return True
+                    except Exception:
+                        pass
 
         # ── Drag ──────────────────────────────────────────────────────────────
         elif step.action_type == "drag":
