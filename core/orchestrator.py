@@ -1804,6 +1804,34 @@ class TaskOrchestrator:
             )
             return True
 
+        # Early-exit: a form-fill subtask ends by clicking a COMMIT button
+        # (Save / Send / Schedule / Create…) that SUBMITS and then CLOSES the
+        # form. The instant that click verifies, the work is done — but its
+        # success evidence (the filled form) vanishes with the form, so a
+        # goal-check on the next cycle sees no form and reports "not
+        # satisfied", and the planner re-clicks Save forever on a form that no
+        # longer exists (live: a Teams meeting was created, then the agent
+        # spent 6 minutes wandering the Meet page trying to re-Save it). A
+        # verified click/invoke on the subtask's own commit button IS the
+        # completion — trust it, exactly like the single-click case above.
+        _submit = self._subtask_submit_target(subtask)
+        # Guard: only after the form's fields were actually filled. run.completed
+        # already includes THIS commit step, so ">= 2 successful steps" means at
+        # least one field-set ran before it — a lone premature Save falls through
+        # to the normal goal-check instead of falsely completing.
+        _acted_steps = sum(1 for c in run.completed if not c.startswith("[FAILED"))
+        if (
+            _submit
+            and _acted_steps >= 2
+            and step.action_type in ("click", "invoke", "right_click", "double_click")
+            and self._targets_match(step.target, _submit)
+        ):
+            self.log(
+                f"  [SUBMIT-CHECK] Form commit '{_submit}' clicked and verified "
+                "— the form was submitted, subtask complete"
+            )
+            return True
+
         # Normalize the signature so trivial respellings of the same target
         # ("New Tab" vs "Newtab") cannot dodge the loop guard — the planner
         # varies casing/spacing between cycles when it is stuck.
@@ -2325,6 +2353,55 @@ class TaskOrchestrator:
         # Too-short payloads ("type notepad") are launcher/search idioms, not a
         # document-typing goal — don't short-circuit those.
         return payload if len(payload) >= 6 else None
+
+    # Commit verbs that SUBMIT-and-CLOSE a form. A subtask ending in one of
+    # these is complete the moment that button is clicked and verified — the
+    # form is gone afterward, so its filled-state can never be re-verified.
+    _SUBMIT_LABELS = (
+        "save", "send", "schedule", "create", "submit", "book", "done",
+        "update", "post", "finish", "confirm", "publish",
+    )
+
+    @classmethod
+    def _subtask_submit_target(cls, subtask) -> str | None:
+        """The commit button a form-fill subtask ends by clicking, else None.
+
+        Router format is "...set X, set Y, then click Save to create the
+        meeting" — a field-setting body followed by a terminal commit click.
+        Returns the commit button's label ("Save") so a verified click on it
+        can close the subtask instead of looping. Returns None for anything
+        that isn't a fill-then-commit subtask (a bare "click Save" subtask is
+        handled by the single-click path instead).
+        """
+        desc = subtask.description or ""
+        # Must actually fill fields first — otherwise it's not a form-commit
+        # subtask and the single-click path already covers it.
+        if not re.search(r"\b(set|add|type|enter|fill|choose|select)\b", desc, re.IGNORECASE):
+            return None
+        labels = "|".join(cls._SUBMIT_LABELS)
+        # The LAST commit-verb click in the description is the terminal submit.
+        matches = list(re.finditer(
+            rf"\bclick\s+(?:the\s+|on\s+)?['\"]?({labels})\b", desc, re.IGNORECASE,
+        ))
+        if not matches:
+            return None
+        return matches[-1].group(1)
+
+    @staticmethod
+    def _targets_match(a: str | None, b: str | None) -> bool:
+        """True when two control labels are the same modulo case/spacing/quotes,
+        or one is a whole-word prefix of the other ('Save' ⊆ 'Save and close')."""
+        def _norm(s):
+            return re.sub(r"[^a-z0-9 ]", "", (s or "").lower()).strip()
+        na, nb = _norm(a), _norm(b)
+        if not na or not nb:
+            return False
+        if na == nb:
+            return True
+        # Whole-word containment: the commit label appears as a word in the
+        # step target (planner may describe it as "Save button" / "Save meeting").
+        wa, wb = set(na.split()), set(nb.split())
+        return wa <= wb or wb <= wa
 
     @staticmethod
     def _is_single_click_subtask(subtask) -> bool:
