@@ -1919,6 +1919,15 @@ class TaskOrchestrator:
             )
             return True
 
+        # A [SET-CHECK] no-op recognised an ALREADY-set field — no input was
+        # fired, so it cannot be a harmful action loop. Counting it tripped
+        # the loop-guard mid-form (live: the third 'Title already set'
+        # recognition ended the subtask while attendee/times/Save sat in the
+        # 12-step queue). Planner spirals are still bounded by
+        # max_steps_per_subtask and the subtask deadline.
+        if getattr(self, "_last_step_was_noop", False):
+            return None
+
         # Normalize the signature so trivial respellings of the same target
         # ("New Tab" vs "Newtab") cannot dodge the loop guard — the planner
         # varies casing/spacing between cycles when it is stuck.
@@ -1956,6 +1965,21 @@ class TaskOrchestrator:
             self.log(
                 "  [LOOP-GUARD] Command subtask looped after "
                 "failures — marking subtask FAILED"
+            )
+            return False
+        # Same honesty rule for form-commit subtasks: looping out of a
+        # "set fields… then click Save" subtask WITHOUT the commit click ever
+        # succeeding means nothing was submitted — returning True here
+        # reported 'All sub-tasks completed' for a meeting that was never
+        # created (live: loop-guard fired on the third title recognition
+        # while Save had never been clicked).
+        if _submit and not any(
+            _submit.lower() in c.lower()
+            for c in run.completed if not c.startswith("[FAILED")
+        ):
+            self.log(
+                f"  [LOOP-GUARD] Form subtask looped but '{_submit}' was "
+                "never clicked — nothing was submitted; marking subtask FAILED"
             )
             return False
         if step.action_type in ("click", "right_click"):
@@ -2126,6 +2150,10 @@ class TaskOrchestrator:
         # Specific failure reason for the caller's [FAILED: …] record; the
         # planner reads that record, so name the real blocker when we know it.
         self._exec_fail_reason = ""
+        # True when this step succeeded WITHOUT firing any input (a [SET-CHECK]
+        # recognised an already-set field). The loop-guard must not count these
+        # as repeated actions — see _record_step_success.
+        self._last_step_was_noop = False
 
         # Never type into the agent's own host terminal session.
         if step.action_type in ("type", "key_press", "hotkey") and \
@@ -2362,6 +2390,7 @@ class TaskOrchestrator:
                         f"  [SET-CHECK] '{step.target}' label not on screen "
                         f"but the value is — field already set"
                     )
+                    self._last_step_was_noop = True
                     return True
                 else:
                     # Give the planner something actionable: combo fields
@@ -2385,6 +2414,7 @@ class TaskOrchestrator:
                     f"  [SET-CHECK] '{step.target}' not groundable but its "
                     f"value is already on screen — field already set"
                 )
+                self._last_step_was_noop = True
                 return True
             else:
                 self._exec_fail_reason = (
