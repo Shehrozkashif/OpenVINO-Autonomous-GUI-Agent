@@ -285,12 +285,14 @@ def _resolve_key(name: str):
 
 # ── Key dispatch ──────────────────────────────────────────────────────────────
 
-def _send_key_name(name: str) -> None:
-    """Press and release a named key (e.g. "enter", "f5", "a"), shift-holding if needed."""
+def _send_key_name(name: str) -> bool:
+    """Press and release a named key (e.g. "enter", "f5", "a"), shift-holding if needed.
+    Returns False for unknown key names so the step fails honestly instead of
+    reporting a success for a key press that never happened."""
     resolved = _resolve_key(name)
     if resolved is None:
         logger.warning(f"[Controller] Unknown key '{name}' — skipping")
-        return
+        return False
     vk, extended, needs_shift = resolved
     if needs_shift:
         _key_event(_VK_MAP["shift"], keyup=False)
@@ -299,6 +301,7 @@ def _send_key_name(name: str) -> None:
     _key_event(vk, keyup=True, extended=extended)
     if needs_shift:
         _key_event(_VK_MAP["shift"], keyup=True)
+    return True
 
 
 def _send_hotkey(*key_names: str) -> None:
@@ -435,9 +438,14 @@ class DesktopController:
         return True
 
     def press_key(self, key: str) -> bool:
-        _send_key_name(key.strip())
+        key = key.strip()
+        # Planners sometimes put a chord ("alt+left") in the key field —
+        # route it through the hotkey path instead of failing on the name.
+        if "+" in key and _resolve_key(key) is None:
+            return self.hotkey(*key.split("+"))
+        ok = _send_key_name(key)
         logger.info(f"[ACTION] key_press '{key}'")
-        return True
+        return ok
 
     def hotkey(self, *keys: str) -> bool:
         # Filter empty tokens before dispatch so "ctrl++s".split("+") → ["ctrl","","s"] is safe
