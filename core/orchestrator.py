@@ -2299,12 +2299,49 @@ class TaskOrchestrator:
                 _r = self.grounder.ground_fast(step.target)
                 if _r.found and _r.confidence >= self.grounder.min_confidence:
                     x, y = _r.x, _r.y
+                elif self._ocr_value_on_screen(step.value):
+                    # Filling a text field REMOVES its placeholder label
+                    # ('Add title' vanishes once the title is typed), so a
+                    # re-attempt can never ground the label again even though
+                    # the work is DONE — live on the OCR path, the title was
+                    # set once and three replans then failed 'Title' for
+                    # minutes. The value being literally on screen is ground
+                    # truth that the field already holds it.
+                    self.log(
+                        f"  [SET-CHECK] '{step.target}' label not on screen "
+                        f"but the value is — field already set"
+                    )
+                    return True
+                else:
+                    # Give the planner something actionable: combo fields
+                    # (date/time) render only their CURRENT value, never a
+                    # label OCR can find.
+                    self._exec_fail_reason = (
+                        f"field label '{step.target}' is not visible on this "
+                        f"screen. Date/time combo fields show only their "
+                        f"CURRENT value — click the currently displayed value "
+                        f"text on the form instead, then type the new value "
+                        f"and press enter"
+                    )
 
         # select shares set_value's pixel fallback and needs coordinates too
         elif step.action_type == "select" and step.target:
             _r = self.grounder.ground_fast(step.target)
             if _r.found and _r.confidence >= self.grounder.min_confidence:
                 x, y = _r.x, _r.y
+            elif self._ocr_value_on_screen(step.value):
+                self.log(
+                    f"  [SET-CHECK] '{step.target}' not groundable but its "
+                    f"value is already on screen — field already set"
+                )
+                return True
+            else:
+                self._exec_fail_reason = (
+                    f"'{step.target}' is not visible on this screen. Date/"
+                    f"time combo fields show only their CURRENT value — click "
+                    f"the currently displayed value text on the form instead, "
+                    f"then type the new value and press enter"
+                )
 
         # Final stop gate: grounding above may have blocked for seconds on a
         # model call during which the user hit Stop — do not fire the action.
@@ -2515,6 +2552,51 @@ class TaskOrchestrator:
                 if var.lower() in t:
                     return True
         return False
+
+    def _ocr_value_on_screen(self, value: str | None) -> bool:
+        """Strict OCR check: is `value` literally on the live screen?
+
+        Used to salvage a set_value/select whose field LABEL cannot be
+        grounded: if the requested value is already visible, the field
+        already holds it (an earlier attempt filled it and thereby removed
+        the placeholder label the grounder is searching for).
+
+        STRICT by design — alphanumeric-normalised substring match, and the
+        value must normalise to >= 8 characters. Short values like times
+        ('3:00 PM' -> '300pm') are always rejected: with fields side by side,
+        the Start-time default '3:30 PM' would otherwise satisfy a check for
+        End time '3:30 PM' and silently skip setting it. Titles, emails and
+        full dates are long and distinctive enough to be safe.
+        """
+        if not value or self.ocr is None:
+            return False
+        try:
+            if not self.ocr.is_available():
+                return False
+        except Exception:
+            return False
+        _norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())  # noqa: E731
+        variants = {_norm(value)}
+        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})$", value.strip())
+        if m:
+            mo, da, yr = m.groups()
+            # apps render dates un-padded ('7/29/2026') — match both forms
+            variants.add(f"{int(mo)}{int(da)}{yr}")
+            variants.add(f"{int(mo):02d}{int(da):02d}{yr}")
+        # Gate on the value's DISTINCTIVENESS (its longest normalised form),
+        # then match every variant: a full date passes the gate at 8 chars
+        # ('07292026') and must still match the un-padded 7-char rendering
+        # ('7292026') apps actually display. Times never pass the gate.
+        if max(len(v) for v in variants) < 8:
+            return False
+        try:
+            img = self.capturer.capture()
+            img.thumbnail(OCR_THUMB)
+            words = self.ocr.extract(img)
+            text = _norm(" ".join(w.text for w in words))
+            return any(v in text for v in variants)
+        except Exception:
+            return False
 
     def _unfilled_form_values(self, subtask, controls_text: str) -> list[str]:
         """Required form values NOT yet present in the live control readback.
