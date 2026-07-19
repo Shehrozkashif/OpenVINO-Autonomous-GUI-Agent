@@ -327,6 +327,24 @@ class TaskOrchestrator:
             resume_descs = self.memory.load_checkpoint(instruction)
         except Exception:
             resume_descs = None
+        if resume_descs and not self._checkpoint_still_valid(resume_descs):
+            # A checkpoint claims its subtasks' effects are still on the
+            # machine — but SCREEN state does not survive between runs the
+            # way files do. Live: a checkpoint said 'open Teams / Calendar /
+            # New meeting' were done; the fresh run started at the bare
+            # desktop (ms-teams.exe: 0 windows), the router planned only the
+            # form-fill, and the agent typed 'calendar' into Start and
+            # wandered into a web search for 9 minutes. Discard a checkpoint
+            # whose launched app no longer has a window.
+            self.log(
+                "[RESUME] Checkpoint found but its app has no window anymore "
+                "— discarding it and starting the task from the beginning"
+            )
+            try:
+                self.memory.clear_checkpoint(instruction)
+            except Exception:
+                pass
+            resume_descs = None
         if resume_descs:
             done = "; ".join(resume_descs)
             resume_hint = (
@@ -3134,6 +3152,35 @@ class TaskOrchestrator:
             return exe_name.lower() in out.lower()
         except Exception:
             return False
+
+    def _checkpoint_still_valid(self, resume_descs: list[str]) -> bool:
+        """Can a resume checkpoint's claimed effects still be on the machine?
+
+        Validates the one claim the OS can check deterministically: every
+        app-LAUNCH subtask in the checkpoint must still have a visible window.
+        An app closed between runs invalidates everything checkpointed after
+        its launch (the navigation/forms lived inside that window). Checkpoints
+        with no recognisable launch subtask are accepted as before — their
+        effects (files, settings) cannot be cheaply disproven.
+        """
+        for desc in resume_descs or []:
+            body = re.sub(r"^\s*with\b[^,]*,\s*", "", (desc or "").lower()).strip()
+            if not (body.startswith("open") or body.startswith("launch")):
+                continue
+            proc = next(
+                (exe for key, exe in self._PROCESS_MAP_WINDOWS.items()
+                 if key in body),
+                None,
+            )
+            if proc is None:
+                continue
+            try:
+                if self._count_process_windows(proc) < 1:
+                    return False
+            except Exception:
+                # Can't check — don't invalidate on infrastructure failure.
+                continue
+        return True
 
     def _count_process_windows(self, exe_name: str) -> int:
         """Count visible, non-trivial top-level windows owned by `exe_name`.

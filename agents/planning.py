@@ -474,9 +474,18 @@ def _parse_visual_action(
             description=desc, verification="",
         )
 
-    # Click family with a 0-1000 bounding box (bracket count varies: '[['/'[[['…)
+    # Quantised UI-TARS builds vary the coordinate wrapper freely: '[[x,y]]',
+    # '[[x,y)', '(x,y)', '[x, y]'… — accept brackets AND parens on both sides.
+    # A coordinate slightly past 1000 (seen live: '[[1001, 104)') must clamp
+    # to the screen edge, not click one pixel off-screen (delta=0 forever).
+    def _clamp(px: int, py: int) -> tuple[int, int]:
+        return (max(0, min(px, screen_w - 1)), max(0, min(py, screen_h - 1)))
+
+    _OPEN = r"['\"]?\s*[\[\(]{0,4}\s*"
+
+    # Click family with a 0-1000 bounding box
     m = re.search(
-        r"(click|left_double|right_single)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
+        r"(click|left_double|right_single)\s*\(\s*start_box\s*=\s*" + _OPEN +
         r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)",
         text,
     )
@@ -484,22 +493,22 @@ def _parse_visual_action(
         kind = {"click": "click", "left_double": "double_click",
                 "right_single": "right_click"}[m.group(1)]
         x1, y1, x2, y2 = (float(m.group(i)) for i in range(2, 6))
-        px = int((x1 + x2) / 2 / 1000 * screen_w)
-        py = int((y1 + y2) / 2 / 1000 * screen_h)
+        px, py = _clamp(int((x1 + x2) / 2 / 1000 * screen_w),
+                        int((y1 + y2) / 2 / 1000 * screen_h))
         return _step(kind, value=f"{px},{py}",
                      desc=f"[visual] {kind} at ({px},{py})")
 
-    # Click family with a 0-1000 center point ([[cx, cy]])
+    # Click family with a 0-1000 center point
     m = re.search(
-        r"(click|left_double|right_single)\s*\(\s*start_box\s*=\s*'?\[{0,4}"
+        r"(click|left_double|right_single)\s*\(\s*start_box\s*=\s*" + _OPEN +
         r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*[\]\)']",
         text,
     )
     if m:
         kind = {"click": "click", "left_double": "double_click",
                 "right_single": "right_click"}[m.group(1)]
-        px = int(float(m.group(2)) / 1000 * screen_w)
-        py = int(float(m.group(3)) / 1000 * screen_h)
+        px, py = _clamp(int(float(m.group(2)) / 1000 * screen_w),
+                        int(float(m.group(3)) / 1000 * screen_h))
         return _step(kind, value=f"{px},{py}",
                      desc=f"[visual] {kind} at ({px},{py})")
 
