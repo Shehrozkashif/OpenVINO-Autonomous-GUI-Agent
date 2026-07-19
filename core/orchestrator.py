@@ -1484,7 +1484,18 @@ class TaskOrchestrator:
                 except Exception:
                     pass
 
-            if not self._execute_step(step):
+            # An unhandled exception inside step execution must become a
+            # LOGGED step failure, never a silent mission death: the GUI
+            # worker swallows exceptions from execute(), so a crash here left
+            # zero trace in the terminal (live: an AttributeError in a helper
+            # stopped a run mid-form with the log simply ending).
+            try:
+                _exec_ok = self._execute_step(step)
+            except Exception as e:
+                logger.exception(f"[STEP-CRASH] Unhandled error executing step: {e}")
+                run.last_error = f"internal error executing this step: {e}"
+                return "step_failed"
+            if not _exec_ok:
                 run.last_error = (
                     getattr(self, "_exec_fail_reason", "")
                     or "execution failed (element not found or action error)"
@@ -2608,10 +2619,11 @@ class TaskOrchestrator:
         End time '3:30 PM' and silently skip setting it. Titles, emails and
         full dates are long and distinctive enough to be safe.
         """
-        if not value or self.ocr is None:
+        _ocr = getattr(self, "_ocr", None)
+        if not value or _ocr is None:
             return False
         try:
-            if not self.ocr.is_available():
+            if not _ocr.is_available():
                 return False
         except Exception:
             return False
@@ -2632,7 +2644,7 @@ class TaskOrchestrator:
         try:
             img = self.capturer.capture()
             img.thumbnail(OCR_THUMB)
-            words = self.ocr.extract(img)
+            words = _ocr.extract(img)
             text = _norm(" ".join(w.text for w in words))
             return any(v in text for v in variants)
         except Exception:
