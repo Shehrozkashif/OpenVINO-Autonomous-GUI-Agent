@@ -1292,25 +1292,32 @@ class TaskOrchestrator:
                         acted = any(
                             not c.startswith("[FAILED") for c in run.completed
                         )
-                        if not acted:
-                            _excluded = (
-                                run.is_launch_goal or run.is_cmd_subtask
-                                or run.save_target or run.type_payload
-                            )
-                            confirmed = _excluded and self._goal_already_satisfied(
+                        _excluded = (
+                            run.is_launch_goal or run.is_cmd_subtask
+                            or run.save_target or run.type_payload
+                        )
+                        # The planner's [] is a CLAIM, never proof — with or
+                        # without prior actions. The goal check is the referee:
+                        # this cycle's pre-plan check already said the goal is
+                        # NOT on screen, so accepting [] here contradicts the
+                        # screen (live: 8 'Goal achieved' loops on a subtask
+                        # whose form never opened, ending in a false success).
+                        confirmed = (
+                            (acted or _excluded)
+                            and self._goal_already_satisfied(
                                 run, subtask, skip_exclusions=True
                             )
-                            if not confirmed:
-                                self.log(
-                                    "  Planner declared done with no action "
-                                    "taken and no screen evidence — rejecting"
-                                )
-                                run.completed.append(
-                                    "[FAILED: planner declared done, but the "
-                                    "goal state is not on screen and no "
-                                    "action was executed]"
-                                )
-                                return self._note_planning_failure(run), None
+                        )
+                        if not confirmed:
+                            self.log(
+                                "  Planner declared done but the goal check "
+                                "finds no screen evidence — rejecting"
+                            )
+                            run.completed.append(
+                                "[FAILED: planner declared done, but the "
+                                "goal state is not visible on screen]"
+                            )
+                            return self._note_planning_failure(run), None
                         return "done", None   # planner says goal is achieved
                     step, run.step_queue = planned[0], list(planned[1:])
         except PlanningParseError as e:
