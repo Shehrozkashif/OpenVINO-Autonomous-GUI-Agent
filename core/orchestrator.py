@@ -1061,6 +1061,15 @@ class TaskOrchestrator:
                         "satisfied=false. Only the RESULT of the action being "
                         "visible (the calendar grid, the opened form's input "
                         "fields, a confirmation message) counts as satisfied. "
+                        "IMPORTANT EXCEPTION: many apps give the OPENED form or "
+                        "dialog the SAME name as the button that opened it (a "
+                        "'New meeting' button opens a form titled 'New meeting'). "
+                        "If that label now appears as a form/dialog TITLE or "
+                        "HEADING — alongside input fields, an editor, or dialog "
+                        "chrome (Save/Close/Cancel) rather than as a lone "
+                        "toolbar/sidebar button — the form has OPENED and "
+                        "satisfied=true. Do not read the opened form's own title "
+                        "as the still-unclicked button. "
                         "In evidence, go REQUIREMENT BY "
                         "REQUIREMENT: name each value/state the goal asks for "
                         "and quote what on screen shows it present or "
@@ -1764,6 +1773,25 @@ class TaskOrchestrator:
             self.log(f"  [GOAL-CHECK] '{_label}' confirmed — goal achieved")
             return True
 
+        # Early-exit: a bare "click X" subtask is DONE the moment that click is
+        # verified. Reaching _record_step_success for a click means reflection
+        # already passed — and a click that changed zero pixels FAILS reflection
+        # (delta=0), so a passing click provably moved the screen. Trust it
+        # instead of handing the OCR-blind goal-check a WebView2 result it can't
+        # read: that loop (goal-check reads the opened form's "New meeting" title
+        # as "button still present → not clicked" and re-clicks the label) is
+        # exactly what burned an 8-minute Teams run. Not gated for multi-part
+        # form subtasks — those still run the full plan/verify loop.
+        if (
+            step.action_type in ("click", "right_click", "double_click")
+            and self._is_single_click_subtask(subtask)
+        ):
+            self.log(
+                "  [CLICK-CHECK] Single-click subtask — verified click landed "
+                "and changed the screen — subtask complete"
+            )
+            return True
+
         # Normalize the signature so trivial respellings of the same target
         # ("New Tab" vs "Newtab") cannot dodge the loop guard — the planner
         # varies casing/spacing between cycles when it is stuck.
@@ -2285,6 +2313,44 @@ class TaskOrchestrator:
         # Too-short payloads ("type notepad") are launcher/search idioms, not a
         # document-typing goal — don't short-circuit those.
         return payload if len(payload) >= 6 else None
+
+    @staticmethod
+    def _is_single_click_subtask(subtask) -> bool:
+        """True when the subtask's whole goal is ONE click/open of a control.
+
+        A "click the New meeting button" subtask is DONE the instant that click
+        lands and materially changes the screen — but on the OCR-only path the
+        goal-check can't confirm it, because the WebView2 result is invisible to
+        OCR and, worse, the opened form's own title often repeats the button's
+        label ("New meeting"), which the goal-check reads as "button still
+        present → not clicked" and loops forever. When the subtask is a bare
+        single click, a reflection-verified click IS the completion — trust it.
+
+        Excludes multi-part subtasks (form fills: "set the title ..., then click
+        Save") — those contain conjunctions or extra field verbs and must still
+        run the full plan/verify loop.
+        """
+        desc = (subtask.description or "").strip().lower()
+        if not desc:
+            return False
+        # Must start by describing a click/open of something.
+        if not re.match(
+            r"^(with[^,]*,\s*)?(then\s+)?(click|open|select|press|tap|go to|"
+            r"navigate to|switch to)\b",
+            desc,
+        ):
+            return False
+        # Any second action verb means it is NOT a bare click (form fills,
+        # type-and-save, add-attendee sequences all trip one of these).
+        if re.search(
+            r"\b(then|set|type|enter|fill|add|choose|save|create|send|"
+            r"delete|remove|check|toggle|write)\b",
+            # Drop the leading "with ... open," preamble the router prepends —
+            # its verbs describe prior state, not this subtask's actions.
+            re.sub(r"^with[^,]*,\s*", "", desc),
+        ):
+            return False
+        return True
 
     @staticmethod
     def _texts_equivalent(a: str, b: str) -> bool:
