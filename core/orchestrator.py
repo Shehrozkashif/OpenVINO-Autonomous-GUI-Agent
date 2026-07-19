@@ -799,12 +799,30 @@ class TaskOrchestrator:
         returned task_context may carry an appended pre-check note.
         """
         desc = subtask.description.lower()
+        # Strip a leading "with <context>, " clause before classifying. A
+        # subtask that ACTS inside an already-open app is phrased "with the
+        # Calendar view open in Microsoft Teams, click the New meeting button"
+        # — it contains "open" (a STATE) and the app name, but it is NOT a
+        # launch. The old heuristic ("open" anywhere + app name) misfired on it,
+        # tagged the click as an ms-teams launch, demanded a NEW Teams window,
+        # and failed the click AFTER it had already succeeded — thrashing the
+        # whole run into replans that spawned bogus "open Microsoft Teams"
+        # subtasks. Classify by the body's REAL leading verb instead.
+        _body = re.sub(r"^\s*with\b[^,]*,\s*", "", desc).strip()
+        # An in-app action verb leading the body is never a launch, even when
+        # the description mentions the app or the word "open".
+        _inapp_action = bool(re.match(
+            r"(then\s+)?(click|set|select|type|enter|fill|add|choose|save|"
+            r"schedule|create|send|pick|toggle|check|dismiss|close|scroll)\b",
+            _body,
+        ))
         is_launch_goal = (
             not ("already open" in desc or "already running" in desc)
+            and not _inapp_action
             and (
-                any(w in desc for w in ("launch",))
-                or ("open" in desc
-                    and any(k in desc for k in self._PROCESS_MAP_WINDOWS))
+                _body.startswith("launch")
+                or (_body.startswith("open")
+                    and any(k in _body for k in self._PROCESS_MAP_WINDOWS))
             )
         )
 
@@ -1795,7 +1813,8 @@ class TaskOrchestrator:
         # exactly what burned an 8-minute Teams run. Not gated for multi-part
         # form subtasks — those still run the full plan/verify loop.
         if (
-            step.action_type in ("click", "right_click", "double_click")
+            not run.is_launch_goal
+            and step.action_type in ("click", "right_click", "double_click")
             and self._is_single_click_subtask(subtask)
         ):
             self.log(
@@ -1822,6 +1841,7 @@ class TaskOrchestrator:
         _acted_steps = sum(1 for c in run.completed if not c.startswith("[FAILED"))
         if (
             _submit
+            and not run.is_launch_goal
             and _acted_steps >= 2
             and step.action_type in ("click", "invoke", "right_click", "double_click")
             and self._targets_match(step.target, _submit)
