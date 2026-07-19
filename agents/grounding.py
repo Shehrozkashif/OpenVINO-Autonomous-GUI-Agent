@@ -418,6 +418,25 @@ class UIGroundingAgent:
     def _near_dead(x: int, y: int, dead, radius: int = 10) -> bool:
         return any(abs(x - dx) <= radius and abs(y - dy) <= radius for dx, dy in dead)
 
+    def is_dead_point(self, x: int, y: int) -> bool:
+        """Was (x,y) proven inert (delta=0) on the CURRENT screen?
+
+        Read path for EXPLICIT-coordinate clicks (visual planner): they carry
+        raw pixels and never call ground(), so they bypassed the dead-point
+        blacklist on both read and write — live: the VLM proposed the same
+        inert point across three replanned subtasks and the agent clicked it
+        NINE times, delta=0 every time. Their marks live under the shared
+        '[visual]' pseudo-target (a dead pixel is dead regardless of intent).
+        """
+        try:
+            display = self.capturer.capture()
+            display.thumbnail((self._DISPLAY_W, self._DISPLAY_H), Image.LANCZOS)
+            screen_hash = str(imagehash.phash(display))
+        except Exception:
+            return False
+        dead = self._dead.get(("[visual]", screen_hash), [])
+        return bool(dead) and self._near_dead(x, y, dead)
+
     def mark_dead(self, target: str, x: int, y: int):
         """Record that clicking (x,y) for `target` provably changed nothing.
 

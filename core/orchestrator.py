@@ -1616,8 +1616,10 @@ class TaskOrchestrator:
                         f"[ORCHESTRATOR] Click on '{step.target}' opened {_fg_name} "
                         f"(task app: {self._app_anchor[2]}) — marking point dead"
                     )
-                    if getattr(self, "_last_click_xy", None) and step.target:
-                        self.grounder.mark_dead(step.target, *self._last_click_xy)
+                    if getattr(self, "_last_click_xy", None):
+                        self.grounder.mark_dead(
+                            step.target or "[visual]", *self._last_click_xy
+                        )
                     self._ensure_anchor_foreground()
                     run.last_error = (
                         f"click opened {_fg_name} instead of acting inside "
@@ -1744,7 +1746,12 @@ class TaskOrchestrator:
                 and getattr(self, "_last_click_xy", None)
                 and not getattr(self, "_last_was_invoke", False)
             ):
-                self.grounder.mark_dead(step.target, *self._last_click_xy)
+                # Visual-planner clicks have no target — record them under the
+                # shared '[visual]' pseudo-target so is_dead_point() can refuse
+                # the same provably-inert pixel on this screen next time.
+                self.grounder.mark_dead(
+                    step.target or "[visual]", *self._last_click_xy
+                )
             # The pattern-invoke equivalent of a dead point: the provider
             # accepted Invoke/Toggle but nothing happened. Coordinates are
             # not involved, so blacklist the invoke PATH for this target —
@@ -2135,6 +2142,21 @@ class TaskOrchestrator:
             if _coords is not None:
                 # Explicit pixel coordinates (visual-planner convention)
                 x, y = _coords
+                # Consult the dead-point blacklist explicit clicks used to
+                # bypass: re-clicking a pixel a phash delta=0 already proved
+                # inert on THIS screen can never work — fail fast and tell
+                # the planner to pick a different element.
+                if self.grounder.is_dead_point(x, y):
+                    self._exec_fail_reason = (
+                        f"point ({x},{y}) was already proven inert on this "
+                        f"exact screen (a click there changed nothing) — "
+                        f"choose a DIFFERENT element or navigate another way"
+                    )
+                    self.log(
+                        f"  [DEAD-POINT] ({x},{y}) already proven inert on "
+                        f"this screen — refusing to re-click it"
+                    )
+                    return False
                 self._last_click_xy = (x, y)
                 if self._stop_event.is_set():
                     return False
