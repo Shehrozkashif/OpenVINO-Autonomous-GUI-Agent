@@ -12,6 +12,7 @@ import base64
 import difflib
 import io
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -26,6 +27,26 @@ from core.capture.screenshot import OCR_THUMB, ScreenCapture, _screen_size
 from core.protocols import InferenceClient
 from core.windows_uia import find_element as _uia_find
 from core.windows_uia import is_available as _uia_ok
+
+_ocr_grounding_disabled_logged = False
+
+
+def _ocr_grounding_disabled() -> bool:
+    """True when AGENT_DISABLE_OCR=1 turns off the OCR (Stage 1) grounding stage.
+
+    Mirror of AGENT_DISABLE_UIA: set BOTH to force every grounding call down to
+    the VLM (Stage 2), so the visual grounding path can be exercised in
+    isolation on a use case where UIA/OCR would otherwise win first. Only the
+    grounding STAGE is gated — OCR is still used for planner screen context and
+    reflection, which are not grounding.
+    """
+    if os.environ.get("AGENT_DISABLE_OCR", "").strip().lower() not in ("1", "true", "yes"):
+        return False
+    global _ocr_grounding_disabled_logged
+    if not _ocr_grounding_disabled_logged:
+        _ocr_grounding_disabled_logged = True
+        logger.info("[OCR] Stage 1 grounding disabled via AGENT_DISABLE_OCR — VLM takes over")
+    return True
 
 # ── VLM prompt constants ──────────────────────────────────────────────────────
 
@@ -571,7 +592,7 @@ class UIGroundingAgent:
                                            target=target, method="uia",
                                            element_type="foreground_interactive")
 
-        if words:
+        if words and not _ocr_grounding_disabled():
             query = _strip_role_words(target)
             match = self.ocr.find_text(words, query, threshold=0.65)
             if match:
@@ -629,7 +650,7 @@ class UIGroundingAgent:
                 logger.debug(f"[GROUNDING/S0-UIA] '{target}' not found in UIA tree")
 
         # Stage 1: OCR direct fuzzy-match — carry element_type from the matched word
-        if words:
+        if words and not _ocr_grounding_disabled():
             query = _strip_role_words(target)
             match = self.ocr.find_text(words, query, threshold=0.65)
             if match:
