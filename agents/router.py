@@ -354,6 +354,11 @@ class RouterAgent:
         # back to the LLM (re-prompt) so filenames/steps stay model-chosen, not
         # hardcoded.
         subtasks = self._ensure_complete(instruction, user_content, subtasks)
+        # Second backstop: a plan that references sub-task ids it never defined
+        # was truncated (the router dropped the opening launch/navigation
+        # steps). Re-prompt for the complete plan, then sanitize any remaining
+        # dangling refs so _topological_sort doesn't false-cycle.
+        subtasks = self._ensure_connected(instruction, user_content, subtasks)
 
         logger.info(f"[ROUTER] Decomposed into {len(subtasks)} sub-tasks:")
         for st in subtasks:
@@ -561,6 +566,89 @@ class RouterAgent:
             return fixed
         logger.warning("[ROUTER] Re-prompt did not close the gap — keeping original")
         return subtasks
+
+    @staticmethod
+    def _dangling_deps(subtasks: list[SubTask]) -> bool:
+        """True if any sub-task depends on an id not present in the list.
+
+        The router prompt requires depends_on to reference only ids inside the
+        array, so a dangling reference is a deterministic signal the model
+        dropped earlier sub-tasks (live: a Teams task came back as ONLY the
+        final 'fill the schedule-meeting form' sub-task with depends_on:[3];
+        the three opening steps — launch, open Calendar, click New meeting —
+        were gone, so the agent ran the form-fill on the bare desktop and
+        clicked random taskbar buttons looking for a Title field).
+        """
+        ids = {st.id for st in subtasks}
+        return any(dep not in ids for st in subtasks for dep in (st.depends_on or []))
+
+    @staticmethod
+    def _sanitize_deps(subtasks: list[SubTask]) -> list[SubTask]:
+        """Drop depends_on references to ids that aren't in the list.
+
+        A dangling reference makes _topological_sort report a false
+        'dependency cycle' and fall back to ID order silently. Stripping the
+        bad refs lets the remaining plan run in a well-defined order instead.
+        """
+        ids = {st.id for st in subtasks}
+        for st in subtasks:
+            if st.depends_on:
+                st.depends_on = [d for d in st.depends_on if d in ids]
+        return subtasks
+
+    def _ensure_connected(
+        self, instruction: str, user_content: str, subtasks: list[SubTask]
+    ) -> list[SubTask]:
+        """Re-decompose ONCE if the plan is not self-contained.
+
+        A dangling depends_on means the router truncated the plan and dropped
+        the leading steps. Re-prompt for the COMPLETE ordered plan; accept the
+        retry only if it is connected and no shorter. If the retry can't fix
+        it, at least sanitize the dangling refs so the plan runs in order
+        rather than tripping a misleading 'dependency cycle'.
+        """
+        if not subtasks or not self._dangling_deps(subtasks):
+            return subtasks
+
+        logger.warning(
+            "[ROUTER] Decomposition references missing sub-task ids "
+            "(dangling depends_on) — earlier steps were dropped; re-prompting "
+            "for the COMPLETE plan"
+        )
+        prior = json.dumps([
+            {"id": st.id, "description": st.description, "depends_on": st.depends_on}
+            for st in subtasks
+        ])
+        correction = (
+            "Your sub-task list is INCOMPLETE: a depends_on points at an id "
+            "that is not in the list, which means you dropped the earlier "
+            "steps. Re-output the COMPLETE ordered plan from the FIRST action "
+            "to the last — launch/open the app, navigate to the right screen, "
+            "THEN act — with ids starting at 1 and every depends_on referencing "
+            "an id that exists in THIS array. JSON array only."
+        )
+        messages = [
+            {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": prior},
+            {"role": "user", "content": correction},
+        ]
+        try:
+            resp = self.client.query_llm(
+                messages, max_tokens=1536, temperature=0.1,
+                response_schema=_SUBTASK_SCHEMA,
+            )
+            fixed = self._parse_subtasks(resp.content)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"[ROUTER] Re-prompt parse failed ({e}) — sanitizing deps")
+            return self._sanitize_deps(subtasks)
+
+        if fixed and not self._dangling_deps(fixed) and len(fixed) >= len(subtasks):
+            return fixed
+        logger.warning(
+            "[ROUTER] Re-prompt did not produce a connected plan — sanitizing deps"
+        )
+        return self._sanitize_deps(subtasks)
 
     def _parse_subtasks(self, text: str) -> list[SubTask]:
         if "</think>" in text:
