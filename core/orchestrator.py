@@ -148,7 +148,19 @@ class TaskOrchestrator:
         self.capturer  = capturer
         self.memory    = task_memory
         self.config    = config or OrchestratorConfig()
-        self.log       = on_step_log or print
+        # Orchestrator decisions (Step/[GOAL-CHECK]/[CLICK-CHECK]/[SUBTASK]/…)
+        # must land in BOTH the GUI log panel AND loguru. The dev loop is
+        # "run on the Windows PC, paste the terminal log" — and the terminal
+        # only captures loguru, so a UI-only self.log left every routing
+        # decision invisible in pasted logs (a fix's own marker couldn't be
+        # confirmed). Mirror to loguru at the caller's call site, then fan out
+        # to the UI callback when one is wired.
+        _ui_log = on_step_log
+        def _log(msg: str) -> None:
+            logger.opt(depth=1).info(msg)
+            if _ui_log is not None:
+                _ui_log(msg)
+        self.log = _log
         # Optional human confirmation handler for destructive commands.
         # Signature: on_confirm(summary, command) -> bool. When None, the action
         # firewall blocks HIGH-severity commands and allows MEDIUM ones (logged).
