@@ -64,8 +64,13 @@ class OrchestratorConfig:
     # task_deadline_s is a FLOOR: the effective budget scales with plan size
     # (n_subtasks × subtask_deadline_s) so a legitimate 8-subtask task is not
     # killed by a cap tuned for 2-subtask tasks. See _effective_task_deadline.
-    task_deadline_s: float = 600.0      # minimum budget for a whole instruction
-    subtask_deadline_s: float = 240.0   # hard cap on a single subtask
+    # Deadlines are budgeted in PLANNING CYCLES, so they must scale with the
+    # LLM's per-call latency. 240s was tuned for the 8B (~7-15s per planning
+    # call ≈ 8+ cycles); the 14B plans in 45-90s, and against the old cap a
+    # live run deadline-aborted three form subtasks MID-PROGRESS with the
+    # budget consumed by planning, not by failures. 480s restores ~5-6 cycles.
+    task_deadline_s: float = 900.0      # minimum budget for a whole instruction
+    subtask_deadline_s: float = 480.0   # hard cap on a single subtask
     # After this many consecutive step failures, planning escalates from the
     # text path (OCR context → LLM) to the visual path (screenshot → UI-TARS),
     # which sees icons/layout the text path is blind to. 0 disables escalation.
@@ -2396,12 +2401,17 @@ class TaskOrchestrator:
                     # Give the planner something actionable: combo fields
                     # (date/time) render only their CURRENT value, never a
                     # label OCR can find.
+                    # Live: 'click the value, type the new one' got the field
+                    # focused but typing did NOT replace the old value (the
+                    # goal-check still read 7/19 after 07/29 was typed) — the
+                    # planner's manual sequence had no select-all. Spell out
+                    # the full replace sequence.
                     self._exec_fail_reason = (
                         f"field label '{step.target}' is not visible on this "
                         f"screen. Date/time combo fields show only their "
                         f"CURRENT value — click the currently displayed value "
-                        f"text on the form instead, then type the new value "
-                        f"and press enter"
+                        f"text on the form, press ctrl+a to select the old "
+                        f"value, type the new value, then press enter"
                     )
 
         # select shares set_value's pixel fallback and needs coordinates too
@@ -2420,8 +2430,9 @@ class TaskOrchestrator:
                 self._exec_fail_reason = (
                     f"'{step.target}' is not visible on this screen. Date/"
                     f"time combo fields show only their CURRENT value — click "
-                    f"the currently displayed value text on the form instead, "
-                    f"then type the new value and press enter"
+                    f"the currently displayed value text on the form, press "
+                    f"ctrl+a to select the old value, type the new value, "
+                    f"then press enter"
                 )
 
         # Final stop gate: grounding above may have blocked for seconds on a
