@@ -862,11 +862,18 @@ class TaskOrchestrator:
         desc = subtask.description
         if not self._LAUNCH_DESC_RX.match(desc.lower()):
             return False
-        # Apps with mapped processes keep the stricter launch semantics in
-        # _setup_launch_goal (a pre-existing terminal may be busy running
-        # another program — reusing it is the documented H-bug). The skip is
-        # for everything else, where "it's already in front" means done.
-        if any(k in desc.lower() for k in self._PROCESS_MAP_WINDOWS):
+        # Keep the stricter "a NEW window is required" launch semantics ONLY for
+        # terminals, where reusing a pre-existing (possibly busy) window is the
+        # documented H-bug. For every other mapped app — Teams, Notepad, browsers
+        # — the app already owning the foreground genuinely means "done"; and a
+        # single-instance app like Teams can NEVER satisfy the new-window check,
+        # so the strict path loops forever and escalates to the VLM visual-replan
+        # (live: a spurious 'open Microsoft Teams' subtask thrashed for 9 min
+        # clicking the top-left corner while Teams sat open in the foreground).
+        _TERMINAL_LAUNCH_KEYS = (
+            "windows terminal", "terminal", "command prompt", "powershell",
+        )
+        if any(k in desc.lower() for k in _TERMINAL_LAUNCH_KEYS):
             return False
         signals = self._derive_launch_signals(desc)
         if not signals:
