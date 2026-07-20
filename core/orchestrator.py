@@ -65,12 +65,13 @@ class OrchestratorConfig:
     # (n_subtasks × subtask_deadline_s) so a legitimate 8-subtask task is not
     # killed by a cap tuned for 2-subtask tasks. See _effective_task_deadline.
     # Deadlines are budgeted in PLANNING CYCLES, so they must scale with the
-    # LLM's per-call latency. 240s was tuned for the 8B (~7-15s per planning
-    # call ≈ 8+ cycles); the 14B plans in 45-90s, and against the old cap a
-    # live run deadline-aborted three form subtasks MID-PROGRESS with the
-    # budget consumed by planning, not by failures. 480s restores ~5-6 cycles.
-    task_deadline_s: float = 900.0      # minimum budget for a whole instruction
-    subtask_deadline_s: float = 480.0   # hard cap on a single subtask
+    # LLM's per-call latency: these values assume the 8B (~7-15s per planning
+    # call ≈ 8+ cycles per subtask). If the LLM is swapped for the 14B
+    # (45-101s per call), scale both up ~2x — a live 14B run under the 8B
+    # caps deadline-aborted three form subtasks MID-PROGRESS with the budget
+    # consumed by planning, not by failures.
+    task_deadline_s: float = 600.0      # minimum budget for a whole instruction
+    subtask_deadline_s: float = 240.0   # hard cap on a single subtask
     # After this many consecutive step failures, planning escalates from the
     # text path (OCR context → LLM) to the visual path (screenshot → UI-TARS),
     # which sees icons/layout the text path is blind to. 0 disables escalation.
