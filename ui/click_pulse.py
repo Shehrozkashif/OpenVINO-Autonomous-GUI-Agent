@@ -32,7 +32,14 @@ class ClickPulse(QWidget):
             None,
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool,
+            | Qt.WindowType.Tool
+            # WindowTransparentForInput sets the native WS_EX_TRANSPARENT
+            # style, making Win32 hit-tests (WindowFromPoint) pass through
+            # this window. WA_TransparentForMouseEvents alone does NOT — it
+            # only affects Qt's internal event routing, so the controller's
+            # own-window trap saw the pulse "covering" every click point and
+            # paid a 0.4s minimize dance per click.
+            | Qt.WindowType.WindowTransparentForInput,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -93,8 +100,19 @@ class ClickPulse(QWidget):
         """
         try:
             import ctypes
-            ctypes.windll.user32.SetWindowDisplayAffinity(
-                int(self.winId()), 0x11  # WDA_EXCLUDEFROMCAPTURE
+            hwnd = int(self.winId())
+            u = ctypes.windll.user32
+            u.SetWindowDisplayAffinity(hwnd, 0x11)  # WDA_EXCLUDEFROMCAPTURE
+            # Reinforce native click-through: WS_EX_TRANSPARENT is the style
+            # Win32 WindowFromPoint skips. Qt sets it for
+            # WindowTransparentForInput, but a recreated native window must
+            # not lose it — the controller would then hit-test the pulse as
+            # "covering" every click point and minimize it before each click.
+            GWL_EXSTYLE = -20
+            ex = u.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+            u.SetWindowLongPtrW(
+                hwnd, GWL_EXSTYLE,
+                ex | 0x20 | 0x08000000,  # WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
             )
         except Exception:
             pass

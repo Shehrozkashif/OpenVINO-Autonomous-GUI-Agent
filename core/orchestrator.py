@@ -322,7 +322,10 @@ class TaskOrchestrator:
                 self.capturer.exclude_regions = []
                 logger.debug("[ORCHESTRATOR] GUI window covered — mask cleared")
         except Exception as e:
-            logger.debug(f"[ORCHESTRATOR] GUI window mask lookup failed: {e}")
+            # WARNING, not debug: a silent mask failure re-enables the agent
+            # reading its own GUI text via OCR — the exact bug behind weeks of
+            # 'hallucinated verifier' verdicts. It must be visible in logs.
+            logger.warning(f"[ORCHESTRATOR] GUI window mask lookup failed: {e}")
 
     # ── Public entry point ────────────────────────────────────────────────────
 
