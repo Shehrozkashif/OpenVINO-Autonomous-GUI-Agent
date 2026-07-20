@@ -2381,7 +2381,11 @@ class TaskOrchestrator:
             # control (UIA disabled, or web widgets with no writable pattern),
             # the actor clicks the field and types instead of failing outright.
             if step.action_type == "set_value" and step.target:
-                _r = self.grounder.ground_fast(step.target)
+                # 0.8: this hit gets CLICKED then ctrl+a-TYPED into — a wrong
+                # match types into arbitrary UI. Live: 'date' fuzzy-matched
+                # taskbar garbage 'Wd TE' at 0.67 and the date was typed into
+                # a non-Teams surface. Real field labels score >= 0.95.
+                _r = self.grounder.ground_fast(step.target, ocr_threshold=0.8)
                 if _r.found and _r.confidence >= self.grounder.min_confidence:
                     x, y = _r.x, _r.y
                 elif self._ocr_value_on_screen(step.value):
@@ -2416,8 +2420,9 @@ class TaskOrchestrator:
                     )
 
         # select shares set_value's pixel fallback and needs coordinates too
+        # (and the same strict 0.8 OCR bar — its hit also gets clicked+typed)
         elif step.action_type == "select" and step.target:
-            _r = self.grounder.ground_fast(step.target)
+            _r = self.grounder.ground_fast(step.target, ocr_threshold=0.8)
             if _r.found and _r.confidence >= self.grounder.min_confidence:
                 x, y = _r.x, _r.y
             elif self._ocr_value_on_screen(step.value):
@@ -2693,15 +2698,30 @@ class TaskOrchestrator:
             return False
 
     def _unfilled_form_values(self, subtask, controls_text: str) -> list[str]:
-        """Required form values NOT yet present in the live control readback.
+        """Required form values NOT yet provably present on the form.
 
-        Only meaningful when the UIA CLICKABLE CONTROLS list (with "= '…'"
-        readbacks) is available; without it (OCR/VLM path) a field's emptiness
-        can't be proven, so return [] and never block."""
-        if "CLICKABLE CONTROLS" not in (controls_text or ""):
-            return []
-        return [v for v in self._required_form_values(subtask)
-                if not self._value_in_controls(v, controls_text)]
+        UIA path: read each value back from the CLICKABLE CONTROLS list.
+        OCR path (no controls list): a field's EMPTINESS can't be proven, but
+        the PRESENCE of long, distinctive values (title / full date / email —
+        never short times) can be tested positively on the live screen via
+        the strict _ocr_value_on_screen check. Without this, the OCR path
+        let Save fire with only the title set and Teams created a meeting at
+        the DEFAULT date/time with no attendee — reported as a full success
+        (live 19:33). Values too short to check safely are skipped, so times
+        never block."""
+        if "CLICKABLE CONTROLS" in (controls_text or ""):
+            return [v for v in self._required_form_values(subtask)
+                    if not self._value_in_controls(v, controls_text)]
+        missing = []
+        for v in self._required_form_values(subtask):
+            _is_date = bool(re.match(r"\d{1,2}/\d{1,2}/\d{4}$", v.strip()))
+            if len(re.sub(r"[^a-z0-9]", "", v.lower())) < 8 and not _is_date:
+                continue   # short/ambiguous (times) — cannot be checked safely
+                # (dates always pass: an un-padded '7/29/2026' normalises to 7
+                # chars but is date-shaped and thus distinctive)
+            if not self._ocr_value_on_screen(v):
+                missing.append(v)
+        return missing
 
     @staticmethod
     def _targets_match(a: str | None, b: str | None) -> bool:

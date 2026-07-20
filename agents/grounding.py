@@ -589,12 +589,17 @@ class UIGroundingAgent:
                                latency_ms=(time.time() - start) * 1000,
                                target=target, method="failed")
 
-    def ground_fast(self, target: str) -> GroundingResult:
+    def ground_fast(self, target: str, ocr_threshold: float = 0.65) -> GroundingResult:
         """Stage 0 + Stage 1 only (UIA + OCR) — no VLM call.
 
         Used where a target may legitimately be absent (e.g. scroll-to-find
         probing): a full ground() would spend 30-50 s in Stage 2 just to confirm
         not-found, whereas this returns immediately when UIA + OCR miss.
+
+        ocr_threshold: minimum fuzzy-match score for the OCR stage. Callers
+        whose hit leads to typing (set_value/select field grounding) pass a
+        stricter bar — live, 'date' matched taskbar garbage 'Wd TE' at 0.67
+        and the fallback ctrl+a-typed a date into a non-Teams surface.
         """
         start = time.time()
         display, scale_x, scale_y, _screen_hash, dead = self._prepare_screen(target)
@@ -619,7 +624,7 @@ class UIGroundingAgent:
 
         if words and not _ocr_grounding_disabled():
             query = _strip_role_words(target)
-            match = self.ocr.find_text(words, query, threshold=0.65)
+            match = self.ocr.find_text(words, query, threshold=ocr_threshold)
             if match:
                 x = int(match.cx * scale_x)
                 y = int(match.cy * scale_y)
