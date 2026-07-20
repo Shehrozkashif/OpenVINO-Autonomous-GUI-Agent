@@ -444,6 +444,67 @@ class TestGroundFastDeadPoints(unittest.TestCase):
             self.assertTrue(again.found)
 
 
+class TestForeignDeadPoints(unittest.TestCase):
+    """Points proven to belong to ANOTHER APP's window (mark_dead foreign=True)
+    stay blacklisted for every target on every screen until the next task.
+
+    Regression (live VLM-only run 2026-07-19): grounding kept resolving
+    'New meeting' to text inside a background Edge window; the per-screen
+    blacklist freed the point after every screen change and the deterministic
+    VLM re-emitted the identical coordinate, opening Edge three times.
+    """
+
+    def test_foreign_point_blocked_across_screen_change(self):
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19, foreign=True)
+            # New screen state — the per-screen blacklist would free the point.
+            agent.capturer.capture.return_value = \
+                _PILImage.effect_noise((1852, 963), 64).convert("RGB")
+            again = agent.ground_fast("New")
+            self.assertFalse(again.found)
+
+    def test_foreign_point_blocks_every_target(self):
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19, foreign=True)
+            other = agent.ground_fast("Save")
+            self.assertFalse(other.found)
+
+    def test_plain_dead_point_stays_screen_scoped(self):
+        """foreign=False keeps the original per-screen semantics."""
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19)
+            agent.capturer.capture.return_value = \
+                _PILImage.effect_noise((1852, 963), 64).convert("RGB")
+            again = agent.ground_fast("New")
+            self.assertTrue(again.found)
+
+    def test_is_dead_point_sees_foreign_marks(self):
+        agent = _fast_agent()
+        agent.mark_dead("[visual]", 500, 300, foreign=True)
+        self.assertTrue(agent.is_dead_point(503, 297))
+        self.assertFalse(agent.is_dead_point(700, 300))
+
+    def test_clear_dead_points_frees_everything(self):
+        agent = _fast_agent()
+        agent.cache = ElementCache()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19, foreign=True)
+            agent.clear_dead_points()
+            again = agent.ground_fast("New")
+            self.assertTrue(again.found)
+
+
 class TestNegativeGroundingCache:
     """Latency regression (live 19:12-19:19): the full grounding cascade
     (VLM + rephrase LLM + tree searches + scroll hunt, 15-20 s) re-ran ~15×

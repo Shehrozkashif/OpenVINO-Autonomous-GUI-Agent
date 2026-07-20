@@ -407,6 +407,14 @@ class UIGroundingAgent:
         # 15-20 s) to reproduce a known miss is pure latency. A new screen
         # state is a new hash; mark_dead() also invalidates the entry.
         self._no_find: dict[tuple[str, str], float] = {}
+        # Points proven to land in ANOTHER APP's window (clicking them flipped
+        # the foreground away from the task's anchor app). Unlike delta=0
+        # points these are wrong regardless of screen state — the foreign
+        # window doesn't stop being foreign because pixels elsewhere changed —
+        # so they are blacklisted for EVERY target until the next task starts.
+        # Live: the VLM re-emitted the exact same Edge-window coordinate for
+        # 'New meeting' across three screen changes, opening Edge each time.
+        self._dead_foreign: list[tuple[int, int]] = []
         logger.info(
             f"[GROUNDING] Ready. Screen: {self.screen_w}×{self.screen_h}. "
             f"OCR: {'on' if self.ocr.is_available() else 'off (pip install rapidocr-onnxruntime)'}"
@@ -419,7 +427,8 @@ class UIGroundingAgent:
         return any(abs(x - dx) <= radius and abs(y - dy) <= radius for dx, dy in dead)
 
     def is_dead_point(self, x: int, y: int) -> bool:
-        """Was (x,y) proven inert (delta=0) on the CURRENT screen?
+        """Was (x,y) proven inert (delta=0) on the CURRENT screen, or proven
+        to belong to another app's window at any point in this task?
 
         Read path for EXPLICIT-coordinate clicks (visual planner): they carry
         raw pixels and never call ground(), so they bypassed the dead-point
@@ -428,6 +437,9 @@ class UIGroundingAgent:
         NINE times, delta=0 every time. Their marks live under the shared
         '[visual]' pseudo-target (a dead pixel is dead regardless of intent).
         """
+        foreign = getattr(self, "_dead_foreign", [])
+        if foreign and self._near_dead(x, y, foreign):
+            return True
         try:
             display = self.capturer.capture()
             display.thumbnail((self._DISPLAY_W, self._DISPLAY_H), Image.LANCZOS)
@@ -437,7 +449,7 @@ class UIGroundingAgent:
         dead = self._dead.get(("[visual]", screen_hash), [])
         return bool(dead) and self._near_dead(x, y, dead)
 
-    def mark_dead(self, target: str, x: int, y: int):
+    def mark_dead(self, target: str, x: int, y: int, foreign: bool = False):
         """Record that clicking (x,y) for `target` provably changed nothing.
 
         Called by the orchestrator when the reflector's frame comparison shows
@@ -446,9 +458,21 @@ class UIGroundingAgent:
         changed), so hashing it now keys the blacklist to exactly the state
         where the click was proven dead. On any other screen the same
         coordinate stays usable.
+
+        foreign=True: the click flipped the foreground to a DIFFERENT app —
+        the point belongs to another app's window. That fact survives screen
+        changes, so the point is additionally blacklisted for ALL targets on
+        ALL screens until clear_dead_points() (next task).
         """
         if not target:
             return
+        if foreign:
+            fdead = getattr(self, "_dead_foreign", None)
+            if fdead is None:
+                fdead = self._dead_foreign = []
+            if not self._near_dead(x, y, fdead):
+                fdead.append((x, y))
+                del fdead[:-32]   # bound task-lifetime growth
         # Prefer the hash of the screen this target was GROUNDED on: when the
         # wrong click changed the screen (opened another window), hashing the
         # current screen would key the blacklist to the aftermath state — a
@@ -475,6 +499,22 @@ class UIGroundingAgent:
             f"screen — next attempt must find a different point"
         )
 
+    def clear_dead_points(self):
+        """Forget every blacklist at the start of a new task.
+
+        Dead points, foreign-window points, negative-cache misses and
+        grounding-origin hashes all describe THIS task's screens; letting them
+        leak into the next task can veto a coordinate that is perfectly valid
+        there (the foreign-window list especially — the next task may be
+        anchored to the very app these points belong to).
+        """
+        self._dead.clear()
+        self._no_find.clear()
+        self._ground_hash.clear()
+        fdead = getattr(self, "_dead_foreign", None)
+        if fdead:
+            fdead.clear()
+
     def _prepare_screen(self, target: str):
         """Shared prelude of ground()/ground_fast(): capture, thumbnail,
         scale factors, screen hash (recorded as the target's grounding
@@ -492,7 +532,10 @@ class UIGroundingAgent:
         self._ground_hash[target.lower()] = screen_hash
         if len(self._ground_hash) > 128:
             self._ground_hash.pop(next(iter(self._ground_hash)))
-        dead = self._dead.get((target.lower(), screen_hash), [])
+        # Screen-scoped inert points for this target PLUS the task-scoped
+        # foreign-window points (wrong for every target on every screen).
+        dead = list(self._dead.get((target.lower(), screen_hash), []))
+        dead += getattr(self, "_dead_foreign", [])
         return display, scale_x, scale_y, screen_hash, dead
 
     def ground(self, target: str, max_retries: int = 1) -> GroundingResult:
@@ -697,7 +740,8 @@ class UIGroundingAgent:
         # Stage 2: VLM direct coordinate prediction
         # VLM is expected to hit interactive elements → element_type="foreground_interactive"
         if use_vlm and self.client:
-            result = self._vlm_coords(target, img_b64, int(display.width), int(display.height))
+            result = self._vlm_coords(target, img_b64, int(display.width), int(display.height),
+                                      avoid=dead)
             if result and not self._near_dead(result[0], result[1], dead):
                 return result
 
@@ -706,15 +750,34 @@ class UIGroundingAgent:
     def _vlm_coords(
         self, target: str, img_b64: str,
         display_w: int = 0, display_h: int = 0,
+        avoid: list | tuple = (),
     ) -> tuple[int, int, float, str, str] | None:
         """Ask UI-TARS for normalized (x,y) coordinates and scale to screen pixels.
 
         display_w/display_h: pixel dimensions of the image sent to the VLM.
         Needed to correctly scale pixel-valued JSON coordinates back to screen space.
+
+        avoid: screen-pixel points already proven wrong for this target. The
+        model runs at temperature 0, so re-asking the identical question
+        returns the identical wrong point forever — the only way to a
+        different answer is to change the question. The points are embedded
+        in the prompt on the model's own 0-1000 scale.
         """
+        prompt = _VLM_COORD_PROMPT.format(target=target)
+        if avoid and self.screen_w and self.screen_h:
+            pts = ", ".join(
+                f"({int(ax / self.screen_w * 1000)}, {int(ay / self.screen_h * 1000)})"
+                for ax, ay in list(avoid)[:8]
+            )
+            prompt += (
+                f"\nIMPORTANT: the element is NOT at these 0-1000 scale "
+                f"locations (already tried, wrong): {pts}. Pick a clearly "
+                f"different location, or answer not_found() if the element "
+                f"is not visible anywhere else."
+            )
         try:
             resp = self.client.query_vlm(
-                prompt=_VLM_COORD_PROMPT.format(target=target),
+                prompt=prompt,
                 image_base64=img_b64,
                 max_tokens=120,
                 temperature=0.0,

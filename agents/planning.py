@@ -434,6 +434,10 @@ You are operating a {os_name} desktop. Screenshot attached.
 
 GOAL: {goal}
 {history}
+NEVER repeat an action the history marks as FAILED — especially a click at
+(or near) coordinates that already failed. Choose a DIFFERENT element or a
+different route to the goal instead.
+
 Output exactly ONE action line in this format (no explanation):
 
 click(start_box='[[x1, y1, x2, y2]]')        — left-click the element in that box

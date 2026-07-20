@@ -182,6 +182,7 @@ class TaskOrchestrator:
         self._last_controls = None   # controls snapshot for verifier diffing
         self._exec_fail_reason = ""
         self._blocking_overlay = None   # (target, cover) from the hit-test gate
+        self._anchor_gate_off = False   # True while a launch subtask runs
         # Set when a subtask completes via a degraded path (loop-guard recovery,
         # optimistic parse-failure success, etc.). Such a task is NOT stored in
         # success memory, so broken plans never poison future routing hints.
@@ -339,6 +340,13 @@ class TaskOrchestrator:
         self._last_goal_evidence = ""
         self._last_controls = None
         self._blocking_overlay = None
+        self._anchor_gate_off = False
+        # Dead/foreign-point blacklists describe the PREVIOUS task's screens —
+        # they must not veto valid coordinates in this one.
+        try:
+            self.grounder.clear_dead_points()
+        except Exception:
+            pass
         self.log(f"[TASK START] '{instruction}'")
         start_time = time.time()
         self._arm_kill_switch()
@@ -745,6 +753,70 @@ class TaskOrchestrator:
             return hwnd, pid.value, name
         except Exception:
             return 0, 0, ""
+
+    # Shell surfaces a click may legitimately land on while a task is anchored
+    # to an app: taskbar, Start menu, search flyouts. Everything else that is
+    # not the anchor's process is another app's window.
+    _SHELL_PROCS = frozenset({
+        "explorer.exe", "searchhost.exe", "searchapp.exe", "searchui.exe",
+        "startmenuexperiencehost.exe", "shellexperiencehost.exe",
+    })
+
+    def _foreign_app_at_point(self, x: int, y: int) -> str | None:
+        """Exe name of the OTHER app whose window owns screen pixel (x, y),
+        or None when clicking there is fine.
+
+        Pre-click ground truth for anchored tasks: WindowFromPoint answers
+        "whose window would this click actually land in" BEFORE any input
+        fires. Live (VLM-only run): grounding kept resolving 'New meeting' to
+        text inside a background Edge window; every click flipped focus to
+        Edge, was caught only AFTER the fact, and burned a full
+        act-verify-refocus cycle (~30 s each). This check rejects the point
+        for milliseconds instead.
+
+        None (allow) when: no anchor is set, the subtask is launching an app,
+        the point belongs to the anchor's process (same pid or same exe — a
+        WebView2 child or same-app popup counts), the shell (taskbar / Start
+        search), our own GUI window, or the lookup fails.
+        """
+        anchor = getattr(self, "_app_anchor", None)
+        if not anchor or getattr(self, "_anchor_gate_off", False):
+            return None
+        try:
+            import ctypes
+            import ctypes.wintypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            user32.WindowFromPoint.argtypes = [ctypes.wintypes.POINT]
+            user32.WindowFromPoint.restype = ctypes.wintypes.HWND
+            h = user32.WindowFromPoint(ctypes.wintypes.POINT(int(x), int(y)))
+            if not h:
+                return None
+            root = user32.GetAncestor(h, 2) or h   # 2 = GA_ROOT
+            if root == anchor[0] or root == getattr(self, "_own_hwnd", None):
+                return None
+            pid = ctypes.wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
+            if not pid.value or pid.value == anchor[1]:
+                return None
+            name = ""
+            ph = kernel32.OpenProcess(0x1000, False, pid.value)
+            if ph:
+                buf = ctypes.create_unicode_buffer(260)
+                size = ctypes.c_ulong(260)
+                if kernel32.QueryFullProcessImageNameW(ph, 0, buf, ctypes.byref(size)):
+                    name = buf.value.rsplit("\\", 1)[-1]
+                kernel32.CloseHandle(ph)
+            if not name:
+                return None
+            nl = name.lower()
+            # Same exe (multi-process app: another window of the anchor app)
+            # or a shell surface — allowed.
+            if nl == (anchor[2] or "").lower() or nl in self._SHELL_PROCS:
+                return None
+            return name
+        except Exception:
+            return None   # hit-test unavailable → never block on a guess
 
     @staticmethod
     def _window_title(hwnd: int) -> str:
@@ -1449,6 +1521,10 @@ class TaskOrchestrator:
         # step systematically misfires ("FAILED" on correct typing) and used to
         # trigger a destructive re-type. Defer to the authoritative Enter check.
         _cmd_type_step = run.is_cmd_subtask and step.action_type == "type"
+        # Launch subtasks legitimately click OUTSIDE the anchor app (Start
+        # menu results, desktop icons) — the pre-click anchor gate must not
+        # veto those. Read by _foreign_app_at_point for every attempt below.
+        self._anchor_gate_off = run.is_launch_goal
         # set_value verifies itself by reading the control back through the
         # accessibility tree — LLM reflection would only add latency.
         skip_reflection = (
@@ -1675,8 +1751,13 @@ class TaskOrchestrator:
                         f"(task app: {self._app_anchor[2]}) — marking point dead"
                     )
                     if getattr(self, "_last_click_xy", None):
+                        # foreign=True: the point belongs to another app's
+                        # window — that stays true across screen changes, so
+                        # blacklist it task-wide for every target (the VLM
+                        # re-emits identical coordinates at temperature 0).
                         self.grounder.mark_dead(
-                            step.target or "[visual]", *self._last_click_xy
+                            step.target or "[visual]", *self._last_click_xy,
+                            foreign=True,
                         )
                     self._ensure_anchor_foreground()
                     run.last_error = (
@@ -1931,11 +2012,24 @@ class TaskOrchestrator:
             and step.action_type in ("click", "right_click", "double_click")
             and self._is_single_click_subtask(subtask)
         ):
+            # A blind visual-planner click (raw coordinates, no target) proves
+            # only that SOME pixel changed the screen — nothing ties it to the
+            # control the subtask names. Trusting it completed 'click the New
+            # meeting button' off a click that had opened a browser tab (live
+            # VLM-only run), and the form-fill subtask that followed died on a
+            # form that never opened. Let the next cycle's goal check judge
+            # from the live screen instead.
+            if step.target or self._explicit_coords(step.value) is None:
+                self.log(
+                    "  [CLICK-CHECK] Single-click subtask — verified click "
+                    "landed and changed the screen — subtask complete"
+                )
+                return True
             self.log(
-                "  [CLICK-CHECK] Single-click subtask — verified click landed "
-                "and changed the screen — subtask complete"
+                "  [CLICK-CHECK] Visual click changed the screen, but its "
+                "target is unproven — requiring goal-check evidence before "
+                "completing the subtask"
             )
-            return True
 
         # Early-exit: a form-fill subtask ends by clicking a COMMIT button
         # (Save / Send / Schedule / Create…) that SUBMITS and then CLOSES the
@@ -2243,6 +2337,22 @@ class TaskOrchestrator:
                         f"this screen — refusing to re-click it"
                     )
                     return False
+                # Pre-click ground truth: a visual-planner point inside
+                # another app's window can never advance a task anchored to
+                # this app — reject it BEFORE the click steals focus.
+                _foreign = self._foreign_app_at_point(x, y)
+                if _foreign:
+                    self.grounder.mark_dead("[visual]", x, y, foreign=True)
+                    self._exec_fail_reason = (
+                        f"point ({x},{y}) is inside {_foreign}'s window, not "
+                        f"the task app's — clicking there would leave the app; "
+                        f"choose an element INSIDE the task app's window"
+                    )
+                    self.log(
+                        f"  [ANCHOR-GATE] ({x},{y}) belongs to {_foreign} — "
+                        f"refusing to click outside the task app"
+                    )
+                    return False
                 self._last_click_xy = (x, y)
                 if self._stop_event.is_set():
                     return False
@@ -2268,6 +2378,27 @@ class TaskOrchestrator:
             # The GUI window masking (exclude_regions) prevents log-text false positives.
             x, y = result.x, result.y
             self._last_click_xy = (x, y)
+            # Pre-click anchor gate (OCR/VLM grounding hits especially): the
+            # target's text may exist in ANOTHER app's window — a background
+            # browser tab, a search-result flyout — and grounding happily
+            # returns that pixel. Hit-test whose window owns the point before
+            # any input fires; a foreign point is marked dead task-wide so no
+            # stage can serve it again.
+            _foreign = self._foreign_app_at_point(x, y)
+            if _foreign:
+                self.grounder.mark_dead(step.target or "[visual]", x, y,
+                                        foreign=True)
+                self._exec_fail_reason = (
+                    f"'{step.target}' was located at ({x},{y}), but that "
+                    f"point is inside {_foreign}'s window — the matched text "
+                    f"belongs to another app, not the task app; find the "
+                    f"control INSIDE the task app's window instead"
+                )
+                self.log(
+                    f"  [ANCHOR-GATE] '{step.target}' at ({x},{y}) belongs "
+                    f"to {_foreign} — refusing to click outside the task app"
+                )
+                return False
             # Hit-test before acting: ElementFromPoint is OS ground truth for
             # "what would a click here actually land on". When a dialog or
             # overlay sits on top (live: Teams' 'Meeting created' popup over
