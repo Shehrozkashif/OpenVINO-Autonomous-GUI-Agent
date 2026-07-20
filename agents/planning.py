@@ -719,8 +719,11 @@ class PlanningAgent:
 
     def _query_with_retry(self, messages: list[dict], subtask_id: int) -> list[ActionStep]:
         """One planning call, with a single temperature-0 retry on parse errors."""
+        # 1152: the 14B pretty-prints JSON (spaces/newlines) and blew through
+        # 768 on multi-field form plans — truncation mid-object. The salvage
+        # in _parse_steps recovers the prefix, but headroom beats salvage.
         resp = self.client.query_llm(
-            messages, max_tokens=768, temperature=0.2,
+            messages, max_tokens=1152, temperature=0.2,
             response_schema=_STEP_SCHEMA,
         )
         try:
@@ -732,7 +735,7 @@ class PlanningAgent:
             # counts a planning failure and can recover.
             logger.warning(f"[PLANNING] parse error: {e} — retrying once at temperature 0")
             resp = self.client.query_llm(
-                messages, max_tokens=768, temperature=0.0,
+                messages, max_tokens=1152, temperature=0.0,
                 response_schema=_STEP_SCHEMA,
             )
             try:
@@ -779,17 +782,42 @@ class PlanningAgent:
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         start_idx = text.find('[')
         end_idx = text.rfind(']')
-        if start_idx == -1 or end_idx == -1 or start_idx > end_idx:
+        if start_idx == -1:
             raise ValueError(f"No JSON array in planning response: {text[:200]}")
 
-        json_str = text[start_idx:end_idx + 1]
+        # A truncated generation (hit max_tokens mid-object) has no closing
+        # ']' — keep the whole tail and let the salvage below recover the
+        # complete prefix (same approach as the router's _parse_subtasks).
+        json_str = text[start_idx:end_idx + 1] if end_idx > start_idx else text[start_idx:]
         json_str = re.sub(r",\s*([\]}])", r"\1", json_str)
 
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError as e:
-            logger.error(f"[PLANNING] JSON parse error: {e}\nRaw: {json_str[:300]}")
-            raise
+            # Salvage a truncated array: cut back to the last complete object
+            # and close the bracket. The complete prefix is real planned work
+            # — executing it beats discarding a 45-100 s planning call, and
+            # the orchestrator re-plans against the live screen once the
+            # queue drains. Live (14B): two plans truncated mid-string at the
+            # 768-token cap; parse+retry burned ~200 s each and aborted the
+            # subtask, when 5+ complete steps sat in the prefix both times.
+            tail = re.sub(r",\s*([\]}])", r"\1", text[start_idx:])
+            data = None
+            for m in reversed(list(re.finditer(r"\}", tail))):
+                try:
+                    candidate = json.loads(tail[:m.end()] + "]")
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(candidate, list) and candidate:
+                    data = candidate
+                    logger.warning(
+                        f"[PLANNING] Plan truncated mid-generation — salvaged "
+                        f"{len(candidate)} complete step(s) from the prefix"
+                    )
+                    break
+            if data is None:
+                logger.error(f"[PLANNING] JSON parse error: {e}\nRaw: {json_str[:300]}")
+                raise
 
         steps = []
         for item in data:
