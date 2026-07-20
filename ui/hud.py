@@ -146,6 +146,12 @@ class MissionHUD(QWidget):
         self._update_mask()
         super().moveEvent(e)
 
+    def resizeEvent(self, e):
+        # A growing step-description can widen the frameless HUD; a mask
+        # captured at show-time then leaks the new text into OCR.
+        self._update_mask()
+        super().resizeEvent(e)
+
     # ── Event handlers ────────────────────────────────────────────────────────
 
     def _on_state(self, state: AgentState):

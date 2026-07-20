@@ -267,22 +267,60 @@ class TaskOrchestrator:
                 self.capturer.exclude_regions = []
                 return
 
-            # Only mask when our GUI window is the topmost (foreground) window.
-            # When another app is in focus, the GUI window's text is hidden behind it.
-            foreground = user32.GetForegroundWindow()
-            if foreground != hwnd:
+            # Minimized → none of our pixels are on screen; clear any mask.
+            if user32.IsIconic(hwnd):
                 if self.capturer.exclude_regions:
                     self.capturer.exclude_regions = []
-                    logger.debug("[ORCHESTRATOR] GUI window not foreground — mask cleared")
+                    logger.debug("[ORCHESTRATOR] GUI window minimized — mask cleared")
                 return
 
-            # Our window is foreground — compute bounds once and cache them
-            if not self.capturer.exclude_regions:
-                rect = ctypes.wintypes.RECT()
-                user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                bounds = (rect.left, rect.top, rect.right, rect.bottom)
-                self.capturer.exclude_regions = [bounds]
-                logger.info(f"[ORCHESTRATOR] GUI window masked at {bounds}")
+            # The old rule masked ONLY when our window was the FOREGROUND
+            # window, assuming 'not foreground ⇒ hidden behind the target
+            # app'. On a wide screen that is false: the agent's window sits
+            # BESIDE the app, fully visible while the app owns focus — and
+            # its console panel prints every step ('CLICK, [visual] click at
+            # (847,39)'), which OCR then read back. The verifier saw the
+            # agent's OWN LOG as 'a new UI element appeared' and passed
+            # nearly every click on the OCR/VLM paths; goal checks quoted
+            # 'the screen text includes SCROLL'. Decide by ground truth
+            # instead: hit-test sample points across our rect — wherever
+            # WindowFromPoint resolves to OUR process, our pixels are what
+            # the capture will contain, so mask the rect.
+            user32.WindowFromPoint.argtypes = [ctypes.wintypes.POINT]
+            user32.WindowFromPoint.restype = ctypes.wintypes.HWND
+            rect = ctypes.wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            our_pid = ctypes.wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(our_pid))
+            _GA_ROOT = 2
+            visible = False
+            for sx in (rect.left + 8, (rect.left + rect.right) // 2,
+                       rect.right - 8):
+                for sy in (rect.top + 8, (rect.top + rect.bottom) // 2,
+                           rect.bottom - 8):
+                    h = user32.WindowFromPoint(
+                        ctypes.wintypes.POINT(int(sx), int(sy)))
+                    if not h:
+                        continue
+                    root = user32.GetAncestor(h, _GA_ROOT) or h
+                    pid = ctypes.wintypes.DWORD(0)
+                    user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
+                    if pid.value == our_pid.value:
+                        visible = True
+                        break
+                if visible:
+                    break
+            bounds = (rect.left, rect.top, rect.right, rect.bottom)
+            if visible:
+                if self.capturer.exclude_regions != [bounds]:
+                    self.capturer.exclude_regions = [bounds]
+                    logger.info(
+                        f"[ORCHESTRATOR] GUI window visible during capture — "
+                        f"masked at {bounds}"
+                    )
+            elif self.capturer.exclude_regions:
+                self.capturer.exclude_regions = []
+                logger.debug("[ORCHESTRATOR] GUI window covered — mask cleared")
         except Exception as e:
             logger.debug(f"[ORCHESTRATOR] GUI window mask lookup failed: {e}")
 
