@@ -2384,6 +2384,22 @@ class TaskOrchestrator:
             return False
         return False
 
+    @staticmethod
+    def _force_mouse() -> bool:
+        """True when grounded clicks must use the real (gliding) mouse rather than
+        the UIA pattern-invoke shortcut. Env AGENT_FORCE_MOUSE=1/0 wins; otherwise
+        config.FORCE_MOUSE (default True) decides. See config.FORCE_MOUSE."""
+        env = os.environ.get("AGENT_FORCE_MOUSE", "").strip().lower()
+        if env in ("1", "true", "yes"):
+            return True
+        if env in ("0", "false", "no"):
+            return False
+        try:
+            import config as _cfg  # noqa: PLC0415
+            return bool(getattr(_cfg, "FORCE_MOUSE", True))
+        except Exception:
+            return True
+
     def _execute_step(self, step: ActionStep) -> bool:
         # Stop pressed: never BEGIN a new action. The step loop already checks
         # between steps, but grounding one target can block 30-60 s on a VLM
@@ -2556,8 +2572,7 @@ class TaskOrchestrator:
                 step.action_type == "click"
                 and "uia" in (result.method or "")
                 and (step.target or "").lower() not in self._invoke_dead
-                and os.environ.get("AGENT_FORCE_MOUSE", "").strip().lower()
-                not in ("1", "true", "yes")
+                and not self._force_mouse()
             ):
                 from core import windows_uia
                 if self._stop_event.is_set():

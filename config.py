@@ -90,6 +90,18 @@ MODEL_REPOSITORY_PATH = "models"
 # /28-rounded (resized) dimension. Re-calibrate after changing VLM_WEIGHT_FORMAT.
 VLM_COORD_SPACE = "pixels"   # "auto" | "norm1000" | "pixels"
 
+# ── Interaction ─────────────────────────────────────────────────────────────────
+# Force every grounded click to be delivered with the REAL MOUSE — the cursor
+# glides to the target and presses — instead of the faster UIA pattern-invoke
+# shortcut (which actuates a control through the accessibility API with NO cursor
+# motion). UIA still supplies the exact coordinates, so click accuracy is
+# unchanged; this only changes HOW the click is delivered. Default True: a
+# desktop-automation agent should visibly drive mouse + keyboard (demos, and
+# operators who need to trust what they see). Set False to prefer UIA invoke,
+# which is more robust on the few WebView2 buttons that swallow synthesized pixel
+# clicks. Env AGENT_FORCE_MOUSE=1/0 overrides this per-run.
+FORCE_MOUSE = True
+
 # Second-pass "zoom" refinement for VLM grounding (ScreenSpot-Pro technique):
 # crop a window around the coarse estimate at full resolution and re-ask the VLM.
 # DISABLED by default: live testing showed it makes THIS model WORSE, because
