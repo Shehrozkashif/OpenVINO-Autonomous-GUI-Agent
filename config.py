@@ -39,10 +39,14 @@ VLM_SOURCE = "ByteDance-Seed/UI-TARS-1.5-7B"
 
 # Quantization each model is exported at. The VLM is converted locally, so this
 # is where its precision is chosen: "int8" trades ~2.5 GB more VRAM for more
-# accurate coordinate grounding than "int4". "fp16" is too large to co-reside
-# with the LLM on 27 GB. Changing VLM_WEIGHT_FORMAT requires the servable name
-# (VLM_MODEL above) to change too, so start.py re-exports instead of reusing the
-# old precision's directory.
+# accurate coordinate grounding than "int4".
+# fp16 was tested live (2026-07-20, 27.5 GB budget): the 15.5 GB fp16 VLM DOES
+# co-reside with the int4 LLM if KV is trimmed to 3+2 GB — but its grounding
+# accuracy was IDENTICAL to int8 (Chat 3px, New meeting 36px, Calendar ~250px
+# both). The model's small/stacked-icon miss is BEHAVIORAL, not precision-bound,
+# so fp16 buys nothing while costing ~8 GB and KV headroom. int8 stays the pick.
+# Changing VLM_WEIGHT_FORMAT requires the servable name (VLM_MODEL above) to
+# change too, so start.py re-exports instead of reusing the old precision's dir.
 LLM_WEIGHT_FORMAT = "int4"
 VLM_WEIGHT_FORMAT = "int8"
 
