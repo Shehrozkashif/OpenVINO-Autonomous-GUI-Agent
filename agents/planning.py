@@ -455,13 +455,28 @@ All coordinates are on a 0-1000 scale where (0,0) is top-left and (1000,1000)
 is bottom-right of the screenshot."""
 
 
+def _resize28(dim: int) -> int:
+    """qwen2.5-VL smart_resize rounds each image side to a multiple of 28
+    (patch 14 × merge 2). Our screenshots stay well under the model's max_pixels,
+    so the model sees the sent image rounded to /28 and emits absolute pixel
+    coordinates in that space. Mirror of grounding._qwen_resize_dim."""
+    return max(28, int(round(dim / 28)) * 28)
+
+
 def _parse_visual_action(
-    text: str, subtask_id: int, screen_w: int, screen_h: int
+    text: str, subtask_id: int, screen_w: int, screen_h: int,
+    display_w: int = 0, display_h: int = 0,
 ) -> ActionStep | None:
     """Parse a UI-TARS action line into an ActionStep.
 
     Click-family steps carry explicit screen-pixel coordinates in `value`
     (as "x,y"), so the orchestrator executes them directly without grounding.
+
+    display_w/display_h: pixel size of the screenshot actually sent to the VLM.
+    UI-TARS-1.5 (qwen2.5-VL) returns ABSOLUTE pixels in the /28 smart-resized
+    image space, so coordinates are mapped screen = raw / resize28(sent) * screen
+    (config.VLM_COORD_SPACE). When the sent size is unknown, or the convention is
+    pinned to "norm1000", the legacy 0-1000 mapping is used instead.
 
     Returns None for finished(). Raises PlanningParseError when nothing parses.
     """
@@ -471,6 +486,17 @@ def _parse_visual_action(
 
     if re.search(r"\bfinished\s*\(", text):
         return None
+
+    try:
+        import config as _cfg  # noqa: PLC0415
+        _mode = str(getattr(_cfg, "VLM_COORD_SPACE", "pixels")).lower()
+    except Exception:
+        _mode = "pixels"
+
+    def _map(raw: float, sent_dim: int, screen_dim: int) -> int:
+        if _mode != "norm1000" and sent_dim and sent_dim > 1:
+            return int(raw / _resize28(sent_dim) * screen_dim)
+        return int(raw / 1000 * screen_dim)
 
     def _step(action_type, *, target=None, value=None, key=None, desc=""):
         return ActionStep(
@@ -498,8 +524,8 @@ def _parse_visual_action(
         kind = {"click": "click", "left_double": "double_click",
                 "right_single": "right_click"}[m.group(1)]
         x1, y1, x2, y2 = (float(m.group(i)) for i in range(2, 6))
-        px, py = _clamp(int((x1 + x2) / 2 / 1000 * screen_w),
-                        int((y1 + y2) / 2 / 1000 * screen_h))
+        px, py = _clamp(_map((x1 + x2) / 2, display_w, screen_w),
+                        _map((y1 + y2) / 2, display_h, screen_h))
         return _step(kind, value=f"{px},{py}",
                      desc=f"[visual] {kind} at ({px},{py})")
 
@@ -512,8 +538,8 @@ def _parse_visual_action(
     if m:
         kind = {"click": "click", "left_double": "double_click",
                 "right_single": "right_click"}[m.group(1)]
-        px, py = _clamp(int(float(m.group(2)) / 1000 * screen_w),
-                        int(float(m.group(3)) / 1000 * screen_h))
+        px, py = _clamp(_map(float(m.group(2)), display_w, screen_w),
+                        _map(float(m.group(3)), display_h, screen_h))
         return _step(kind, value=f"{px},{py}",
                      desc=f"[visual] {kind} at ({px},{py})")
 
@@ -591,6 +617,8 @@ class PlanningAgent:
         completed: list[str] = None,
         screen_w: int = 1920,
         screen_h: int = 1080,
+        display_w: int = 0,
+        display_h: int = 0,
     ) -> ActionStep | None:
         """Visual recovery planning: send the actual screenshot to the VLM (UI-TARS)
         and get the next action directly, with pixel coordinates.
@@ -615,7 +643,8 @@ class PlanningAgent:
             temperature=0.0,
             system_prompt=_VISUAL_PLAN_SYSTEM,
         )
-        step = _parse_visual_action(resp.content, subtask.id, screen_w, screen_h)
+        step = _parse_visual_action(resp.content, subtask.id, screen_w, screen_h,
+                                    display_w, display_h)
         if step is not None:
             step.id = len(completed or []) + 1
             logger.info(f"[PLANNING/VISUAL] Next: [{step.action_type}] {step.description}")

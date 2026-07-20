@@ -2321,13 +2321,18 @@ class TaskOrchestrator:
         self._refresh_own_window_mask()
         img = self.capturer.capture()
         thumb = img.copy()
-        thumb.thumbnail((960, 540))
+        # 1280 (not 960): UI-TARS-1.5 grounds small targets better at higher
+        # resolution, and _parse_visual_action maps the returned absolute pixels
+        # against the ACTUAL sent size (display_w/h below), so the larger image
+        # improves accuracy without breaking coordinate mapping.
+        thumb.thumbnail((1280, 720))
         buf = io.BytesIO()
         thumb.convert("RGB").save(buf, format="JPEG", quality=85)
         img_b64 = base64.b64encode(buf.getvalue()).decode()
         return self.planner.plan_next_step_visual(
             subtask, img_b64, completed,
             screen_w=self._screen_w, screen_h=self._screen_h,
+            display_w=thumb.width, display_h=thumb.height,
         )
 
     # ── Step execution ─────────────────────────────────────────────────────────

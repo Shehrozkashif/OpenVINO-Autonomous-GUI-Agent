@@ -76,12 +76,22 @@ VLM_KV_CACHE_GB = 2
 MODEL_REPOSITORY_PATH = "models"
 
 # ── Grounding ───────────────────────────────────────────────────────────────────
-# Coordinate convention of the served UI-TARS build. The prompt asks for the
-# native 0-1000 scale, but quantized conversions sometimes emit raw pixels of
-# the input image instead — and values ≤ 1000 fit both readings, so "auto" has
-# to guess (heuristic in grounding._parse_coords). To make parsing deterministic:
-# run tests/live/test_vlm_coordinates.py on the target machine once, see which
-# convention the model actually uses, and pin this to "norm1000" or "pixels".
-# NOTE: re-run that test after changing VLM_WEIGHT_FORMAT — a different
-# quantization can change which convention the model emits.
-VLM_COORD_SPACE = "auto"   # "auto" | "norm1000" | "pixels"
+# Coordinate convention of the served UI-TARS build. UI-TARS-1.5 is qwen2.5-VL
+# based, which emits ABSOLUTE pixel coordinates in the smart-resized image space
+# (each side rounded to a multiple of 28; no budget downscale for our screen
+# sizes). Pinned to "pixels" — a live calibration against UIA ground truth
+# (tests/live/test_vlm_coordinates.py) confirmed pixel/resized mapping beats the
+# 0-1000 reading for distinct targets (e.g. a top-right button: /1000 lands
+# off-screen, /resized lands within ~30px). grounding._CoordSpace divides by the
+# /28-rounded (resized) dimension. Re-calibrate after changing VLM_WEIGHT_FORMAT.
+VLM_COORD_SPACE = "pixels"   # "auto" | "norm1000" | "pixels"
+
+# Second-pass "zoom" refinement for VLM grounding (ScreenSpot-Pro technique):
+# crop a window around the coarse estimate at full resolution and re-ask the VLM.
+# DISABLED by default: live testing showed it makes THIS model WORSE, because
+# UI-TARS-1.5-int8's grounding bias is FRAME-RELATIVE (it anchors near the top of
+# whatever image it sees), so cropping just re-anchors "too high" onto the crop
+# (Chat 3px→30px, Calendar 153px→287px). The code is kept behind this flag for
+# future models/content where zoom-in grounding does help. Coordinate accuracy on
+# distinct targets comes from the pixel transform above, not from zoom.
+VLM_ZOOM_REFINE = False

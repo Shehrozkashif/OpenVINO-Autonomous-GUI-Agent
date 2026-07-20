@@ -48,6 +48,15 @@ def _ocr_grounding_disabled() -> bool:
         logger.info("[OCR] Stage 1 grounding disabled via AGENT_DISABLE_OCR — VLM takes over")
     return True
 
+
+def _vlm_zoom_enabled() -> bool:
+    """True when the Stage-2 VLM zoom refinement (config.VLM_ZOOM_REFINE) is on."""
+    try:
+        import config as _cfg  # noqa: PLC0415
+        return bool(getattr(_cfg, "VLM_ZOOM_REFINE", True))
+    except Exception:
+        return True
+
 # ── VLM prompt constants ──────────────────────────────────────────────────────
 
 _UITARS_SYSTEM_PROMPT = (
@@ -316,14 +325,26 @@ class _VLMSaysNotFound(Exception):
     """VLM answered found=false — stop parsing, the element is not on screen."""
 
 
+def _qwen_resize_dim(dim: int, factor: int = 28) -> int:
+    """qwen2.5-VL smart_resize rounds each image side to a multiple of `factor`
+    (28 = patch_size 14 × merge_size 2). Our screenshots are always far below the
+    model's max_pixels (12,845,056 px, per its preprocessor_config.json), so the
+    pixel-budget branch of smart_resize never fires — the model simply sees the
+    sent image rounded to the nearest /28, and (being qwen2.5-VL based) emits
+    ABSOLUTE pixel coordinates in THAT resized space. Mapping back to screen
+    therefore divides by the /28-rounded dimension, not the raw sent dimension.
+    """
+    return max(factor, int(round(dim / factor)) * factor)
+
+
 @dataclass
 class _CoordSpace:
     """Maps coordinate values from one VLM answer to screen pixels.
 
-    UI-TARS may answer in three different value scales (normalised 0-1,
-    its native 0-1000 grid, or raw pixels of the image it was shown).
-    This object carries the dimensions + configured convention so every
-    parser applies the exact same conversion rules.
+    UI-TARS-1.5 (qwen2.5-VL) emits ABSOLUTE pixel coordinates in the smart-resized
+    image space. This object carries the dimensions + configured convention so
+    every parser applies the exact same conversion rules. Pixel divisions use the
+    /28-rounded (smart-resized) dimension via _disp(), matching what the model saw.
     """
 
     screen_w: int
@@ -332,11 +353,15 @@ class _CoordSpace:
     display_h: int
     mode: str        # config.VLM_COORD_SPACE: "auto" | "pixels" | "norm1000"
 
+    def _disp(self, dim: int) -> int:
+        """Divisor for pixel-valued coords: the /28 smart-resized dimension."""
+        return _qwen_resize_dim(dim) if dim > 1 else dim
+
     def px_to_screen(self, px: float, py: float) -> tuple[int, int]:
-        """Scale display-space pixels to screen pixels, clamped to screen bounds."""
+        """Scale resized-image pixels to screen pixels, clamped to screen bounds."""
         return (
-            min(int(px / self.display_w * self.screen_w), self.screen_w - 1),
-            min(int(py / self.display_h * self.screen_h), self.screen_h - 1),
+            min(int(px / self._disp(self.display_w) * self.screen_w), self.screen_w - 1),
+            min(int(py / self._disp(self.display_h) * self.screen_h), self.screen_h - 1),
         )
 
     def scale_x(self, val: float) -> int:
@@ -349,18 +374,20 @@ class _CoordSpace:
         """Convert a single VLM coordinate to screen pixels.
 
         A pinned mode ("pixels" / "norm1000") is applied deterministically.
-        In "auto": if val > 1000 it must be a display-space pixel, not
-        0-1000; if display_dim is available and val fits within it, treat
-        as pixel; otherwise fall back to 0-1000 normalised interpretation.
+        In "auto": if val > 1000 it must be a resized-space pixel, not 0-1000;
+        if display_dim is available and val fits within it, treat as pixel;
+        otherwise fall back to 0-1000 normalised interpretation. All pixel
+        divisions use the /28 smart-resized dimension (_disp).
         """
+        rd = self._disp(display_dim)
         if self.mode == "pixels" and display_dim > 1:
-            return min(int(val / display_dim * screen_dim), screen_dim - 1)
+            return min(int(val / rd * screen_dim), screen_dim - 1)
         if self.mode == "norm1000" and val <= 1000:
             return min(int(val / 1000 * screen_dim), screen_dim - 1)
         if val > 1000:
-            return min(int(val / display_dim * screen_dim), screen_dim - 1)
+            return min(int(val / rd * screen_dim), screen_dim - 1)
         if display_dim > 1 and val <= display_dim:
-            return min(int(val / display_dim * screen_dim), screen_dim - 1)
+            return min(int(val / rd * screen_dim), screen_dim - 1)
         return int(val / 1000 * screen_dim)
 
 
@@ -743,6 +770,12 @@ class UIGroundingAgent:
             result = self._vlm_coords(target, img_b64, int(display.width), int(display.height),
                                       avoid=dead)
             if result and not self._near_dead(result[0], result[1], dead):
+                # Zoom refinement: re-ground on a full-res crop around the coarse
+                # point so a small target fills the frame (ScreenSpot-Pro trick).
+                if _vlm_zoom_enabled():
+                    refined = self._vlm_zoom_refine(target, result, avoid=dead)
+                    if refined and not self._near_dead(refined[0], refined[1], dead):
+                        return refined
                 return result
 
         return None
@@ -797,6 +830,58 @@ class UIGroundingAgent:
         except Exception as e:
             logger.warning(f"[GROUNDING/S2-VLM] Error: {e}")
         return None
+
+    def _vlm_zoom_refine(
+        self, target: str, coarse: tuple, avoid: list | tuple = (),
+    ) -> tuple[int, int, float, str, str] | None:
+        """Second-pass zoom refinement (ScreenSpot-Pro technique).
+
+        Crop a window around the coarse screen point at FULL resolution, upscale
+        it 2× so a small target fills the frame, and re-ask the VLM. UI-TARS
+        grounds large targets far more accurately than small ones, so this
+        sharply cuts the error on tiny/dense elements. Returns a refined
+        (x, y, conf, method, element_type) in SCREEN coords, or None to keep the
+        coarse result. The crop window (⅓ screen) is generous enough to still
+        contain the true target even when the coarse estimate is off by ~100 px.
+        """
+        try:
+            cx, cy, cconf = coarse[0], coarse[1], coarse[2]
+            full = self.capturer.capture()
+            W, H = full.size
+            cw, ch = max(240, W // 3), max(240, H // 3)
+            x0 = max(0, min(cx - cw // 2, W - cw))
+            y0 = max(0, min(cy - ch // 2, H - ch))
+            crop = full.crop((x0, y0, x0 + cw, y0 + ch))
+            zoom = 2
+            big = crop.resize((cw * zoom, ch * zoom), Image.LANCZOS)
+            resp = self.client.query_vlm(
+                prompt=_VLM_COORD_PROMPT.format(target=target),
+                image_base64=self._encode(big),
+                max_tokens=120, temperature=0.0,
+                system_prompt=_UITARS_SYSTEM_PROMPT,
+            )
+            text = resp.content.strip()
+            if "</think>" in text:
+                text = text.split("</think>")[-1].strip()
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            # Map raw (in upscaled-crop space) -> crop space (screen dims here =
+            # crop dims, display dims = upscaled image), then add the crop offset.
+            r = self._parse_coords(text, cw, ch, big.width, big.height)
+            if not r:
+                return None
+            rx, ry, rconf = r
+            sx, sy = x0 + rx, y0 + ry
+            sx = max(0, min(sx, self.screen_w - 1))
+            sy = max(0, min(sy, self.screen_h - 1))
+            if self._near_dead(sx, sy, avoid):
+                return None
+            logger.info(
+                f"[GROUNDING/S2-ZOOM] '{target}' refined ({cx},{cy}) -> ({sx},{sy})"
+            )
+            return (sx, sy, max(cconf, rconf), "vlm_zoom", "foreground_interactive")
+        except Exception as e:
+            logger.debug(f"[GROUNDING/S2-ZOOM] refine failed: {e}")
+            return None
 
     def _parse_coords(
         self, text: str, screen_w: int, screen_h: int,
