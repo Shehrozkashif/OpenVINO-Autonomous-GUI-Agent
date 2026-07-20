@@ -1340,6 +1340,21 @@ class TaskOrchestrator:
         run.screen_context = run.cached_ocr if run.cached_ocr else self._get_screen_context()
         run.cached_ocr = ""   # consume — will be refreshed after reflection
 
+        # The foreground WINDOW TITLE, read via Win32 (survives OCR/UIA being
+        # disabled). The planner reasons about the title for Teams/Office view
+        # switches ('Calendar | Microsoft Teams') but was never handed it — so
+        # it fired ctrl+4 blind and could not tell Chat from Calendar. Give it
+        # the ground truth; the goal check reads the same context.
+        try:
+            from core.capture.screen_snapshot import _get_foreground_hwnd_and_title
+            _, _fg_title = _get_foreground_hwnd_and_title()
+            if _fg_title and _fg_title not in ("Unknown", "Desktop"):
+                run.screen_context += (
+                    f"\nFOREGROUND WINDOW TITLE (ground truth): {_fg_title}"
+                )
+        except Exception:
+            pass
+
         # Ground-truth clickables from the accessibility tree. Without this
         # the planner INVENTS button names from world knowledge — it planned
         # "New Meeting" for a whole run while the app's real button was named
@@ -1632,7 +1647,19 @@ class TaskOrchestrator:
             or (step.action_type == "hotkey" and "v" in _key_l.split("+") and "ctrl" in _key_l)
         )
 
-        for attempt in range(self.config.max_retries_per_step):
+        # A left-rail view-switch hotkey (ctrl+<digit>) is idempotent in STATE
+        # but useless to RETRY: if the first press didn't switch the view, two
+        # more identical presses won't either — each just burns a ~40 s verify
+        # round (live 06:56-07:16: ctrl+4 retried 3× per cycle for minutes).
+        # Give nav hotkeys ONE attempt and let the planner pick another route
+        # (a rail click). A switch that DID happen is confirmed deterministically
+        # by the window title in _judge_reflection, so nothing real is lost.
+        _nav_hotkey = (
+            step.action_type == "hotkey" and bool(re.fullmatch(r"ctrl\+\d", _key_l))
+        )
+        _max_attempts = 1 if _nav_hotkey else self.config.max_retries_per_step
+
+        for attempt in range(_max_attempts):
             # The kill switch must halt attempts IMMEDIATELY: one verify round
             # here costs 20-40 s of model calls, and a live run kept clicking
             # for 38 s after EMERGENCY STOP because only the outer step loop
@@ -1847,6 +1874,22 @@ class TaskOrchestrator:
                 and self._save_dialog_visible()
             ):
                 self.log("  [SAVE-CHECK] Save-As dialog is open — hotkey confirmed")
+                return "success"
+
+            # A Teams/Office left-rail view switch (ctrl+<digit>, or a click on
+            # the sidebar icon) is proven by the foreground WINDOW TITLE — the
+            # one signal that survives OCR/UIA being off. The OCR verifier can
+            # never read the title bar, so it scored every switch uncertain and
+            # the run retried ctrl+4 into a multi-minute stall (live 06:56-07:16,
+            # a Calendar that HAD opened was declared unconfirmed). Check it.
+            if (
+                step.action_type in ("hotkey", "click", "invoke", "double_click")
+                and self._view_switch_confirmed(step)
+            ):
+                self.log(
+                    "  [VIEW-CHECK] Window title confirms the view switch "
+                    "— step verified"
+                )
                 return "success"
 
             # Step reported as not-confirmed by the reflector.
@@ -3144,6 +3187,64 @@ class TaskOrchestrator:
             return "file name" in text and ("save" in text or "cancel" in text)
         except Exception:
             return False
+
+    # Teams/Office left-rail views switch via ctrl+<digit>; the reliable,
+    # perception-independent proof the switch happened is the foreground WINDOW
+    # TITLE (Win32 GetWindowText, readable even when the UIA tree and OCR
+    # grounding are disabled). ctrl+3's own view is 'Teams', which collides
+    # with the app suffix 'Microsoft Teams', so only the title HEAD (text before
+    # '|') is matched.
+    _TEAMS_VIEW_BY_KEY = {
+        "1": "Activity", "2": "Chat", "3": "Teams",
+        "4": "Calendar", "5": "Calls",
+    }
+    _NAV_VIEW_WORDS = (
+        "calendar", "activity", "chat", "calls", "teams",
+        "files", "mail", "inbox",
+    )
+
+    def _view_switch_confirmed(self, step: ActionStep) -> bool:
+        """True when the foreground window title proves a left-rail/view switch
+        reached the view this step aimed for.
+
+        Applies to a view-switch hotkey (ctrl+<digit>) or a "click the X button
+        in the sidebar / switch to X view" step. The title head (text before
+        '|', e.g. 'Calendar | Microsoft Teams') must contain the target view
+        name. Deterministic and independent of OCR/UIA, so it works on the
+        VLM-only path where the title bar is otherwise invisible.
+        """
+        key = (step.key or "").lower()
+        low = (step.description or "").lower()
+        is_nav_hotkey = bool(re.fullmatch(r"ctrl\+\d", key))
+        is_nav_desc = any(
+            p in low for p in ("switch to", "sidebar", "left rail",
+                               "left-rail", "navigate to")
+        )
+        if not (is_nav_hotkey or is_nav_desc):
+            return False
+        # Candidate view names: the one the hotkey digit maps to, plus any view
+        # word attached to button/tab/view/icon in the description ("Calendar
+        # button", "Calendar view"). Requiring that attachment keeps app-context
+        # mentions ("with Microsoft Teams already open, …") from matching.
+        candidates: list[str] = []
+        if is_nav_hotkey:
+            v = self._TEAMS_VIEW_BY_KEY.get(key.split("+")[1])
+            if v:
+                candidates.append(v.lower())
+        for m in re.finditer(r"(\w+)\s+(?:button|tab|view|icon)", low):
+            if m.group(1) in self._NAV_VIEW_WORDS:
+                candidates.append(m.group(1))
+        if not candidates:
+            return False
+        try:
+            from core.capture.screen_snapshot import _get_foreground_hwnd_and_title
+            _, title = _get_foreground_hwnd_and_title()
+        except Exception:
+            return False
+        head = (title or "").split("|")[0].strip().lower()
+        if not head:
+            return False
+        return any(c in head for c in candidates)
 
     def _try_save_as(self, target: str, started_at: float) -> bool:
         """Deterministically perform Windows "Save As <target>" and verify on disk.

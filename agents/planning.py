@@ -240,13 +240,13 @@ Launch Calc    :  search launcher value="libreoffice calc" → wait "2.0"
 Click in doc before typing. Save: ctrl+s. Save As: ctrl+shift+s → type name → enter.
 
 ━━━ MICROSOFT TEAMS ━━━
-Switch left-rail views with HOTKEYS — never by clicking the tiny rail icons
-(they are unreliable click targets and misses open random chats instead):
+Switch left-rail views with a HOTKEY first (clean and fast):
   Activity: ctrl+1   Chat: ctrl+2   Teams: ctrl+3   Calendar: ctrl+4   Calls: ctrl+5
 A goal like "click the Calendar button in the left sidebar" means: hotkey ctrl+4.
-Verification: the window title changes to the view name (e.g. 'Calendar | Microsoft
-Teams'). If the title did not change after ctrl+4, the rail order is custom —
-try ctrl+5, then ctrl+3.
+The switch is confirmed when the window title becomes the view name
+(e.g. 'Calendar | Microsoft Teams') or the calendar grid appears.
+If ctrl+4 did NOT switch the view, do NOT try the other digit hotkeys — they open
+the WRONG view. Instead CLICK the 'Calendar' icon on the far-left rail.
 With the Calendar view open, the 'New meeting' button sits at the TOP-RIGHT of
 the calendar area — click it by its visible text.
 Never click an item in the chat/conversation LIST while the goal is switching
