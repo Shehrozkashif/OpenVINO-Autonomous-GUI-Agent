@@ -488,6 +488,9 @@ def _make_orch(plan_steps, reflections, visual_replan_after=2):
     grounder.ground = MagicMock(return_value=GroundingResult(
         found=True, confidence=0.9, x=10, y=20, latency_ms=1.0,
         target="Btn", element_type="foreground_interactive"))
+    # Explicit-coordinate clicks consult the dead-point blacklist; a bare
+    # MagicMock return is TRUTHY and would refuse every visual click.
+    grounder.is_dead_point = MagicMock(return_value=False)
 
     planner = MagicMock()
     planner.plan_steps = MagicMock(side_effect=[[s] for s in plan_steps] + [None] * 10)
