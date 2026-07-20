@@ -11,21 +11,22 @@
 # These names must match the servable names registered in the OVMS config.json
 # that start.py generates (model_repository_path below).
 
-LLM_MODEL = "qwen3-8b-int4-ov"          # text reasoning — routing, planning, reflection
+LLM_MODEL = "qwen3-14b-int4-ov"         # text reasoning — routing, planning, reflection
 VLM_MODEL = "ui-tars-1.5-7b-int8-ov"    # GUI grounding & visual verification (UI-TARS)
 
-# The 8B LLM (INT4) is the default: it generates markedly faster on the iGPU
-# than the 14B and is enough for routing/planning/reflection. Using the 8B for
-# reasoning frees VRAM to run the grounding VLM at INT8 instead of INT4 — INT8
-# UI-TARS regresses UI coordinates with less quantization error (fewer misclicks
-# on the visual grounding path, which the Teams/WebView2 flow leans on).
-# Budget on a 27 GB GPU: 8B-int4 (~5.5 GB) + 7B-int8 VLM (~7.5 GB) + KV caches
-# (4 + 2 GB) + runtime overhead ≈ 20.5 GB — ~6 GB spare.
+# The 14B LLM (INT4) is the default: live OCR-path runs showed the 8B's
+# reasoning is the bottleneck — hallucinated verifier verdicts ("Calendar
+# panel is active" while the click landed on Meet), planners returning []
+# ("goal achieved") in rejection loops, and dropped decomposition steps. The
+# 14B trades per-call speed (~1.5-2x slower generation on the iGPU) for
+# fewer of those, which live cost far more time than the extra tokens.
+# Budget on a 27 GB GPU: 14B-int4 (~9.7 GB) + 7B-int8 VLM (~7.5 GB) + KV
+# caches (4 + 2 GB) + runtime overhead ≈ 24.7 GB.
 # FP16 UI-TARS (~15 GB weights) does NOT fit alongside the LLM + KV on 27 GB.
-# For higher reasoning accuracy (at a speed cost) the 14B still fits with the
-# INT8 VLM (14B-int4 ~9.7 + int8 VLM ~7.5 + KV 6 ≈ 24.7 GB):
-#   LLM_MODEL  = "qwen3-14b-int4-ov"
-#   LLM_SOURCE = "OpenVINO/Qwen3-14B-int4-ov"
+# For faster (but less reliable) reasoning the 8B remains available — its
+# exported weights stay on disk after a swap, so switching back is instant:
+#   LLM_MODEL  = "qwen3-8b-int4-ov"
+#   LLM_SOURCE = "OpenVINO/Qwen3-8B-int4-ov"
 
 # ── Model sources (where start.py fetches / converts them from) ─────────────────
 # LLM_SOURCE is a pre-converted OpenVINO IR repo on Hugging Face — OVMS pulls it
@@ -33,7 +34,7 @@ VLM_MODEL = "ui-tars-1.5-7b-int8-ov"    # GUI grounding & visual verification (U
 # the upstream UI-TARS checkpoint; start.py converts it to OpenVINO IR at
 # VLM_WEIGHT_FORMAT with optimum-cli on first run (no pre-built OV build exists).
 
-LLM_SOURCE = "OpenVINO/Qwen3-8B-int4-ov"
+LLM_SOURCE = "OpenVINO/Qwen3-14B-int4-ov"
 VLM_SOURCE = "ByteDance-Seed/UI-TARS-1.5-7B"
 
 # Quantization each model is exported at. The VLM is converted locally, so this
