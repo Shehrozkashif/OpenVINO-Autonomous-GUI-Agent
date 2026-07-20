@@ -189,10 +189,6 @@ class ActionExecutionAgent:
         time.sleep(duration)
         return True
 
-    def _do_screenshot(self, step, x, y, x2, y2) -> bool:
-        _ = self.controller.screenshot_base64()
-        return True
-
     # ── UIA structured-control actions ────────────────────────────────────────
     # Deterministic form-control manipulation through the accessibility
     # tree (ValuePattern / SelectionItemPattern / InvokePattern) with

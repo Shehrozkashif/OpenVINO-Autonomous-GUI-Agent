@@ -31,9 +31,3 @@ def test_has_changed_returns_bool():
     cap = ScreenCapture()
     result = cap.has_changed()
     assert isinstance(result, bool)
-
-
-def test_dpi_scale_is_positive():
-    cap = ScreenCapture()
-    scale = cap.get_dpi_scale()
-    assert scale > 0

@@ -36,7 +36,6 @@ def _get_snapshot_class():
 _OS_CONTEXT     = "Microsoft Windows 11 desktop"
 _LAUNCHER_KEY   = "winleft"
 _LAUNCHER_NAME  = "Windows Start menu search"
-_CLOSE_WIN      = "alt+f4"
 # Resolved LITERAL path from the shell (handles OneDrive-redirected
 # Desktops, where $env:USERPROFILE\Desktop does not exist). Forward
 # slashes on purpose: backslashes need \\ escaping inside the JSON the
@@ -44,7 +43,6 @@ _CLOSE_WIN      = "alt+f4"
 # "C:\" then hallucinated). PowerShell, cmd built-ins, and Windows file
 # dialogs all accept forward slashes.
 _DESKTOP_PATH   = get_desktop_path().replace("\\", "/")
-_SCREENSHOT_KEY = "print_screen"
 _ICON_NOTE = (
     "Windows exposes every icon's accessible name through UI Automation, so "
     "clicking a labelled desktop, taskbar, or Start-menu icon by its visible "
@@ -144,8 +142,8 @@ key_press                           →  key    = single key name:
 hotkey                              →  key    = key combination:
                                          ctrl+s  ctrl+c  ctrl+v  ctrl+z  ctrl+a  ctrl+l
                                          ctrl+t  ctrl+w  ctrl+f  ctrl+p  ctrl+n  ctrl+o
-                                         ctrl+shift+s  ctrl+shift+p  ctrl+alt+t
-                                         alt+f4  alt+tab  alt+left  super+d  super+l
+                                         ctrl+shift+s  ctrl+shift+p
+                                         alt+f4  alt+tab  alt+left
 scroll                              →  target = element to scroll over (null = scroll page center)
                                        value  = "up" or "down" (default "down")
 drag                                →  target = source element text label (what to drag FROM)
@@ -317,20 +315,7 @@ Copy selected text           →  hotkey ctrl+c
 Paste                        →  hotkey ctrl+v
 Cut                          →  hotkey ctrl+x
 
-━━━ FILE DIALOGS (GTK "Open" / "Save As") ━━━
-GTK file dialogs have a hidden path bar. Fastest pattern — type the full path directly:
-  1. hotkey ctrl+l          (reveals the path-entry bar, works in Nautilus and GTK dialogs)
-  2. hotkey ctrl+a          (select any existing text in the bar)
-  3. type   value="<full path or filename>"
-  4. key_press "enter"
-
-Examples:
-  Open a specific file  :  ctrl+l → ctrl+a → type "/home/user/Documents/file.txt" → enter
-  Navigate to folder    :  ctrl+l → ctrl+a → type "/home/user/Downloads" → enter
-  Save with new name    :  ctrl+l (if available) → ctrl+a → type "report_v2.pdf" → enter
-                           OR click the filename field directly → ctrl+a → type name → enter
-
-Tab-based form navigation (when multiple fields exist):
+━━━ TAB-BASED FORM NAVIGATION ━━━
   key_press "tab" moves forward between fields; "shift+tab" moves backward.
   Use tab to move from one field to the next instead of clicking each field.
 
@@ -358,7 +343,7 @@ CRITICAL: After typing the filename (step a), your very next step MUST be key_pr
 ✓ Combine all related text into ONE type step — never chain two type steps
 ✓ Handle any dialog/popup you see before doing the next planned step
 ✓ When the goal says "right click" or "right-click", ALWAYS output action_type: "right_click" — NEVER output "click" for a right-click action
-✗ Never use gedit, mousepad, kate, VLC, GIMP — use nano or LibreOffice
+✗ Never invent an editor the task does not name — plain text goes in Notepad or the terminal
 ✗ Never open Activities/search when a visible icon or hotkey works
 ✗ Never add steps just to be safe — minimum steps only
 ✗ Never type in terminal without first clicking the shell prompt (if terminal was already open)

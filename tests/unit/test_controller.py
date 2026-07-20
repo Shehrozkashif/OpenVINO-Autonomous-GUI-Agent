@@ -72,10 +72,3 @@ def test_scroll(mock_winapi):
     mock_winapi["mouse_event"].assert_called_once_with(0x0800, data=-360)
 
 
-def test_screenshot_base64(mock_winapi):
-    import base64
-    controller = DesktopController()
-    result = controller.screenshot_base64()
-    assert isinstance(result, str)
-    # Must be valid base64
-    base64.b64decode(result)

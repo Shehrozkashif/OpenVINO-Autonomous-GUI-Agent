@@ -104,7 +104,7 @@ class GPUInfo:
     index: int
     name: str
     vram_mb: int
-    backend: str   # "amd" | "nvidia" | "intel"
+    backend: str   # "nvidia" | "intel"
 
     @property
     def vram_gb(self) -> float:
@@ -112,44 +112,8 @@ class GPUInfo:
 
 
 def detect_gpus() -> list[GPUInfo]:
-    """Detect all available GPUs. Tries AMD ROCm first, then NVIDIA CUDA."""
+    """Detect available GPUs for the startup banner: NVIDIA first, then Intel."""
     gpus: list[GPUInfo] = []
-
-    # ── AMD ROCm ──────────────────────────────────────────────────────────────
-    try:
-        r = subprocess.run(
-            ["rocm-smi", "--showproductname", "--csv"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            lines = [ln.strip() for ln in r.stdout.splitlines()
-                     if ln.strip() and not ln.startswith("device")]
-            for i, line in enumerate(lines):
-                parts = line.split(",")
-                name = parts[-1].strip() if parts else f"AMD GPU {i}"
-                gpus.append(GPUInfo(index=i, name=name, vram_mb=0, backend="amd"))
-
-            # Fill VRAM from a separate call
-            rv = subprocess.run(
-                ["rocm-smi", "--showmeminfo", "vram", "--csv"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if rv.returncode == 0:
-                vram_lines = [ln.strip() for ln in rv.stdout.splitlines()
-                              if ln.strip() and not ln.startswith("device")]
-                for i, vl in enumerate(vram_lines):
-                    if i < len(gpus):
-                        parts = vl.split(",")
-                        try:
-                            # rocm-smi reports VRAM in bytes
-                            gpus[i].vram_mb = int(parts[-1].strip()) // (1024 * 1024)
-                        except (ValueError, IndexError):
-                            pass
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    if gpus:
-        return gpus
 
     # ── NVIDIA CUDA ───────────────────────────────────────────────────────────
     try:

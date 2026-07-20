@@ -484,16 +484,6 @@ class DesktopController:
         logger.info(f"[ACTION] drag ({x1},{y1}) → ({x2},{y2})")
         return True
 
-    def screenshot_base64(self) -> str:
-        import base64
-        import io
-
-        from core.capture.screenshot import ScreenCapture
-        img = ScreenCapture().capture()
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        return base64.b64encode(buf.getvalue()).decode()
-
     def release_all_modifiers(self) -> None:
         """Best-effort release of every modifier key.
 

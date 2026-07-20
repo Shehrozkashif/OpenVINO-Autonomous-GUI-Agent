@@ -107,7 +107,7 @@ covering the user's FULL intent with the fewest steps that leave nothing out.
   Calculator          →  CALC_APP_PLACEHOLDER
   System settings     →  SETTINGS_APP_PLACEHOLDER
   Screenshot          →  Print Screen key (one sub-task, no app needed)
-  Simple text files   →  echo command in terminal (single line) or nano (multi-line)
+  Simple text files   →  echo command in terminal (single line) or Notepad (multi-line)
   Meetings / calls    →  the app the user names (Teams, Zoom, Skype, …).
                          Launch it → open its New/Schedule form → fill the
                          form → confirm. See FORM FILLING below.
@@ -151,8 +151,7 @@ When the instruction names no specific app for a generic task, default to:
 VS Code, LibreOffice Writer/Calc/Impress, Thunderbird,
 TERMINAL_APP_PLACEHOLDER, CALC_APP_PLACEHOLDER, SETTINGS_APP_PLACEHOLDER, FILES_APP_PLACEHOLDER.
 NEVER invent an app the user did not name and that is not in the defaults
-(no gedit, mousepad, kate, VLC, GIMP, …).
-For text editing → nano (simple) or LibreOffice Writer (formatted docs).
+For text editing → Notepad (simple) or LibreOffice Writer (formatted docs).
 
 ━━━ OUTPUT ━━━
 Valid JSON array only. No markdown, no explanation, nothing outside the array.

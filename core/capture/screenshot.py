@@ -101,9 +101,6 @@ class ScreenCapture:
     def capture_resized(self, width: int, height: int) -> Image.Image:
         return self.capture().resize((width, height), Image.LANCZOS)
 
-    def capture_region(self, x: int, y: int, width: int, height: int) -> Image.Image:
-        return _grab(x, y, width, height)
-
     def has_changed(self, threshold: float = 0.05) -> bool:
         current = self.capture()
         current_hash = imagehash.phash(current)
@@ -114,11 +111,3 @@ class ScreenCapture:
         if changed:
             self._last_hash = current_hash
         return changed
-
-    def get_dpi_scale(self) -> float:
-        try:
-            w_logical, _ = _screen_size()
-            w_physical = self.capture().width
-            return w_physical / w_logical if w_logical else 1.0
-        except Exception:
-            return 1.0

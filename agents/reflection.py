@@ -523,7 +523,6 @@ class ReflectionAgent:
 # match wins, so more specific combos must come before their prefixes).
 _HOTKEY_HINTS = {
     "ctrl+shift+s": "Save As dialog appeared",
-    "ctrl+alt+t":   "terminal window opened",
     "ctrl+s": (
         "File saved — silence is success (named file saves with no dialog). "
         "A Save-As dialog appearing is also success. Fail only if an error message appears."

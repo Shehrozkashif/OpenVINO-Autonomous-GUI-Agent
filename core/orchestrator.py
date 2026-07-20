@@ -1374,6 +1374,12 @@ class TaskOrchestrator:
         # this context moments ago and the planner is not consulted between
         # queue pops — paying 10-16 s of LLM per queued step re-answers a
         # question nobody reads (live: ~1 min of pure goal checks per form).
+        # True when THIS cycle's pre-plan goal check genuinely ran against the
+        # screen and said the goal is NOT met — reused below so a planner "[]"
+        # is rejected without paying for a second goal-check LLM call (the
+        # appended evidence + clock line change the cache key, so re-asking
+        # always missed the cache: two 4 s calls per stalled cycle, live).
+        _screen_says_not_done = False
         if not run.step_queue:
             # Ground-truth override, checked BEFORE paying for the goal-check
             # LLM: on a subtask's FIRST cycle (nothing actioned yet), an
@@ -1393,6 +1399,9 @@ class TaskOrchestrator:
             elif self._goal_already_satisfied(run, subtask):
                 self.log("  [GOAL-CHECK] Goal already satisfied on current screen")
                 return ("done", None)
+            elif not (run.is_launch_goal or run.is_cmd_subtask
+                      or run.save_target or run.type_payload):
+                _screen_says_not_done = True
 
         # Real date/time from the OS — the planner otherwise reasons from the
         # model's frozen sense of "now" (it clicked 'Today' to select a date
@@ -1501,6 +1510,7 @@ class TaskOrchestrator:
                         # whose form never opened, ending in a false success).
                         confirmed = (
                             (acted or _excluded)
+                            and not _screen_says_not_done
                             and self._goal_already_satisfied(
                                 run, subtask, skip_exclusions=True
                             )
@@ -1514,7 +1524,22 @@ class TaskOrchestrator:
                                 "[FAILED: planner declared done, but the "
                                 "goal state is not visible on screen]"
                             )
-                            return self._note_planning_failure(run), None
+                            _outcome = self._note_planning_failure(run)
+                            # The text planner just proved it is blind here:
+                            # it sees nothing to do on a screen the goal check
+                            # says is wrong. A second text attempt returns []
+                            # again (deterministic on an unchanged screen) —
+                            # skip it and escalate to the screenshot planner
+                            # on the next cycle.
+                            if (
+                                _outcome == "retry"
+                                and self.config.visual_replan_after > 0
+                            ):
+                                run.consecutive_failures = max(
+                                    run.consecutive_failures,
+                                    self.config.visual_replan_after,
+                                )
+                            return _outcome, None
                         return "done", None   # planner says goal is achieved
                     step, run.step_queue = planned[0], list(planned[1:])
         except PlanningParseError as e:
