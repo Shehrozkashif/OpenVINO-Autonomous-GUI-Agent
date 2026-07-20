@@ -284,9 +284,13 @@ class TaskOrchestrator:
             # agent's OWN LOG as 'a new UI element appeared' and passed
             # nearly every click on the OCR/VLM paths; goal checks quoted
             # 'the screen text includes SCROLL'. Decide by ground truth
-            # instead: hit-test sample points across our rect — wherever
-            # WindowFromPoint resolves to OUR process, our pixels are what
-            # the capture will contain, so mask the rect.
+            # instead: hit-test a GRID of points across our rect and mask
+            # ONLY the cells where WindowFromPoint resolves to OUR process.
+            # Masking the whole rect on any visible corner was catastrophic
+            # when the GUI window is near-fullscreen: the task app sat ON TOP
+            # over most of the rect, yet the blanket mask erased its pixels
+            # too — OCR fell to 13 regions and the VLM spent five subtasks
+            # clicking the unmasked edge slivers (live 21:08-21:11).
             user32.WindowFromPoint.argtypes = [ctypes.wintypes.POINT]
             user32.WindowFromPoint.restype = ctypes.wintypes.HWND
             rect = ctypes.wintypes.RECT()
@@ -294,30 +298,36 @@ class TaskOrchestrator:
             our_pid = ctypes.wintypes.DWORD(0)
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(our_pid))
             _GA_ROOT = 2
-            visible = False
-            for sx in (rect.left + 8, (rect.left + rect.right) // 2,
-                       rect.right - 8):
-                for sy in (rect.top + 8, (rect.top + rect.bottom) // 2,
-                           rect.bottom - 8):
+            _GX, _GY = 12, 8   # 96 hit-tests, ~1 ms total
+            w = max(rect.right - rect.left, 1)
+            h_ = max(rect.bottom - rect.top, 1)
+            cw, ch = w / _GX, h_ / _GY
+            cells = []
+            for gy in range(_GY):
+                for gx in range(_GX):
+                    sx = int(rect.left + (gx + 0.5) * cw)
+                    sy = int(rect.top + (gy + 0.5) * ch)
                     h = user32.WindowFromPoint(
-                        ctypes.wintypes.POINT(int(sx), int(sy)))
+                        ctypes.wintypes.POINT(sx, sy))
                     if not h:
                         continue
                     root = user32.GetAncestor(h, _GA_ROOT) or h
                     pid = ctypes.wintypes.DWORD(0)
                     user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
                     if pid.value == our_pid.value:
-                        visible = True
-                        break
-                if visible:
-                    break
-            bounds = (rect.left, rect.top, rect.right, rect.bottom)
-            if visible:
-                if self.capturer.exclude_regions != [bounds]:
-                    self.capturer.exclude_regions = [bounds]
+                        cells.append((
+                            int(rect.left + gx * cw),
+                            int(rect.top + gy * ch),
+                            int(rect.left + (gx + 1) * cw),
+                            int(rect.top + (gy + 1) * ch),
+                        ))
+            if cells:
+                if self.capturer.exclude_regions != cells:
+                    self.capturer.exclude_regions = cells
                     logger.info(
-                        f"[ORCHESTRATOR] GUI window visible during capture — "
-                        f"masked at {bounds}"
+                        f"[ORCHESTRATOR] GUI window partially visible — "
+                        f"masked {len(cells)}/{_GX * _GY} cells of "
+                        f"({rect.left}, {rect.top}, {rect.right}, {rect.bottom})"
                     )
             elif self.capturer.exclude_regions:
                 self.capturer.exclude_regions = []
@@ -755,10 +765,15 @@ class TaskOrchestrator:
             return 0, 0, ""
 
     # Shell surfaces a click may legitimately land on while a task is anchored
-    # to an app: taskbar, Start menu, search flyouts. Everything else that is
-    # not the anchor's process is another app's window.
+    # to an app: Start menu and search flyouts. Everything else that is not
+    # the anchor's process is another app's window. explorer.exe is
+    # deliberately NOT here: during an anchored (non-launch) subtask a click
+    # resolving to explorer is the desktop or taskbar — a stray point, never
+    # the task (live: a blind click at (32,95) launched a desktop icon).
+    # Launch subtasks have the whole gate off, so taskbar/desktop-icon
+    # launches are unaffected.
     _SHELL_PROCS = frozenset({
-        "explorer.exe", "searchhost.exe", "searchapp.exe", "searchui.exe",
+        "searchhost.exe", "searchapp.exe", "searchui.exe",
         "startmenuexperiencehost.exe", "shellexperiencehost.exe",
     })
 
@@ -793,12 +808,18 @@ class TaskOrchestrator:
             if not h:
                 return None
             root = user32.GetAncestor(h, 2) or h   # 2 = GA_ROOT
-            if root == anchor[0] or root == getattr(self, "_own_hwnd", None):
+            if root == anchor[0]:
                 return None
             pid = ctypes.wintypes.DWORD(0)
             user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
             if not pid.value or pid.value == anchor[1]:
                 return None
+            # A point on the agent's OWN window is never the task: the VLM is
+            # trying to click the agent's log panel / HUD. Reject it like any
+            # foreign window (grid masking should already blank these pixels,
+            # but a stale mask must not let the click through).
+            if pid.value == os.getpid():
+                return "the agent's own GUI window"
             name = ""
             ph = kernel32.OpenProcess(0x1000, False, pid.value)
             if ph:
@@ -1714,6 +1735,12 @@ class TaskOrchestrator:
                         for kw in ("launch", "open", "start", "run"))
             )
             _reflect_wait = 1.5 if _is_launch_enter else self.config.reflection_wait_s
+            # Re-decide the own-GUI mask NOW: the action just performed (an
+            # alt+tab, a click) may have raised the agent's own window, and
+            # the verifier is about to capture. Without this, the VLM read
+            # the agent's own log panel and 'verified' a Calendar click at
+            # conf=1.00 while Teams never left the Chat view (live 21:08).
+            self._refresh_own_window_mask()
             # Controls snapshot from the planning cycle that produced this
             # step: appeared/disappeared control names give the verifier
             # tree-level proof of effect on WebView2 screens OCR can't read.
@@ -2216,6 +2243,7 @@ class TaskOrchestrator:
         """Capture the screen and ask the VLM for the next action directly."""
         import base64
         import io
+        self._refresh_own_window_mask()
         img = self.capturer.capture()
         thumb = img.copy()
         thumb.thumbnail((960, 540))
@@ -2318,6 +2346,10 @@ class TaskOrchestrator:
         # ── Click family ──────────────────────────────────────────────────────
         if step.action_type in ("click", "right_click", "double_click"):
             self._last_was_invoke = False
+            # Grounding is about to capture the screen — make sure the agent's
+            # own window pixels are masked as of NOW, not as of the last
+            # planning cycle.
+            self._refresh_own_window_mask()
             _coords = self._explicit_coords(step.value)
             if _coords is not None:
                 # Explicit pixel coordinates (visual-planner convention)

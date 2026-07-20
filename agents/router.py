@@ -708,6 +708,12 @@ class RouterAgent:
                 logger.warning(f"[ROUTER] Skipping item with no description: {item}")
                 continue
             subtasks.append(SubTask(**item))
+        # depends_on may only reference ids inside this very array — replans
+        # routinely emit a dangling 0 ("depends on the completed work"), which
+        # the topological sort reads as a cycle and noisily falls back on.
+        ids = {s.id for s in subtasks}
+        for s in subtasks:
+            s.depends_on = [d for d in s.depends_on if d in ids and d != s.id]
         return subtasks
 
     def summarize_completion(

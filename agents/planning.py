@@ -241,6 +241,19 @@ Launch Writer  :  search launcher value="libreoffice writer" → wait "2.0"
 Launch Calc    :  search launcher value="libreoffice calc" → wait "2.0"
 Click in doc before typing. Save: ctrl+s. Save As: ctrl+shift+s → type name → enter.
 
+━━━ MICROSOFT TEAMS ━━━
+Switch left-rail views with HOTKEYS — never by clicking the tiny rail icons
+(they are unreliable click targets and misses open random chats instead):
+  Activity: ctrl+1   Chat: ctrl+2   Teams: ctrl+3   Calendar: ctrl+4   Calls: ctrl+5
+A goal like "click the Calendar button in the left sidebar" means: hotkey ctrl+4.
+Verification: the window title changes to the view name (e.g. 'Calendar | Microsoft
+Teams'). If the title did not change after ctrl+4, the rail order is custom —
+try ctrl+5, then ctrl+3.
+With the Calendar view open, the 'New meeting' button sits at the TOP-RIGHT of
+the calendar area — click it by its visible text.
+Never click an item in the chat/conversation LIST while the goal is switching
+views — opening a chat is not navigation.
+
 ━━━ LOGIN / CREDENTIALS ━━━
 When a task requires entering a username or password, use credential tokens:
   username field  →  type  value="{{cred:site:username}}"
