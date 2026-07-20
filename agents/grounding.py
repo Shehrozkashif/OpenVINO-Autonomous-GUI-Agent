@@ -559,8 +559,14 @@ class UIGroundingAgent:
             logger.info(f"[GROUNDING] Rephrasing: trying '{alt}' for '{target}'")
             # Rephrased labels are alternative TEXT spellings — UIA/OCR are the
             # right matchers for them; skip the expensive VLM here.
+            # A rephrase is ALREADY a guess, so its OCR match must be near-
+            # exact: every live rephrase hit below 0.9 was a different control
+            # ('Create Meeting' -> 'Create a meeting link' @0.80 opened the
+            # wrong dialog; 'Meeting Details New' -> 'New meeting Details
+            # Save' @0.79 was a dead click), while correct hits score >=0.95.
+            # Fuzzy-on-top-of-fuzzy compounds into confidently-wrong clicks.
             result = self._locate(alt, display, img_b64, words, scale_x, scale_y,
-                                  use_vlm=False, dead=dead)
+                                  use_vlm=False, dead=dead, ocr_threshold=0.9)
             if result:
                 x, y, conf, method, element_type = result
                 x = max(0, min(x, self.screen_w - 1))
@@ -647,6 +653,7 @@ class UIGroundingAgent:
         scale_y: float,
         use_vlm: bool = True,
         dead=(),
+        ocr_threshold: float = 0.65,
     ) -> tuple[int, int, float, str, str] | None:
         # `dead` holds coordinates proven inert on this exact screen (a click
         # there changed zero pixels). A stage that lands on a dead point is
@@ -671,7 +678,7 @@ class UIGroundingAgent:
         # Stage 1: OCR direct fuzzy-match — carry element_type from the matched word
         if words and not _ocr_grounding_disabled():
             query = _strip_role_words(target)
-            match = self.ocr.find_text(words, query, threshold=0.65)
+            match = self.ocr.find_text(words, query, threshold=ocr_threshold)
             if match:
                 x, y = int(match.cx * scale_x), int(match.cy * scale_y)
                 if self._near_dead(x, y, dead):
