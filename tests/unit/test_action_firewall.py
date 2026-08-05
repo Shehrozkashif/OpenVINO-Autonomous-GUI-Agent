@@ -6,7 +6,7 @@ sys.path.insert(0, ".")
 
 import pytest
 
-from core.action_firewall import Decision, Severity, decide, evaluate
+from core.firewall import Decision, Severity, decide, evaluate
 
 # ── Firewall classification ───────────────────────────────────────────────────
 

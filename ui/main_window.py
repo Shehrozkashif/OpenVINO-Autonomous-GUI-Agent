@@ -36,11 +36,11 @@ from ui.hud import MissionHUD
 from ui.icons import icon_pixmap
 from ui.pages import (
     HomePage,
-    MemoryPage,
     MissionPage,
     ScreenHistoryPage,
     SessionsPage,
     SettingsPage,
+    TaskHistoryPage,
     WorkflowsPage,
 )
 from ui.panels import IntelligencePanel
@@ -93,7 +93,7 @@ _PAGES = [
     ("bolt",   "Mission Control"),
     ("layers", "Agent Sessions"),
     ("flow",   "Workflows"),
-    ("db",     "Memory"),
+    ("db",     "Task History"),
     ("screen", "Screen History"),
     ("gear",   "Settings"),
 ]
@@ -107,7 +107,7 @@ class DesktopGUIAgent(QMainWindow):
         self.signals = WorkerSignals()
         self.bus = AgentEventBus()
         self._running = False
-        self._memory = None
+        self._history = None
         self._click_pulse = None   # lazy ClickPulse overlay (see _on_pointer_action)
         # (timestamp, QPixmap, action_text) frames recorded during missions
         self.frame_store = deque(maxlen=48)
@@ -135,18 +135,18 @@ class DesktopGUIAgent(QMainWindow):
         self.log_bridge.line.connect(self.bus.feed)
         self.log_bridge.install()
 
-    # ── Memory access (shared by pages) ───────────────────────────────────────
+    # ── Task-history access (shared by pages) ─────────────────────────────────
 
-    def _get_memory(self):
+    def _get_history(self):
         if self.orchestrator is not None:
-            return self.orchestrator.memory
-        if self._memory is None:
+            return self.orchestrator.history
+        if self._history is None:
             try:
-                from memory.task_memory import TaskMemory
-                self._memory = TaskMemory()
+                from core.history import TaskHistory
+                self._history = TaskHistory()
             except Exception:
                 return None
-        return self._memory
+        return self._history
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -186,15 +186,15 @@ class DesktopGUIAgent(QMainWindow):
 
         # Pages
         self.stack = QStackedWidget()
-        self.page_home = HomePage(self._get_memory, self.bus)
+        self.page_home = HomePage(self._get_history, self.bus)
         self.page_mission = MissionPage(self.bus)
-        self.page_sessions = SessionsPage(self._get_memory)
-        self.page_workflows = WorkflowsPage(self._get_memory)
-        self.page_memory = MemoryPage(self._get_memory)
+        self.page_sessions = SessionsPage(self._get_history)
+        self.page_workflows = WorkflowsPage(self._get_history)
+        self.page_history = TaskHistoryPage(self._get_history)
         self.page_screens = ScreenHistoryPage(self.frame_store)
         self.page_settings = SettingsPage()
         for page in (self.page_home, self.page_mission, self.page_sessions,
-                     self.page_workflows, self.page_memory, self.page_screens,
+                     self.page_workflows, self.page_history, self.page_screens,
                      self.page_settings):
             self.stack.addWidget(page)
         col.addWidget(self.stack, stretch=1)
@@ -371,7 +371,7 @@ class DesktopGUIAgent(QMainWindow):
         threading.Thread(target=self._grab_screen_frame, daemon=True).start()
 
     def _grab_screen_frame(self):
-        from core.capture.screenshot import ScreenCapture
+        from desktop.capture import ScreenCapture
         try:
             img = ScreenCapture().capture_resized(960, 540)
             buf = io.BytesIO()

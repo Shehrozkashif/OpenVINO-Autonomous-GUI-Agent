@@ -1,5 +1,6 @@
-# core/ovms_client.py
-"""OpenVINO™ Model Server (OVMS) inference client.
+# core/inference.py
+"""The agents' only link to a model: the `InferenceClient` protocol, and the
+OpenVINO™ Model Server client that implements it.
 
 A single OVMS instance serves BOTH models on one OpenAI-compatible endpoint:
     LLM (text reasoning):   config.LLM_MODEL — planning, routing, reflection
@@ -7,8 +8,12 @@ A single OVMS instance serves BOTH models on one OpenAI-compatible endpoint:
 
 Both are reached at  POST {OVMS_BASE_URL}/v3/chat/completions  and selected by the
 "model" field in the request body. start.py prepares the models and launches OVMS.
+
+Agents type-hint against `InferenceClient`, never against `OVMSClient`, so
+swapping the backend means writing one new class in this file and nothing else.
 """
 import time
+from typing import Protocol, runtime_checkable
 
 import httpx
 from loguru import logger
@@ -26,8 +31,38 @@ class InferenceResponse(BaseModel):
     tokens_generated: int
 
 
-# Backward-compat alias kept for any external importers.
-OVMSResponse = InferenceResponse
+@runtime_checkable
+class InferenceClient(Protocol):
+    """Interface that OVMSClient satisfies. Agents type-hint against this."""
+
+    def query_llm(
+        self,
+        messages: list[dict],
+        max_tokens: int = 1024,
+        temperature: float = 0.7,
+        response_schema: dict = None,
+    ) -> InferenceResponse:
+        """Chat-complete against the text model (routing, planning, verification).
+
+        response_schema, when given, constrains the reply to valid JSON.
+        """
+        ...
+
+    def query_vlm(
+        self,
+        prompt: str,
+        image_base64: str,
+        max_tokens: int = 200,
+        temperature: float = 0.0,
+        system_prompt: str = None,
+    ) -> InferenceResponse:
+        """Ask the vision model about one screenshot (grounding, visual verify)."""
+        ...
+
+    def check_health(self) -> dict:
+        """Return per-model readiness, e.g. {"qwen3-8b-int4-ov": "OK", ...}."""
+        ...
+
 
 _DEFAULT_LLM      = LLM_MODEL
 _DEFAULT_VLM      = VLM_MODEL
@@ -92,10 +127,6 @@ class OVMSClient:
         self.vlm_model = vlm_model
         self.base_url = base_url.rstrip("/")
         self.client = httpx.Client(timeout=timeout)
-        # Kept for backward compatibility with callers / tests that inspected the
-        # old dual-backend attributes (single endpoint now, so they're equal).
-        self.llm_base_url = self.base_url
-        self.vlm_base_url = self.base_url
         logger.info(
             f"[OVMSClient] LLM={self.llm_model}  VLM={self.vlm_model}  "
             f"endpoint={self.base_url}{_CHAT_PATH}"

@@ -19,9 +19,10 @@ from dataclasses import dataclass
 from loguru import logger
 from PIL import Image
 
-from agents.grounding import OCREngine
-from core.capture.screenshot import ScreenCapture
-from core.protocols import ActionStep, InferenceClient
+from core.inference import InferenceClient
+from core.types import ActionStep
+from desktop.capture import ScreenCapture
+from desktop.ocr import OCREngine
 
 
 @dataclass
@@ -114,7 +115,7 @@ Reply JSON only:
 # Actions whose success is judged visually (a menu, selection highlight, toggle
 # state, icon change) rather than by text. For these, an uncertain OCR→LLM verdict
 # is escalated to a pixel-level VLM check — the LLM never saw the screenshot.
-_VISUAL_ACTIONS = ("click", "right_click", "double_click", "scroll", "drag")
+_VISUAL_ACTIONS = ("click", "right_click", "double_click", "scroll")
 
 
 class ReflectionAgent:
@@ -166,7 +167,7 @@ class ReflectionAgent:
                 should_retry=False, recovery_hint=""
             )
 
-        from core.capture.screenshot import frame_phash
+        from desktop.capture import frame_phash
 
         _CLICK_ACTIONS = ("click", "right_click", "double_click")
         # Use the pre-action hash captured by the orchestrator before execute() fires.
@@ -202,7 +203,7 @@ class ReflectionAgent:
                     f"[REFLECTION] {result.error_description} | hint: {result.recovery_hint}"
                 )
                 return result
-        from core.capture.screenshot import OCR_THUMB
+        from desktop.capture import OCR_THUMB
         thumb = screenshot.copy()
         thumb.thumbnail(OCR_THUMB)
         words = self._ocr.extract(thumb)
@@ -309,7 +310,7 @@ class ReflectionAgent:
         being systematically failed. ~50 ms; empty string when unavailable.
         """
         try:
-            from core.windows_uia import focused_element_info
+            from desktop.uia import focused_element_info
             info = focused_element_info(timeout_s=0.8)
             if info:
                 name = info["name"][:60]
@@ -332,7 +333,7 @@ class ReflectionAgent:
         if not before:
             return ""
         try:
-            from core.windows_uia import get_interactive_elements
+            from desktop.uia import get_interactive_elements
             now = {
                 f"'{n}' [{t}]"
                 for n, t in get_interactive_elements(

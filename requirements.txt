@@ -12,7 +12,7 @@
 PyQt6>=6.6.0
 
 # ── Desktop control & capture ─────────────────────────────────────────────────
-# Mouse/keyboard injection is raw Win32 SendInput via ctypes (core/controller.py)
+# Mouse/keyboard injection is raw Win32 SendInput via ctypes (desktop/input.py)
 # — no third-party input library needed.
 Pillow>=10.0.0
 imagehash>=4.3.0
@@ -24,7 +24,7 @@ httpx>=0.25.0
 pydantic>=2.4.0
 
 # ── Numerics ──────────────────────────────────────────────────────────────────
-numpy>=1.24.0                      # used directly by agents/grounding.py
+numpy>=1.24.0                      # used directly by desktop/ocr.py
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 loguru>=0.7.0

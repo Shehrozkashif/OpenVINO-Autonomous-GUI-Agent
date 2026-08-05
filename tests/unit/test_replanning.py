@@ -3,8 +3,7 @@
 
   1. Adaptive wall-clock budgets (_effective_task_deadline)
   2. Task-level replanning on subtask failure (router.replan + queue swap)
-  3. Checkpointing (save per subtask, clear on success, keep on failure)
-  4. Missing-parameter elicitation (on_ask hook enriches the instruction)
+  3. Missing-parameter elicitation (on_ask hook enriches the instruction)
 
 Live failure these guard against: a long meeting-scheduling task dies at the
 flat 600 s cap, or one failed subtask throws away 15 minutes of correct
@@ -17,8 +16,10 @@ from unittest.mock import MagicMock
 sys.path.insert(0, ".")
 
 from agents.router import RouterAgent
-from core.orchestrator import OrchestratorConfig, TaskOrchestrator
-from core.protocols import SubTask
+from core.orchestrator import TaskOrchestrator
+from core.runstate import OrchestratorConfig
+from core.types import SubTask
+from tests.unit.conftest import make_history
 
 
 def _make_orch(config: OrchestratorConfig | None = None) -> TaskOrchestrator:
@@ -29,17 +30,15 @@ def _make_orch(config: OrchestratorConfig | None = None) -> TaskOrchestrator:
         actor=MagicMock(),
         reflector=MagicMock(),
         capturer=MagicMock(),
-        task_memory=MagicMock(),
+        history=make_history(),
         config=config or OrchestratorConfig(),
         on_step_log=lambda _: None,
         ocr=MagicMock(),
     )
     orch.router.summarize_completion = MagicMock(return_value="done")
-    orch.memory.find_similar = MagicMock(return_value=None)
-    orch.memory.load_checkpoint = MagicMock(return_value=None)
     orch._get_screen_context = MagicMock(return_value='"desktop"')
-    orch._verify_launch = MagicMock(return_value=True)
-    orch._wait_for_settle = MagicMock()
+    orch.truth.verify_launch = MagicMock(return_value=True)
+    orch.truth.wait_for_settle = MagicMock()
     return orch
 
 
@@ -200,58 +199,8 @@ class TestTaskReplanning:
         with _no_burst():
             orch.execute("do the thing")
 
-        stored = orch.memory.store_successful_task.call_args[0][1]
+        stored = orch.history.store_successful_task.call_args[0][1]
         assert [s.description for s in stored] == ["a via other route"]
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 3. Checkpointing
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestCheckpointing:
-
-    def _two_subtask_orch(self):
-        orch = _make_orch()
-        plan = [
-            SubTask(id=1, description="a", depends_on=[]),
-            SubTask(id=2, description="b", depends_on=[1]),
-        ]
-        orch.router.decompose = MagicMock(return_value=("t1", plan))
-        return orch
-
-    def test_checkpoint_saved_after_each_completed_subtask(self):
-        orch = self._two_subtask_orch()
-        orch._execute_subtask = MagicMock(return_value=True)
-        with _no_burst():
-            orch.execute("do the thing")
-        saved = [c.args[1] for c in orch.memory.save_checkpoint.call_args_list]
-        assert saved == [["a"], ["a", "b"]]
-
-    def test_checkpoint_cleared_on_success(self):
-        orch = self._two_subtask_orch()
-        orch._execute_subtask = MagicMock(return_value=True)
-        with _no_burst():
-            orch.execute("do the thing")
-        orch.memory.clear_checkpoint.assert_called_once_with("do the thing")
-
-    def test_checkpoint_kept_on_failure_for_resume(self):
-        orch = self._two_subtask_orch()
-        orch.config.max_task_replans = 0
-        orch._execute_subtask = MagicMock(side_effect=[True, False])
-        with _no_burst():
-            result = orch.execute("do the thing")
-        assert result["success"] is False
-        orch.memory.clear_checkpoint.assert_not_called()
-
-    def test_resume_hint_passed_to_router(self):
-        orch = self._two_subtask_orch()
-        orch.memory.load_checkpoint = MagicMock(return_value=["a"])
-        orch._execute_subtask = MagicMock(return_value=True)
-        with _no_burst():
-            orch.execute("do the thing")
-        _, kwargs = orch.router.decompose.call_args
-        assert "do NOT repeat" in (kwargs.get("memory_hint") or "")
-        assert "a" in kwargs["memory_hint"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -454,7 +403,7 @@ class TestSkipExhaustedSubtask:
         assert result["success"] is True          # Save ran and succeeded
         assert result["subtasks_completed"] == [2]
         assert orch._degraded is True             # never stored as clean
-        orch.memory.store_successful_task.assert_not_called()
+        orch.history.store_successful_task.assert_not_called()
         # The summary is told exactly what was skipped.
         _, kwargs = orch.router.summarize_completion.call_args
         assert kwargs["skipped"] == ["set the time zone to GST"]

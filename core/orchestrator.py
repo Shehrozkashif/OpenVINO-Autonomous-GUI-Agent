@@ -1,39 +1,37 @@
 # core/orchestrator.py
-"""Task Orchestrator — the central coordinator.
+"""The See → Plan → Act → Verify loop.
 
-Execution flow:
-  instruction
-    → elicit missing parameters from the user (time, recipient, …)
-    → Router.decompose() → SubTasks (topologically sorted)
-    → for each SubTask (dynamic loop, sees live screen every step):
-        launch-skip: "open X" is done if X already owns the foreground
-        screen context = OCR + CLICKABLE CONTROLS (accessibility tree,
-          disabled controls labeled) + SYSTEM CLOCK + goal-check evidence
-        goal check: one LLM yes/no — is this subtask ALREADY satisfied?
-          (cached per screen state; a confident yes completes the subtask)
-        plan_next_step() → ActionStep
-        [click]          Grounding.ground() → (x, y); UIA-grounded clicks
-                         try pattern invoke first, pixel click as fallback
-                         (invoke blacklisted per target after a failed verify)
-        [grounding miss] _scroll_to_find(); misses cached per screen state
-        [set_value]      UIA ValuePattern, else focus + type + read-back
-        [extract]        _extract_data() → LLM reads OCR → stores value
-        Action.execute(step)  (action firewall vets typed text first)
-        Reflection.verify(step): phash delta → LLM on OCR (+ focused-control
-          ground truth) → VLM screenshot check on uncertainty
-        failures: dead-point + invoke blacklists, app-anchor refocus when a
-          click escapes to another process, replan with the objective pinned
-    → Router.summarize_completion() (+ [BLOCKER] evidence when failed)
-    → return extracted_data alongside success/failure
+    instruction
+      → ask the user for details it omits (meeting time, recipient…)
+      → Router.decompose() → SubTasks, in dependency order
+      → for each SubTask, planning ONE step at a time against the live screen:
+            is it already done?      → goal check (deterministic, else one LLM yes/no)
+            what next?               → Planner (text path; screenshot path when stuck)
+            where is it?             → Grounding: UIA tree → OCR → VLM
+            do it                    → Actor, after the firewall vets typed text
+            did it work?             → ground truth first, Reflection only as fallback
+            it failed                → blacklists, refocus, replan with the goal pinned
+      → Router.summarize_completion() (+ [BLOCKER] evidence when it failed)
+
+This module owns the LOOP and its recovery policy. The facts it decides on come
+from elsewhere, which is what keeps it readable:
+
+    core/runstate.py    budgets, limits, per-subtask state
+    core/groundtruth.py checks the OS can prove (file on disk, process, title)
+    core/subtasks.py    what a subtask's own words say it wants
+    core/apps.py        which executable an app name means
+    core/anchor.py      which window this task owns, and staying inside it
+    core/stepexec.py    performing one step safely (grounding gates, invoke)
+
+Log lines here are a public interface: ui/events.py parses them into the live
+mission timeline, so their format must not drift.
 """
 import json
 import os
 import re
-import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
@@ -43,91 +41,18 @@ from agents.grounding import GroundingResult, UIGroundingAgent
 from agents.planning import PlanningAgent, PlanningParseError
 from agents.reflection import ReflectionAgent
 from agents.router import RouterAgent
-from core.capture.screen_snapshot import capture_snapshot
-from core.capture.screenshot import OCR_THUMB, ScreenCapture, _screen_size
-from core.protocols import ActionStep, SubTask
-from memory.task_memory import TaskMemory
+from core import apps, groundtruth, subtasks
+from core.anchor import AppAnchor
+from core.groundtruth import GroundTruth
+from core.history import TaskHistory
+from core.runstate import DEDUP_LIMIT_BY_ACTION_TYPE, OrchestratorConfig, SubtaskRun
+from core.types import ActionStep, SubTask
+from desktop import system
+from desktop.capture import OCR_THUMB, OwnWindowMask, ScreenCapture, _screen_size
+from desktop.snapshot import capture_snapshot
 
 if TYPE_CHECKING:
-    from agents.grounding import OCREngine
-
-
-@dataclass
-class OrchestratorConfig:
-    max_retries_per_step: int = 3
-    reflection_wait_s: float = 0.5
-    max_steps_per_subtask: int = 20
-    max_scroll_find_attempts: int = 6   # scrolls before giving up on an off-screen element
-    consecutive_failures_limit: int = 3
-    # Wall-clock safety budgets (H8). A stuck task (e.g. repeated 30-50 s VLM
-    # swaps) must not run unbounded. 0 disables a budget.
-    # task_deadline_s is a FLOOR: the effective budget scales with plan size
-    # (n_subtasks × subtask_deadline_s) so a legitimate 8-subtask task is not
-    # killed by a cap tuned for 2-subtask tasks. See _effective_task_deadline.
-    # Deadlines are budgeted in PLANNING CYCLES, so they must scale with the
-    # LLM's per-call latency: these values assume the 8B (~7-15s per planning
-    # call ≈ 8+ cycles per subtask). If the LLM is swapped for the 14B
-    # (45-101s per call), scale both up ~2x — a live 14B run under the 8B
-    # caps deadline-aborted three form subtasks MID-PROGRESS with the budget
-    # consumed by planning, not by failures.
-    task_deadline_s: float = 600.0      # minimum budget for a whole instruction
-    subtask_deadline_s: float = 240.0   # hard cap on a single subtask
-    # After this many consecutive step failures, planning escalates from the
-    # text path (OCR context → LLM) to the visual path (screenshot → UI-TARS),
-    # which sees icons/layout the text path is blind to. 0 disables escalation.
-    visual_replan_after: int = 2
-    # When a subtask fails, the router is re-consulted with the completed state
-    # to produce a fresh plan for the remaining work (different approach) this
-    # many times before the task is declared failed. 0 disables replanning.
-    max_task_replans: int = 2
-
-
-# Per-action-type limit on identical successful steps within ONE subtask —
-# counted as a TOTAL, not consecutively, so A-B-A-B ping-pong loops (e.g. a
-# hallucinated verifier success alternating between two clicks) trip it too.
-# Stricter for high-signal actions (type, right_click); lenient for nav keys.
-DEDUP_LIMIT_BY_ACTION_TYPE: dict[str, int] = {
-    "type":        1,   # same text typed twice → almost certainly a loop
-    "click":       2,   # allow up to 2 repeats (e.g. re-focusing a window)
-    "key_press":   3,   # allow up to 3 repeats (e.g. multiple Escape/arrow presses)
-    "right_click": 1,   # context menu should open once
-    "invoke":      1,   # a button pressed twice → double submit
-    "set_value":   1,   # same field set to the same value twice → a loop
-    "select":      2,   # re-selecting is harmless but twice is enough
-}
-
-
-@dataclass
-class _SubtaskRun:
-    """Mutable state threaded through one _execute_subtask() step loop.
-
-    Bundling it in one object lets each phase of the loop live in its own
-    named method (_plan_next_step, _run_step_attempts, _judge_reflection,
-    _record_step_success/_failure) instead of one interleaved 500-line body.
-    """
-
-    started_at: float
-    # Ground-truth facts about the subtask, fixed at setup time.
-    is_launch_goal: bool = False           # "open <app>" — verified via process list
-    goal_proc: str = ""                    # expected process name for the launch goal
-    baseline_windows: int = 0              # window count before the launch attempt
-    is_cmd_subtask: bool = False           # "run: <cmd>" — verified on disk/terminal
-    save_target: str = ""                  # "save as <path>" — verified on disk
-    type_payload: str = ""                 # "type: <text>" — done once typed+verified
-    # Rolling execution state, updated as steps run.
-    completed: list = field(default_factory=list)   # step history shown to the planner
-    consecutive_failures: int = 0
-    cached_ocr: str = ""                   # reuse reflection's OCR for the next plan
-    screen_context: str = ""               # OCR context the current step was planned on
-    step_sig_counts: dict = field(default_factory=dict)  # (action_type, target, value, key) → successes
-    goal_check_cache: dict = field(default_factory=dict)  # hash(screen ctx) → (ok, evidence)
-    typed_ok: bool = False                 # a type step succeeded in this subtask
-    last_error: str = ""                   # most recent step failure reason
-    # Steps planned ahead by the last plan_steps() call. Executing from this
-    # queue skips the ~7-10 s planning call per step; it is flushed whenever
-    # a step fails or its outcome is uncertain, forcing a fresh plan against
-    # the live screen.
-    step_queue: list = field(default_factory=list)
+    from desktop.ocr import OCREngine
 
 
 class TaskOrchestrator:
@@ -139,7 +64,7 @@ class TaskOrchestrator:
         actor: ActionExecutionAgent,
         reflector: ReflectionAgent,
         capturer: ScreenCapture,
-        task_memory: TaskMemory,
+        history: TaskHistory,
         config: OrchestratorConfig | None = None,
         on_step_log: Callable[[str], None] | None = None,
         ocr: Optional["OCREngine"] = None,
@@ -152,7 +77,7 @@ class TaskOrchestrator:
         self.actor     = actor
         self.reflector = reflector
         self.capturer  = capturer
-        self.memory    = task_memory
+        self.history   = history
         self.config    = config or OrchestratorConfig()
         # Orchestrator decisions (Step/[GOAL-CHECK]/[CLICK-CHECK]/[SUBTASK]/…)
         # must land in BOTH the GUI log panel AND loguru. The dev loop is
@@ -182,7 +107,6 @@ class TaskOrchestrator:
         self._last_controls = None   # controls snapshot for verifier diffing
         self._exec_fail_reason = ""
         self._blocking_overlay = None   # (target, cover) from the hit-test gate
-        self._anchor_gate_off = False   # True while a launch subtask runs
         # Set when a subtask completes via a degraded path (loop-guard recovery,
         # optimistic parse-failure success, etc.). Such a task is NOT stored in
         # success memory, so broken plans never poison future routing hints.
@@ -191,8 +115,14 @@ class TaskOrchestrator:
         if ocr is not None:
             self._ocr = ocr
         else:
-            from agents.grounding import OCREngine
+            from desktop.ocr import OCREngine
             self._ocr = OCREngine()
+
+        # Collaborators: the loop decides, these three know the world.
+        self.mask   = OwnWindowMask(capturer, log=self.log)
+        self.anchor = AppAnchor(log=self.log, own_hwnd=lambda: self.mask.hwnd)
+        self.truth  = GroundTruth(capturer, self._ocr, log=self.log)
+
         self._screen_w, self._screen_h = _screen_size()
         self._extracted_data: dict[str, str] = {}
         # Per-task window-count baselines for apps that were ALREADY running
@@ -209,7 +139,7 @@ class TaskOrchestrator:
         """Arm the global emergency-stop listener for the duration of a task."""
         try:
             self._disarm_kill_switch()  # clear any leaked listener first
-            from core.controller import KillSwitch
+            from desktop.input import KillSwitch
             controller = getattr(self.actor, "controller", None)
             self._kill_switch = KillSwitch(on_trigger=self.stop, controller=controller)
             self._kill_switch.start()
@@ -226,117 +156,6 @@ class TaskOrchestrator:
                 pass
             self._kill_switch = None
 
-    def _refresh_own_window_mask(self) -> None:
-        """Dynamically mask the GUI agent window from screen captures when it is the topmost window.
-
-        The GUI window shows the task description text (e.g. 'open Notepad'), and OCR picks that
-        up, confusing the planner into thinking apps are already running or grounding to wrong
-        coordinates. When another app (e.g. Notepad) is in the foreground, the GUI window is
-        behind it so its text isn't visible — no masking needed, and masking would obscure the
-        target app.  Using GetForegroundWindow() makes this safe in both cases.
-        """
-        try:
-            import ctypes
-            import ctypes.wintypes
-            user32 = ctypes.windll.user32
-
-            # Cache hwnd — find once using EnumWindows (partial title match, immune to
-            # exact dash character encoding differences in FindWindowW).
-            if not hasattr(self, "_own_hwnd"):
-                _found = [0]
-
-                @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
-                def _cb(hwnd, _lparam):
-                    length = user32.GetWindowTextLengthW(hwnd)
-                    if length > 0:
-                        buf = ctypes.create_unicode_buffer(length + 1)
-                        user32.GetWindowTextW(hwnd, buf, length + 1)
-                        if "Desktop GUI Agent" in buf.value:
-                            _found[0] = hwnd
-                            return False  # stop enumeration
-                    return True
-
-                user32.EnumWindows(_cb, 0)
-                self._own_hwnd = _found[0] or None
-                if self._own_hwnd:
-                    logger.info(f"[ORCHESTRATOR] GUI window handle cached: hwnd={self._own_hwnd}")
-                else:
-                    logger.debug("[ORCHESTRATOR] GUI window not found via EnumWindows — no masking")
-
-            hwnd = getattr(self, "_own_hwnd", None)
-            if not hwnd:
-                self.capturer.exclude_regions = []
-                return
-
-            # Minimized → none of our pixels are on screen; clear any mask.
-            if user32.IsIconic(hwnd):
-                if self.capturer.exclude_regions:
-                    self.capturer.exclude_regions = []
-                    logger.debug("[ORCHESTRATOR] GUI window minimized — mask cleared")
-                return
-
-            # The old rule masked ONLY when our window was the FOREGROUND
-            # window, assuming 'not foreground ⇒ hidden behind the target
-            # app'. On a wide screen that is false: the agent's window sits
-            # BESIDE the app, fully visible while the app owns focus — and
-            # its console panel prints every step ('CLICK, [visual] click at
-            # (847,39)'), which OCR then read back. The verifier saw the
-            # agent's OWN LOG as 'a new UI element appeared' and passed
-            # nearly every click on the OCR/VLM paths; goal checks quoted
-            # 'the screen text includes SCROLL'. Decide by ground truth
-            # instead: hit-test a GRID of points across our rect and mask
-            # ONLY the cells where WindowFromPoint resolves to OUR process.
-            # Masking the whole rect on any visible corner was catastrophic
-            # when the GUI window is near-fullscreen: the task app sat ON TOP
-            # over most of the rect, yet the blanket mask erased its pixels
-            # too — OCR fell to 13 regions and the VLM spent five subtasks
-            # clicking the unmasked edge slivers (live 21:08-21:11).
-            user32.WindowFromPoint.argtypes = [ctypes.wintypes.POINT]
-            user32.WindowFromPoint.restype = ctypes.wintypes.HWND
-            rect = ctypes.wintypes.RECT()
-            user32.GetWindowRect(hwnd, ctypes.byref(rect))
-            our_pid = ctypes.wintypes.DWORD(0)
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(our_pid))
-            _GA_ROOT = 2
-            _GX, _GY = 12, 8   # 96 hit-tests, ~1 ms total
-            w = max(rect.right - rect.left, 1)
-            h_ = max(rect.bottom - rect.top, 1)
-            cw, ch = w / _GX, h_ / _GY
-            cells = []
-            for gy in range(_GY):
-                for gx in range(_GX):
-                    sx = int(rect.left + (gx + 0.5) * cw)
-                    sy = int(rect.top + (gy + 0.5) * ch)
-                    h = user32.WindowFromPoint(
-                        ctypes.wintypes.POINT(sx, sy))
-                    if not h:
-                        continue
-                    root = user32.GetAncestor(h, _GA_ROOT) or h
-                    pid = ctypes.wintypes.DWORD(0)
-                    user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
-                    if pid.value == our_pid.value:
-                        cells.append((
-                            int(rect.left + gx * cw),
-                            int(rect.top + gy * ch),
-                            int(rect.left + (gx + 1) * cw),
-                            int(rect.top + (gy + 1) * ch),
-                        ))
-            if cells:
-                if self.capturer.exclude_regions != cells:
-                    self.capturer.exclude_regions = cells
-                    logger.info(
-                        f"[ORCHESTRATOR] GUI window partially visible — "
-                        f"masked {len(cells)}/{_GX * _GY} cells of "
-                        f"({rect.left}, {rect.top}, {rect.right}, {rect.bottom})"
-                    )
-            elif self.capturer.exclude_regions:
-                self.capturer.exclude_regions = []
-                logger.debug("[ORCHESTRATOR] GUI window covered — mask cleared")
-        except Exception as e:
-            # WARNING, not debug: a silent mask failure re-enables the agent
-            # reading its own GUI text via OCR — the exact bug behind weeks of
-            # 'hallucinated verifier' verdicts. It must be visible in logs.
-            logger.warning(f"[ORCHESTRATOR] GUI window mask lookup failed: {e}")
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -345,12 +164,11 @@ class TaskOrchestrator:
         self._extracted_data = {}
         self._launch_window_baseline = {}
         self._degraded = False
-        self._app_anchor = None   # (hwnd, pid, exe) of the task's app window
+        self.anchor.clear()         # forget the previous task's app window
         self._invoke_dead = set()   # targets whose pattern-invoke provably no-ops
         self._last_goal_evidence = ""
         self._last_controls = None
         self._blocking_overlay = None
-        self._anchor_gate_off = False
         # Dead/foreign-point blacklists describe the PREVIOUS task's screens —
         # they must not veto valid coordinates in this one.
         try:
@@ -366,71 +184,14 @@ class TaskOrchestrator:
         # whole run. No-op when no question handler is wired.
         instruction = self._elicit_missing_parameters(instruction)
 
-        # Memory hint for the router
-        memory_hint = None
-        try:
-            similar = self.memory.find_similar(instruction, threshold=0.80)
-            if similar:
-                descs = [s.get("description", "") for s in similar.get("steps", [])]
-                # "Reuse if it fits" alone let a stored plan REPLACE proper
-                # decomposition: a past run's subtask list became the whole
-                # plan — no launch, no Save, no invite (live 13:05 run).
-                memory_hint = (
-                    f"Similar past task (succeeded): '{similar['instruction']}'. "
-                    f"Subtasks used: {descs}. Treat this only as a hint for "
-                    f"approach — your plan must still cover the ENTIRE current "
-                    f"instruction end to end (launching the app, every value "
-                    f"it names, and the final save/send/confirm step)."
-                )
-                self.log(f"[MEMORY] Similar past task found (sim={similar['similarity']:.2f})")
-        except Exception:
-            pass
-
-        # Resume hint — a recent interrupted run of this exact instruction left
-        # a checkpoint of what already completed; the router plans the rest.
-        try:
-            resume_descs = self.memory.load_checkpoint(instruction)
-        except Exception:
-            resume_descs = None
-        if resume_descs and not self._checkpoint_still_valid(resume_descs):
-            # A checkpoint claims its subtasks' effects are still on the
-            # machine — but SCREEN state does not survive between runs the
-            # way files do. Live: a checkpoint said 'open Teams / Calendar /
-            # New meeting' were done; the fresh run started at the bare
-            # desktop (ms-teams.exe: 0 windows), the router planned only the
-            # form-fill, and the agent typed 'calendar' into Start and
-            # wandered into a web search for 9 minutes. Discard a checkpoint
-            # whose launched app no longer has a window.
-            self.log(
-                "[RESUME] Checkpoint found but its app has no window anymore "
-                "— discarding it and starting the task from the beginning"
-            )
-            try:
-                self.memory.clear_checkpoint(instruction)
-            except Exception:
-                pass
-            resume_descs = None
-        if resume_descs:
-            done = "; ".join(resume_descs)
-            resume_hint = (
-                f"RESUME: an earlier run of this exact task was interrupted after "
-                f"completing these sub-tasks (their effects are already on the "
-                f"machine — do NOT repeat them): {done}. Plan ONLY the remaining work."
-            )
-            memory_hint = f"{memory_hint}\n{resume_hint}" if memory_hint else resume_hint
-            self.log(
-                f"[RESUME] Checkpoint found — {len(resume_descs)} subtask(s) "
-                f"already completed in a previous run"
-            )
-
         screen_context = self._get_screen_context()
 
-        task_id, subtasks = self.router.decompose(
-            instruction, screen_context=screen_context, memory_hint=memory_hint
+        task_id, plan = self.router.decompose(
+            instruction, screen_context=screen_context
         )
-        self.log(f"[ROUTER] {len(subtasks)} sub-task(s)")
+        self.log(f"[ROUTER] {len(plan)} sub-task(s)")
 
-        queue: list[SubTask] = self._topological_sort(subtasks)
+        queue: list[SubTask] = subtasks.topological_order(plan)
         # H8, adaptive: budget scales with plan size so long multi-step tasks
         # are not killed by a cap tuned for short ones.
         task_deadline_s = self._effective_task_deadline(len(queue))
@@ -505,15 +266,9 @@ class TaskOrchestrator:
                 self.log(f"[SUBTASK {subtask.id}] Complete")
                 # A successful "open <app>" anchors the task to the window
                 # that now owns the foreground — later subtasks act on it.
-                self._maybe_set_app_anchor(subtask.description)
-                # Checkpoint after every completed subtask so an interrupted or
-                # failed long task resumes here instead of starting over.
-                try:
-                    self.memory.save_checkpoint(instruction, list(completed_subtask_descs))
-                except Exception:
-                    pass
+                self.anchor.adopt_foreground(subtask.description)
                 if queue:
-                    self._wait_for_settle(min_s=0.5, max_s=3.0)
+                    self.truth.wait_for_settle(min_s=0.5, max_s=3.0)
             else:
                 # Replans exhausted (or none produced). When work is still
                 # QUEUED behind this subtask, dying here throws it away —
@@ -570,19 +325,11 @@ class TaskOrchestrator:
         # executed_subtasks (not the original decomposition) is stored — after a
         # replan they are the plan that actually worked.
         if not failed and not self._degraded:
-            self.memory.store_successful_task(
-                instruction, executed_subtasks or subtasks, elapsed
+            self.history.store_successful_task(
+                instruction, executed_subtasks or plan, elapsed
             )
         elif not failed and self._degraded:
-            self.log("[MEMORY] Task completed via a degraded path — not stored as a reusable success")
-
-        # A finished task needs no resume checkpoint; a failed one keeps it so
-        # the next run of the same instruction continues from here.
-        if not failed:
-            try:
-                self.memory.clear_checkpoint(instruction)
-            except Exception:
-                pass
+            self.log("[MEMORY] Task completed via a degraded path — not recorded as a clean success")
 
         return {
             "task_id": task_id,
@@ -620,7 +367,7 @@ class TaskOrchestrator:
         """
         success = self._execute_subtask(subtask, task_context=completed_subtask_descs)
         if success:
-            success = self._verify_launch(subtask)
+            success = self.truth.verify_launch(subtask, self._launch_window_baseline)
             if not success:
                 self.log(f"  [RETRY] Launch not confirmed — re-running subtask {subtask.id}")
                 retry_ctx = completed_subtask_descs + [
@@ -631,7 +378,7 @@ class TaskOrchestrator:
                 ]
                 success = self._execute_subtask(subtask, task_context=retry_ctx)
                 if success:
-                    success = self._verify_launch(subtask)
+                    success = self.truth.verify_launch(subtask, self._launch_window_baseline)
         return success
 
     def _replan_remaining(
@@ -698,7 +445,7 @@ class TaskOrchestrator:
             )
             for st in old_queue
         ]
-        return self._topological_sort(renumbered + kept)
+        return subtasks.topological_order(renumbered + kept)
 
     def _elicit_missing_parameters(self, instruction: str) -> str:
         """Ask the user (via on_ask) for required details the instruction omits,
@@ -738,212 +485,13 @@ class TaskOrchestrator:
     # another window is on top (seen live: a leftover Edge error page swallowed
     # every action while Outlook sat behind it), the anchor is refocused first.
 
-    _LAUNCH_DESC_RX = re.compile(r"^\s*(?:open|launch|start)\b", re.IGNORECASE)
 
-    @staticmethod
-    def _foreground_app() -> tuple[int, int, str]:
-        """(hwnd, pid, exe_name) of the current foreground window; zeros on failure."""
-        try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
-            hwnd = user32.GetForegroundWindow()
-            if not hwnd:
-                return 0, 0, ""
-            pid = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            name = ""
-            h = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
-            if h:
-                buf = ctypes.create_unicode_buffer(260)
-                size = ctypes.c_ulong(260)
-                if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
-                    name = buf.value.rsplit("\\", 1)[-1]
-                kernel32.CloseHandle(h)
-            return hwnd, pid.value, name
-        except Exception:
-            return 0, 0, ""
 
-    # Shell surfaces a click may legitimately land on while a task is anchored
-    # to an app: Start menu and search flyouts. Everything else that is not
-    # the anchor's process is another app's window. explorer.exe is
-    # deliberately NOT here: during an anchored (non-launch) subtask a click
-    # resolving to explorer is the desktop or taskbar — a stray point, never
-    # the task (live: a blind click at (32,95) launched a desktop icon).
-    # Launch subtasks have the whole gate off, so taskbar/desktop-icon
-    # launches are unaffected.
-    _SHELL_PROCS = frozenset({
-        "searchhost.exe", "searchapp.exe", "searchui.exe",
-        "startmenuexperiencehost.exe", "shellexperiencehost.exe",
-    })
 
-    def _foreign_app_at_point(self, x: int, y: int) -> str | None:
-        """Exe name of the OTHER app whose window owns screen pixel (x, y),
-        or None when clicking there is fine.
 
-        Pre-click ground truth for anchored tasks: WindowFromPoint answers
-        "whose window would this click actually land in" BEFORE any input
-        fires. Live (VLM-only run): grounding kept resolving 'New meeting' to
-        text inside a background Edge window; every click flipped focus to
-        Edge, was caught only AFTER the fact, and burned a full
-        act-verify-refocus cycle (~30 s each). This check rejects the point
-        for milliseconds instead.
 
-        None (allow) when: no anchor is set, the subtask is launching an app,
-        the point belongs to the anchor's process (same pid or same exe — a
-        WebView2 child or same-app popup counts), the shell (taskbar / Start
-        search), our own GUI window, or the lookup fails.
-        """
-        anchor = getattr(self, "_app_anchor", None)
-        if not anchor or getattr(self, "_anchor_gate_off", False):
-            return None
-        try:
-            import ctypes
-            import ctypes.wintypes
-            user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
-            user32.WindowFromPoint.argtypes = [ctypes.wintypes.POINT]
-            user32.WindowFromPoint.restype = ctypes.wintypes.HWND
-            h = user32.WindowFromPoint(ctypes.wintypes.POINT(int(x), int(y)))
-            if not h:
-                return None
-            root = user32.GetAncestor(h, 2) or h   # 2 = GA_ROOT
-            if root == anchor[0]:
-                return None
-            pid = ctypes.wintypes.DWORD(0)
-            user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
-            if not pid.value or pid.value == anchor[1]:
-                return None
-            # A point on the agent's OWN window is never the task: the VLM is
-            # trying to click the agent's log panel / HUD. Reject it like any
-            # foreign window (grid masking should already blank these pixels,
-            # but a stale mask must not let the click through).
-            if pid.value == os.getpid():
-                return "the agent's own GUI window"
-            name = ""
-            ph = kernel32.OpenProcess(0x1000, False, pid.value)
-            if ph:
-                buf = ctypes.create_unicode_buffer(260)
-                size = ctypes.c_ulong(260)
-                if kernel32.QueryFullProcessImageNameW(ph, 0, buf, ctypes.byref(size)):
-                    name = buf.value.rsplit("\\", 1)[-1]
-                kernel32.CloseHandle(ph)
-            if not name:
-                return None
-            nl = name.lower()
-            # Same exe (multi-process app: another window of the anchor app)
-            # or a shell surface — allowed.
-            if nl == (anchor[2] or "").lower() or nl in self._SHELL_PROCS:
-                return None
-            return name
-        except Exception:
-            return None   # hit-test unavailable → never block on a guess
 
-    @staticmethod
-    def _window_title(hwnd: int) -> str:
-        try:
-            import ctypes
-            buf = ctypes.create_unicode_buffer(512)
-            ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
-            return buf.value or ""
-        except Exception:
-            return ""
 
-    def _launch_already_satisfied(self, subtask: SubTask) -> bool:
-        """Ground-truth launch skip: "open X" when X already owns the foreground.
-
-        The app name is parsed from the subtask's own text and matched against
-        the foreground window's title and process name — no app catalogue.
-        Launching blindly when the app is already in front is actively harmful
-        (seen live: Start-menu Enter landed on the WEB result and opened a
-        browser page over the real Outlook). When satisfied, the window is
-        anchored so the rest of the task acts on it.
-        """
-        desc = subtask.description
-        if not self._LAUNCH_DESC_RX.match(desc.lower()):
-            return False
-        # Keep the stricter "a NEW window is required" launch semantics ONLY for
-        # terminals, where reusing a pre-existing (possibly busy) window is the
-        # documented H-bug. For every other mapped app — Teams, Notepad, browsers
-        # — the app already owning the foreground genuinely means "done"; and a
-        # single-instance app like Teams can NEVER satisfy the new-window check,
-        # so the strict path loops forever and escalates to the VLM visual-replan
-        # (live: a spurious 'open Microsoft Teams' subtask thrashed for 9 min
-        # clicking the top-left corner while Teams sat open in the foreground).
-        _TERMINAL_LAUNCH_KEYS = (
-            "windows terminal", "terminal", "command prompt", "powershell",
-        )
-        if any(k in desc.lower() for k in _TERMINAL_LAUNCH_KEYS):
-            return False
-        signals = self._derive_launch_signals(desc)
-        if not signals:
-            return False
-        hwnd, pid, name = self._foreground_app()
-        if not hwnd or hwnd == getattr(self, "_own_hwnd", None):
-            return False
-        title = self._window_title(hwnd)
-        hay = f"{title} {name}".lower()
-        if not any(s.lower() in hay for s in signals if len(s) >= 3):
-            return False
-        self._app_anchor = (hwnd, pid, name)
-        self.log(
-            f"  [LAUNCH-SKIP] '{signals[0]}' already owns the foreground "
-            f"('{title[:60]}') — anchored it, nothing to launch"
-        )
-        logger.info(
-            f"[ORCHESTRATOR] Launch skipped: '{signals[0]}' foreground "
-            f"(title='{title[:60]}', proc={name}) — anchored hwnd={hwnd}"
-        )
-        return True
-
-    def _maybe_set_app_anchor(self, description: str):
-        """Record the foreground window as the task's app anchor after a
-        successful launch subtask ("open X" / "launch X" / "start X").
-        """
-        desc = description.lower()
-        if not self._LAUNCH_DESC_RX.match(desc) or "already" in desc:
-            return
-        hwnd, pid, name = self._foreground_app()
-        if not hwnd or hwnd == getattr(self, "_own_hwnd", None):
-            return
-        self._app_anchor = (hwnd, pid, name)
-        self.log(f"  [ANCHOR] Task app window = {name} (hwnd={hwnd})")
-        logger.info(f"[ORCHESTRATOR] App anchor set: {name} hwnd={hwnd}")
-
-    def _ensure_anchor_foreground(self):
-        """Bring the task's app window back to the foreground if something
-        else has covered it. Same-process windows (dialogs, pickers) count as
-        the anchor being active. Drops the anchor when its window is gone.
-        """
-        anchor = getattr(self, "_app_anchor", None)
-        if not anchor:
-            return
-        hwnd, pid, name = anchor
-        try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            if not user32.IsWindow(hwnd):
-                logger.info(f"[ORCHESTRATOR] App anchor window gone ({name}) — cleared")
-                self._app_anchor = None
-                return
-            fg = user32.GetForegroundWindow()
-            if fg == hwnd:
-                return
-            fg_pid = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(fg, ctypes.byref(fg_pid))
-            if fg_pid.value == pid:
-                return   # a dialog/popup of the same app — still our context
-            self.log(f"  [FOCUS] Foreground is not {name} — refocusing the task app")
-            logger.info(f"[ORCHESTRATOR] Refocusing task app {name} (hwnd={hwnd})")
-            if user32.IsIconic(hwnd):
-                user32.ShowWindow(hwnd, 9)   # SW_RESTORE
-            if not user32.SetForegroundWindow(hwnd):
-                # SetForegroundWindow is refused when we lack foreground
-                # rights; SwitchToThisWindow (alt-tab semantics) still works.
-                user32.SwitchToThisWindow(hwnd, True)
-            time.sleep(0.6)   # let the window paint before capture/grounding
-        except Exception:
-            pass
 
     def _setup_launch_goal(
         self, subtask: SubTask, task_context: list[str] | None,
@@ -964,43 +512,14 @@ class TaskOrchestrator:
         returned task_context may carry an appended pre-check note.
         """
         desc = subtask.description.lower()
-        # Strip a leading "with <context>, " clause before classifying. A
-        # subtask that ACTS inside an already-open app is phrased "with the
-        # Calendar view open in Microsoft Teams, click the New meeting button"
-        # — it contains "open" (a STATE) and the app name, but it is NOT a
-        # launch. The old heuristic ("open" anywhere + app name) misfired on it,
-        # tagged the click as an ms-teams launch, demanded a NEW Teams window,
-        # and failed the click AFTER it had already succeeded — thrashing the
-        # whole run into replans that spawned bogus "open Microsoft Teams"
-        # subtasks. Classify by the body's REAL leading verb instead.
-        _body = re.sub(r"^\s*with\b[^,]*,\s*", "", desc).strip()
-        # An in-app action verb leading the body is never a launch, even when
-        # the description mentions the app or the word "open".
-        _inapp_action = bool(re.match(
-            r"(then\s+)?(click|set|select|type|enter|fill|add|choose|save|"
-            r"schedule|create|send|pick|toggle|check|dismiss|close|scroll)\b",
-            _body,
-        ))
-        is_launch_goal = (
-            not ("already open" in desc or "already running" in desc)
-            and not _inapp_action
-            and (
-                _body.startswith("launch")
-                or (_body.startswith("open")
-                    and any(k in _body for k in self._PROCESS_MAP_WINDOWS))
-            )
-        )
+        is_launch_goal = apps.is_launch_description(desc)
 
         goal_proc: str | None = None
         baseline_windows: int | None = None
         if is_launch_goal:
-            goal_proc = next(
-                (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS
-                 if k in desc),
-                None,
-            )
-            if goal_proc and self._is_process_running(goal_proc):
-                baseline_windows = self._count_process_windows(goal_proc)
+            goal_proc = apps.process_for(desc)
+            if goal_proc and system.is_process_running(goal_proc):
+                baseline_windows = system.count_process_windows(goal_proc)
                 self._launch_window_baseline[goal_proc] = baseline_windows
                 task_context = (task_context or []) + [
                     f"[NOTE] {goal_proc.split('.')[0]} is ALREADY running with "
@@ -1016,15 +535,6 @@ class TaskOrchestrator:
                 )
         return is_launch_goal, goal_proc, baseline_windows, task_context
 
-    def _goal_confirmed(
-        self, goal_proc: str | None, baseline_windows: int | None,
-    ) -> bool:
-        """Launch-goal achieved? A NEW window is required when the app pre-existed."""
-        if not goal_proc:
-            return False
-        if baseline_windows is not None:
-            return self._count_process_windows(goal_proc) > baseline_windows
-        return self._launch_confirmed(goal_proc)
 
     def _execute_subtask(self, subtask: SubTask, task_context: list[str] = None) -> bool:
         """Dynamic loop — plans ONE step at a time using live screen state.
@@ -1042,13 +552,13 @@ class TaskOrchestrator:
         # Ground truth fast path: "open X" when X is already the foreground
         # window — anchor it and skip the launch entirely (zero LLM calls,
         # zero keystrokes). See _launch_already_satisfied.
-        if self._launch_already_satisfied(subtask):
+        if self.anchor.launch_already_satisfied(subtask):
             return True
 
         _is_launch_goal, _goal_proc, _baseline_windows, task_context = (
             self._setup_launch_goal(subtask, task_context)
         )
-        run = _SubtaskRun(
+        run = SubtaskRun(
             started_at=time.time(),
             is_launch_goal=_is_launch_goal,
             goal_proc=_goal_proc,
@@ -1064,13 +574,13 @@ class TaskOrchestrator:
             # signal, so reflection loops on ctrl+s forever. Verify the same
             # way as commands: the subtask is DONE the moment the named file
             # appears on disk (fresh).
-            save_target=self._subtask_save_target(subtask),
+            save_target=subtasks.save_target(subtask),
         )
         # "... type: <text>" subtasks are complete the moment that text has been
         # typed and verified. Without this, the planner re-types the payload
         # (duplicating it in the document) or drifts into ctrl+s save steps that
         # belong to a later subtask — burning the whole subtask budget.
-        run.type_payload = None if run.save_target else self._subtask_type_payload(subtask)
+        run.type_payload = None if run.save_target else subtasks.type_payload(subtask)
 
         # The Save-As key sequence is fixed and well-defined, but the planner
         # is unreliable at threading the dialog (it loops on ctrl+s and never
@@ -1097,7 +607,7 @@ class TaskOrchestrator:
             # A "save as <path>" subtask is COMPLETE the instant the file lands on
             # disk. Check before planning so a successful save short-circuits the
             # ctrl+s retry loop (editors show no readable confirmation).
-            if run.save_target and self._file_saved_fresh(run.save_target, run.started_at):
+            if run.save_target and groundtruth.file_saved_fresh(run.save_target, run.started_at):
                 self.log(
                     f"  [SAVE-CHECK] '{run.save_target}' on disk (fresh) — save confirmed"
                 )
@@ -1128,7 +638,7 @@ class TaskOrchestrator:
         self.log(f"  MAX_STEPS ({self.config.max_steps_per_subtask}) reached")
         return False
 
-    def _note_planning_failure(self, run: "_SubtaskRun") -> str:
+    def _note_planning_failure(self, run: "SubtaskRun") -> str:
         """Count a planning failure; abort once the consecutive limit is hit."""
         run.consecutive_failures += 1
         if run.consecutive_failures >= self.config.consecutive_failures_limit:
@@ -1147,7 +657,7 @@ class TaskOrchestrator:
         the empty required fields sat unreadable right next to it).
         """
         try:
-            from core.windows_uia import get_interactive_elements
+            from desktop.uia import get_interactive_elements
             _elems = get_interactive_elements(max_elements=60, timeout_s=3.0)
             if not _elems:
                 return ""
@@ -1173,7 +683,7 @@ class TaskOrchestrator:
             return ""
 
     def _first_action_targets_live_control(
-        self, run: "_SubtaskRun", subtask: SubTask,
+        self, run: "SubtaskRun", subtask: SubTask,
     ) -> bool:
         """True when this subtask has done NOTHING yet but the control it must
         actuate is present and enabled in the live tree.
@@ -1208,7 +718,7 @@ class TaskOrchestrator:
         return False
 
     def _goal_already_satisfied(
-        self, run: "_SubtaskRun", subtask: SubTask,
+        self, run: "SubtaskRun", subtask: SubTask,
         skip_exclusions: bool = False,
     ) -> bool:
         """One focused LLM question: does the current screen already show the
@@ -1328,7 +838,7 @@ class TaskOrchestrator:
             return False
 
     def _plan_next_step(
-        self, run: "_SubtaskRun", subtask: SubTask, task_context: list[str],
+        self, run: "SubtaskRun", subtask: SubTask, task_context: list[str],
     ) -> tuple[str, ActionStep | None]:
         """Choose the next action: queued step, fresh text plan, or visual escalation.
 
@@ -1343,7 +853,7 @@ class TaskOrchestrator:
         # whatever window happens to be on top. Launch subtasks are creating
         # that window, so they skip the check.
         if not run.is_launch_goal:
-            self._ensure_anchor_foreground()
+            self.anchor.ensure_foreground()
         run.screen_context = run.cached_ocr if run.cached_ocr else self._get_screen_context()
         run.cached_ocr = ""   # consume — will be refreshed after reflection
 
@@ -1353,7 +863,7 @@ class TaskOrchestrator:
         # it fired ctrl+4 blind and could not tell Chat from Calendar. Give it
         # the ground truth; the goal check reads the same context.
         try:
-            from core.capture.screen_snapshot import _get_foreground_hwnd_and_title
+            from desktop.snapshot import _get_foreground_hwnd_and_title
             _, _fg_title = _get_foreground_hwnd_and_title()
             if _fg_title and _fg_title not in ("Unknown", "Desktop"):
                 run.screen_context += (
@@ -1384,23 +894,16 @@ class TaskOrchestrator:
             )
             self._blocking_overlay = None   # re-set by the next blocked click
 
-        # Ask "is this goal ALREADY met?" before planning another action.
-        # Without this, "click X to open Y" subtasks loop after they succeed:
-        # once Y is open, every further click is a no-op that state-describing
-        # verifiers keep blessing ("the form is visible → success"), and the
-        # planner re-plans the same click instead of returning []. Launches,
-        # commands, saves and typing have their own deterministic checks.
-        # (Runs BEFORE the clock line is appended: the check is cached per
-        # screen-context and the clock changes every minute.)
-        # Skipped while queued steps remain: the queue was planned against
-        # this context moments ago and the planner is not consulted between
-        # queue pops — paying 10-16 s of LLM per queued step re-answers a
-        # question nobody reads (live: ~1 min of pure goal checks per form).
-        # True when THIS cycle's pre-plan goal check genuinely ran against the
-        # screen and said the goal is NOT met — reused below so a planner "[]"
-        # is rejected without paying for a second goal-check LLM call (the
-        # appended evidence + clock line change the cache key, so re-asking
-        # always missed the cache: two 4 s calls per stalled cycle, live).
+        # "Is this goal ALREADY met?" — asked before planning another action,
+        # because "click X to open Y" subtasks loop once Y is open: every extra
+        # click is a no-op that state-describing verifiers keep blessing ("the
+        # form is visible → success"). Kinds with a deterministic check of their
+        # own are excluded. Runs BEFORE the clock line is appended (the answer
+        # is cached per screen context, and the clock changes every minute) and
+        # is skipped while queued steps remain (they were planned against this
+        # same screen moments ago — ~1 min of pure goal checks per form).
+        # _screen_says_not_done records a genuine "not met" verdict so a planner
+        # "[]" below can be rejected without paying for a second LLM call.
         _screen_says_not_done = False
         if not run.step_queue:
             # Ground-truth override, checked BEFORE paying for the goal-check
@@ -1432,13 +935,6 @@ class TaskOrchestrator:
             "\nSYSTEM CLOCK (ground truth): %A, %B %d, %Y %I:%M %p"
         )
 
-        # Pass failure hints so planner avoids repeating known-bad patterns
-        failure_hints = []
-        try:
-            failure_hints = self.memory.get_failure_hints(subtask.description)
-        except Exception:
-            pass
-
         # Escalate to visual planning (screenshot → UI-TARS) once the text
         # path has failed visual_replan_after times in a row — the text
         # planner is blind to icons/layout, which is usually why it's stuck.
@@ -1455,7 +951,7 @@ class TaskOrchestrator:
         # model swap. Block it deterministically on is_cmd_subtask — do not
         # rely on foreground-process detection, which can misfire right after
         # an Enter press and let the destructive re-type through.
-        if _visual_mode and (run.is_cmd_subtask or self._foreground_is_terminal()):
+        if _visual_mode and (run.is_cmd_subtask or system.foreground_is_terminal()):
             self.log(
                 "  [VISUAL-REPLAN] Skipped — terminal command subtask "
                 "(clicks/re-typing can't fix command errors)"
@@ -1490,14 +986,14 @@ class TaskOrchestrator:
                 else:
                     planned = self.planner.plan_steps(
                         subtask, run.screen_context, run.completed,
-                        task_context=task_context, failure_hints=failure_hints,
+                        task_context=task_context,
                     )
                     if not planned:
                         # A "save as <path>" subtask has ONE ground truth:
                         # the file on disk. The planner's "goal achieved"
                         # must not overrule its absence — that reports a
                         # false success with no file produced.
-                        if run.save_target and not self._file_saved_fresh(
+                        if run.save_target and not groundtruth.file_saved_fresh(
                             run.save_target, run.started_at
                         ):
                             self.log(
@@ -1574,7 +1070,7 @@ class TaskOrchestrator:
         return "step", step
 
     def _run_step_attempts(
-        self, run: "_SubtaskRun", subtask: SubTask, step: ActionStep,
+        self, run: "SubtaskRun", subtask: SubTask, step: ActionStep,
     ) -> str:
         """Execute one planned step under the retry + verification policy.
 
@@ -1592,7 +1088,7 @@ class TaskOrchestrator:
         # Launch subtasks legitimately click OUTSIDE the anchor app (Start
         # menu results, desktop icons) — the pre-click anchor gate must not
         # veto those. Read by _foreign_app_at_point for every attempt below.
-        self._anchor_gate_off = run.is_launch_goal
+        self.anchor.gate_off = run.is_launch_goal
         # set_value verifies itself by reading the control back through the
         # accessibility tree — LLM reflection would only add latency.
         skip_reflection = (
@@ -1616,13 +1112,13 @@ class TaskOrchestrator:
         # fill the fields first. Only fires when the control list is readable
         # (UIA on) — on the OCR/VLM path we can't prove a field is empty, so we
         # don't block.
-        _submit_t = self._subtask_submit_target(subtask)
+        _submit_t = subtasks.submit_target(subtask)
         if (
             _submit_t
             and step.action_type in ("click", "invoke", "double_click")
-            and self._targets_match(step.target, _submit_t)
+            and subtasks.targets_match(step.target, _submit_t)
         ):
-            _missing = self._unfilled_form_values(subtask, run.screen_context)
+            _missing = self.truth.unfilled_form_values(subtask, run.screen_context)
             if _missing:
                 run.last_error = (
                     f"the form is NOT fully filled yet — {', '.join(_missing)} "
@@ -1682,7 +1178,7 @@ class TaskOrchestrator:
             pre_click_hash = None
             if step.action_type in ("click", "right_click", "double_click"):
                 try:
-                    from core.capture.screenshot import frame_phash
+                    from desktop.capture import frame_phash
                     pre_click_hash = frame_phash(self.capturer.capture())
                 except Exception:
                     pass
@@ -1714,8 +1210,8 @@ class TaskOrchestrator:
                         # app really shows ('GST' vs '(UTC+04:00) Abu
                         # Dhabi, Muscat') — so it picks a real label or
                         # scrolls the open list for more options.
-                        from core import windows_uia
-                        miss = windows_uia.pop_select_miss()
+                        from desktop import uia
+                        miss = uia.pop_select_miss()
                         if miss is not None:
                             shown = ", ".join(miss["items"]) or (
                                 "none rendered yet — items appear as the "
@@ -1739,7 +1235,7 @@ class TaskOrchestrator:
             # reflection when the control exposes no readable value.
             if step.action_type == "type":
                 time.sleep(0.3)   # let the control commit the input
-                if self._typed_text_in_focused_control(step.value, step.target):
+                if self.truth.typed_text_in_focused_control(step.value, step.target):
                     self.log(
                         "  [TYPE-VERIFY] Focused control contains the typed "
                         "text — verified via accessibility tree"
@@ -1755,7 +1251,7 @@ class TaskOrchestrator:
                 and step.action_type == "key_press"
                 and (step.key or "").lower() == "enter"
             ):
-                _ok, _why = self._verify_command_effect(
+                _ok, _why = self.truth.command_effect(
                     subtask, run.started_at, run.typed_ok
                 )
                 if _ok:
@@ -1776,7 +1272,7 @@ class TaskOrchestrator:
         return "step_failed"
 
     def _judge_reflection(
-        self, run: "_SubtaskRun", step: ActionStep,
+        self, run: "SubtaskRun", step: ActionStep,
         non_idempotent: bool, pre_click_hash,
     ) -> str:
         """One verification round for a step that has physically executed.
@@ -1799,7 +1295,7 @@ class TaskOrchestrator:
             # the verifier is about to capture. Without this, the VLM read
             # the agent's own log panel and 'verified' a Calendar click at
             # conf=1.00 while Teams never left the Chat view (live 21:08).
-            self._refresh_own_window_mask()
+            self.mask.refresh()
             # Controls snapshot from the planning cycle that produced this
             # step: appeared/disappeared control names give the verifier
             # tree-level proof of effect on WebView2 screens OCR can't read.
@@ -1823,18 +1319,18 @@ class TaskOrchestrator:
             if (
                 step.action_type in ("click", "right_click", "double_click")
                 and not run.is_launch_goal
-                and getattr(self, "_app_anchor", None)
+                and self.anchor.is_set
             ):
-                _fg_hwnd, _fg_pid, _fg_name = self._foreground_app()
-                if _fg_pid and _fg_pid != self._app_anchor[1] \
-                        and _fg_hwnd != getattr(self, "_own_hwnd", None):
+                _fg_hwnd, _fg_pid, _fg_name = system.foreground_app()
+                if _fg_pid and _fg_pid != self.anchor.pid \
+                        and _fg_hwnd != self.mask.hwnd:
                     self.log(
                         f"  [ANCHOR] Click switched foreground to {_fg_name} — "
-                        f"wrong element for a task anchored to {self._app_anchor[2]}"
+                        f"wrong element for a task anchored to {self.anchor.exe}"
                     )
                     logger.warning(
                         f"[ORCHESTRATOR] Click on '{step.target}' opened {_fg_name} "
-                        f"(task app: {self._app_anchor[2]}) — marking point dead"
+                        f"(task app: {self.anchor.exe}) — marking point dead"
                     )
                     if getattr(self, "_last_click_xy", None):
                         # foreign=True: the point belongs to another app's
@@ -1845,10 +1341,10 @@ class TaskOrchestrator:
                             step.target or "[visual]", *self._last_click_xy,
                             foreign=True,
                         )
-                    self._ensure_anchor_foreground()
+                    self.anchor.ensure_foreground()
                     run.last_error = (
                         f"click opened {_fg_name} instead of acting inside "
-                        f"{self._app_anchor[2]} — wrong element"
+                        f"{self.anchor.exe} — wrong element"
                     )
                     return "stop"
 
@@ -1863,7 +1359,7 @@ class TaskOrchestrator:
             if (
                 step.action_type == "click"
                 and "unchanged" in (reflection.error_description or "").lower()
-                and self._click_holds_focus(step)
+                and groundtruth.click_holds_focus(self._last_click_xy)
             ):
                 self.log(
                     "  [FOCUS-CHECK] Clicked point owns keyboard focus "
@@ -1878,7 +1374,7 @@ class TaskOrchestrator:
             if (
                 step.action_type == "hotkey"
                 and (step.key or "").lower() in ("ctrl+s", "ctrl+shift+s")
-                and self._save_dialog_visible()
+                and self.truth.save_dialog_visible()
             ):
                 self.log("  [SAVE-CHECK] Save-As dialog is open — hotkey confirmed")
                 return "success"
@@ -1891,7 +1387,7 @@ class TaskOrchestrator:
             # a Calendar that HAD opened was declared unconfirmed). Check it.
             if (
                 step.action_type in ("hotkey", "click", "invoke", "double_click")
-                and self._view_switch_confirmed(step)
+                and groundtruth.view_switch_confirmed(step)
             ):
                 self.log(
                     "  [VIEW-CHECK] Window title confirms the view switch "
@@ -1916,17 +1412,13 @@ class TaskOrchestrator:
                 # UNCERTAIN — no CLEAR evidence the step failed. How we treat
                 # this depends on whether re-doing the action is safe:
                 if non_idempotent:
-                    # type / Enter / Ctrl-V already physically fired and we
-                    # have NO reliable signal they failed (the reflector just
-                    # couldn't *read* the result — a dark console, an OCR
-                    # miss, a field it can't see). Re-doing them is exactly
-                    # what caused the double-typing, double-submits, retry
-                    # loops and slow runs. Accept and move on: the NEXT
-                    # planning step reads the LIVE screen and corrects course
-                    # if anything is actually wrong. Backstops remain —
-                    # _verify_command_effect checks commands on disk,
-                    # _verify_launch checks app launches, and the loop-guard
-                    # stops genuine repeats.
+                    # type / Enter / Ctrl-V already fired, and "uncertain"
+                    # means the verifier could not READ the result (dark
+                    # console, OCR miss), not that it failed. Re-doing them is
+                    # what caused double-typing and double-submits, so accept
+                    # and let the NEXT step read the live screen. Backstops
+                    # remain: on-disk command checks, launch verification, and
+                    # the loop guard for genuine repeats.
                     self.log(
                         f"  Uncertain (conf={reflection.confidence:.2f} < "
                         f"{fail_threshold:.2f}) — action already performed; "
@@ -1951,7 +1443,7 @@ class TaskOrchestrator:
                 if run.is_launch_goal and (
                     step.action_type in ("click", "double_click")
                 ):
-                    if self._goal_confirmed(run.goal_proc, run.baseline_windows):
+                    if groundtruth.new_window_appeared(run.goal_proc, run.baseline_windows):
                         self.log(
                             f"  [GOAL-CHECK-EARLY] "
                             f"'{run.goal_proc.split('.')[0]}' confirmed "
@@ -2017,8 +1509,8 @@ class TaskOrchestrator:
                 and getattr(self, "_last_click_xy", None)
                 and step.target
             ):
-                from core import windows_uia
-                _cover = windows_uia.covering_element(
+                from desktop import uia
+                _cover = uia.covering_element(
                     *self._last_click_xy, step.target
                 )
                 if _cover:
@@ -2059,7 +1551,7 @@ class TaskOrchestrator:
             return "retry"
 
     def _record_step_success(
-        self, run: "_SubtaskRun", subtask: SubTask, step: ActionStep,
+        self, run: "SubtaskRun", subtask: SubTask, step: ActionStep,
     ) -> bool | None:
         """Bookkeeping + early-exit checks after a successful step.
 
@@ -2082,7 +1574,7 @@ class TaskOrchestrator:
         if (
             run.type_payload
             and step.action_type == "type"
-            and self._texts_equivalent(step.value or "", run.type_payload)
+            and subtasks.texts_equivalent(step.value or "", run.type_payload)
         ):
             self.log(
                 "  [TYPE-CHECK] Requested text typed and verified — "
@@ -2095,7 +1587,7 @@ class TaskOrchestrator:
         # goal is achieved — return True immediately so the planner never gets a
         # chance to generate spurious continuation steps (e.g. pressing Enter
         # again inside a Calculator that is already open).
-        if run.is_launch_goal and self._goal_confirmed(run.goal_proc, run.baseline_windows):
+        if run.is_launch_goal and groundtruth.new_window_appeared(run.goal_proc, run.baseline_windows):
             _label = run.goal_proc.split(".")[0]
             self.log(f"  [GOAL-CHECK] '{_label}' confirmed — goal achieved")
             return True
@@ -2112,7 +1604,7 @@ class TaskOrchestrator:
         if (
             not run.is_launch_goal
             and step.action_type in ("click", "right_click", "double_click")
-            and self._is_single_click_subtask(subtask)
+            and subtasks.is_single_click(subtask)
         ):
             # A blind visual-planner click (raw coordinates, no target) proves
             # only that SOME pixel changed the screen — nothing ties it to the
@@ -2121,7 +1613,7 @@ class TaskOrchestrator:
             # VLM-only run), and the form-fill subtask that followed died on a
             # form that never opened. Let the next cycle's goal check judge
             # from the live screen instead.
-            if step.target or self._explicit_coords(step.value) is None:
+            if step.target or subtasks.explicit_coords(step.value) is None:
                 self.log(
                     "  [CLICK-CHECK] Single-click subtask — verified click "
                     "landed and changed the screen — subtask complete"
@@ -2143,7 +1635,7 @@ class TaskOrchestrator:
         # spent 6 minutes wandering the Meet page trying to re-Save it). A
         # verified click/invoke on the subtask's own commit button IS the
         # completion — trust it, exactly like the single-click case above.
-        _submit = self._subtask_submit_target(subtask)
+        _submit = subtasks.submit_target(subtask)
         # Guard: only after the form's fields were actually filled. run.completed
         # already includes THIS commit step, so ">= 2 successful steps" means at
         # least one field-set ran before it — a lone premature Save falls through
@@ -2154,7 +1646,7 @@ class TaskOrchestrator:
             and not run.is_launch_goal
             and _acted_steps >= 2
             and step.action_type in ("click", "invoke", "right_click", "double_click")
-            and self._targets_match(step.target, _submit)
+            and subtasks.targets_match(step.target, _submit)
         ):
             self.log(
                 f"  [SUBMIT-CHECK] Form commit '{_submit}' clicked and verified "
@@ -2241,7 +1733,7 @@ class TaskOrchestrator:
         return True
 
     def _record_step_failure(
-        self, run: "_SubtaskRun", step: ActionStep,
+        self, run: "SubtaskRun", step: ActionStep,
     ) -> bool | None:
         """Bookkeeping after a failed step; abort once failures exhaust the budget.
 
@@ -2260,7 +1752,7 @@ class TaskOrchestrator:
         # This handles the common case where key_press enter launches an app
         # but the reflector times out before the app's UI is fully visible
         # (reflection confidence 0.50 → step marked failed, yet app IS open).
-        if run.is_launch_goal and self._goal_confirmed(run.goal_proc, run.baseline_windows):
+        if run.is_launch_goal and groundtruth.new_window_appeared(run.goal_proc, run.baseline_windows):
             _label = run.goal_proc.split(".")[0]
             self.log(
                 f"  [GOAL-CHECK] '{_label}' confirmed "
@@ -2271,17 +1763,6 @@ class TaskOrchestrator:
         run.consecutive_failures += 1
         self.log("  Step failed - re-evaluating next action")
 
-        # Persist failure so future tasks can avoid this pattern
-        try:
-            self.memory.store_failure_pattern(
-                target=step.target or step.description or "",
-                action_type=step.action_type,
-                error=run.last_error[:200] if run.last_error else "",
-                app_context=run.screen_context[:100],
-            )
-        except Exception:
-            pass
-
         if run.consecutive_failures >= self.config.consecutive_failures_limit:
             self.log(
                 f"  {self.config.consecutive_failures_limit} consecutive failures"
@@ -2290,27 +1771,7 @@ class TaskOrchestrator:
             return False
         return None
 
-    # Foreground processes where visual replanning can't help: command errors
-    # need corrected text, not clicks.
-    _TERMINAL_PROCS = frozenset({
-        "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
-        "conhost.exe", "openconsole.exe",
-    })
 
-    def _foreground_is_terminal(self) -> bool:
-        import os
-        if "PYTEST_CURRENT_TEST" in os.environ:
-            return False  # tests themselves run inside a terminal
-        try:
-            from core.capture.screen_snapshot import (
-                _get_foreground_hwnd_and_title,
-                _get_foreground_process,
-            )
-            hwnd, _ = _get_foreground_hwnd_and_title()
-            proc = _get_foreground_process(hwnd)
-            return proc.lower() in self._TERMINAL_PROCS
-        except Exception:
-            return False
 
     # ── Visual planning (UI-TARS recovery path) ────────────────────────────────
 
@@ -2318,7 +1779,7 @@ class TaskOrchestrator:
         """Capture the screen and ask the VLM for the next action directly."""
         import base64
         import io
-        self._refresh_own_window_mask()
+        self.mask.refresh()
         img = self.capturer.capture()
         thumb = img.copy()
         # 1280 (not 960): UI-TARS-1.5 grounds small targets better at higher
@@ -2337,19 +1798,6 @@ class TaskOrchestrator:
 
     # ── Step execution ─────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _explicit_coords(value: str | None) -> tuple | None:
-        """Parse an explicit "x,y" pixel pair from a step's value field.
-
-        Visual-planner click steps carry direct screen coordinates this way,
-        bypassing grounding entirely.
-        """
-        if not value or "," not in value:
-            return None
-        parts = value.split(",", 1)
-        if all(p.strip().lstrip("-").isdigit() for p in parts):
-            return int(parts[0].strip()), int(parts[1].strip())
-        return None
 
     # Keys that are safe to press even when the agent's own console is focused —
     # they navigate AWAY from it (launcher) or dismiss overlays, never inject
@@ -2357,38 +1805,26 @@ class TaskOrchestrator:
     _SAFE_OWN_CONSOLE_KEYS = frozenset({"winleft", "win", "escape", "esc"})
 
     def _keyboard_blocked_by_own_console(self, step: ActionStep) -> bool:
-        """True when keyboard input must be blocked: the foreground window is the
-        agent's own host console (classic conhost). Typing there would inject
-        into the very terminal session that launched the agent. Best-effort —
-        under Windows Terminal the console window is a hidden ConPTY handle that
-        is never foreground, so this guard stays inert there (the new-window
-        launch enforcement covers that case).
+        """True when keyboard input must be blocked because the agent's own host
+        console owns the foreground — typing there injects into the terminal
+        session that launched the agent.
         """
-        import os
-        if "PYTEST_CURRENT_TEST" in os.environ:
-            return False  # unit tests run inside a console themselves
         if step.action_type == "key_press" and (step.key or "").lower() in self._SAFE_OWN_CONSOLE_KEYS:
             return False
-        try:
-            import ctypes
-            own = ctypes.windll.kernel32.GetConsoleWindow()
-            if not own or not ctypes.windll.user32.IsWindowVisible(own):
-                return False
-            if ctypes.windll.user32.GetForegroundWindow() == own:
-                self.log(
-                    "  [GUARD] Foreground is the agent's own console — keyboard "
-                    "input blocked (would inject into the agent's host terminal)"
-                )
-                return True
-        except Exception:
+        if not system.own_console_is_foreground():
             return False
-        return False
+        self.log(
+            "  [GUARD] Foreground is the agent's own console — keyboard "
+            "input blocked (would inject into the agent's host terminal)"
+        )
+        return True
 
     @staticmethod
     def _force_mouse() -> bool:
         """True when grounded clicks must use the real (gliding) mouse rather than
         the UIA pattern-invoke shortcut. Env AGENT_FORCE_MOUSE=1/0 wins; otherwise
-        config.FORCE_MOUSE (default True) decides. See config.FORCE_MOUSE."""
+        config.FORCE_MOUSE (default True) decides. See config.FORCE_MOUSE.
+        """
         env = os.environ.get("AGENT_FORCE_MOUSE", "").strip().lower()
         if env in ("1", "true", "yes"):
             return True
@@ -2408,7 +1844,7 @@ class TaskOrchestrator:
         # hit Stop, which is exactly why the button felt dead.
         if self._stop_event.is_set():
             return False
-        x, y, x2, y2 = None, None, None, None
+        x = y = None
         # Where the last click-family step actually landed — lets the
         # reflector's "screen unchanged" verdict blacklist the exact point.
         self._last_click_xy = None
@@ -2431,7 +1867,7 @@ class TaskOrchestrator:
         if (
             step.action_type == "hotkey"
             and (step.key or "").lower().replace(" ", "") == "ctrl+c"
-            and self._foreground_is_terminal()
+            and system.foreground_is_terminal()
         ):
             self.log(
                 "  [GUARD] ctrl+c in a terminal interrupts the shell — blocked "
@@ -2445,8 +1881,8 @@ class TaskOrchestrator:
             # Grounding is about to capture the screen — make sure the agent's
             # own window pixels are masked as of NOW, not as of the last
             # planning cycle.
-            self._refresh_own_window_mask()
-            _coords = self._explicit_coords(step.value)
+            self.mask.refresh()
+            _coords = subtasks.explicit_coords(step.value)
             if _coords is not None:
                 # Explicit pixel coordinates (visual-planner convention)
                 x, y = _coords
@@ -2468,7 +1904,7 @@ class TaskOrchestrator:
                 # Pre-click ground truth: a visual-planner point inside
                 # another app's window can never advance a task anchored to
                 # this app — reject it BEFORE the click steals focus.
-                _foreign = self._foreign_app_at_point(x, y)
+                _foreign = self.anchor.foreign_app_at(x, y)
                 if _foreign:
                     self.grounder.mark_dead("[visual]", x, y, foreign=True)
                     self._exec_fail_reason = (
@@ -2512,7 +1948,7 @@ class TaskOrchestrator:
             # returns that pixel. Hit-test whose window owns the point before
             # any input fires; a foreign point is marked dead task-wide so no
             # stage can serve it again.
-            _foreign = self._foreign_app_at_point(x, y)
+            _foreign = self.anchor.foreign_app_at(x, y)
             if _foreign:
                 self.grounder.mark_dead(step.target or "[visual]", x, y,
                                         foreign=True)
@@ -2534,8 +1970,8 @@ class TaskOrchestrator:
             # provable no-op — fail fast and hand the planner the blocker's
             # name so it dismisses the overlay instead of grinding retries.
             if "uia" in (result.method or ""):
-                from core import windows_uia
-                _cover = windows_uia.covering_element(x, y, step.target)
+                from desktop import uia
+                _cover = uia.covering_element(x, y, step.target)
                 if _cover:
                     self._exec_fail_reason = (
                         f"'{step.target}' is covered by '{_cover}' — an "
@@ -2551,52 +1987,38 @@ class TaskOrchestrator:
                         f"covered by '{_cover}' — click would not reach it"
                     )
                     return False
-            # Ground truth first: when Stage 0 found this element in the UIA
-            # tree, activate the control OBJECT via its Invoke/Toggle pattern
-            # instead of synthesizing a mouse click at its pixels. A pattern
-            # invoke cannot hit the wrong pixel and cannot be swallowed by
-            # overlays or WebView input handling (seen live: every click on
-            # Outlook's 'New' button landed with delta=0 while the control
-            # was perfectly invokable). Reflection still verifies the visible
-            # outcome afterwards. Falls back to the pixel click whenever the
-            # control exposes no pattern or the re-lookup misses.
-            # ... unless invoking THIS target already failed verification once:
-            # WebView2 providers accept Invoke/Toggle without doing anything
-            # (live: 'Invite to Teams' invoked 6× with zero screen change —
-            # coordinate blacklists never fire because no pixel is involved).
-            # One failed verify per target sends retries down the pixel path.
-            # AGENT_FORCE_MOUSE=1 skips the pattern-invoke shortcut entirely:
-            # UIA still supplies the exact coordinates, but the click is
-            # always performed with the real mouse (demo / requirement mode).
+            # A control found in the UIA tree can be actuated through its own
+            # Invoke/Toggle pattern instead of a synthesized click: that cannot
+            # miss the pixel and cannot be swallowed by an overlay (every click
+            # on Outlook's 'New' button landed with delta=0 while the control
+            # invoked perfectly). Two exceptions: a target whose invoke already
+            # failed verification once goes back to pixels (WebView2 providers
+            # accept Invoke and do nothing, and no coordinate is involved for a
+            # blacklist to catch), and FORCE_MOUSE delivers every click with the
+            # visible mouse at the UIA-exact coordinates. See config.FORCE_MOUSE.
             if (
                 step.action_type == "click"
                 and "uia" in (result.method or "")
                 and (step.target or "").lower() not in self._invoke_dead
                 and not self._force_mouse()
             ):
-                from core import windows_uia
+                from desktop import uia
                 if self._stop_event.is_set():
                     return False
-                # WebView2 providers often THROW from Invoke (0x80040201,
-                # 'event unable to invoke any of the subscribers') while the
-                # button is STILL PRESSED. Treating the throw as "invoke did
-                # nothing" and firing the pixel fallback at the PRE-invoke
-                # coordinates then clicks whatever the actuation put there —
-                # live: invoking 'New meeting' (1591,78) opened the scheduling
-                # form whose Save button sits at (1566,77), so the fallback
-                # clicked Save on the EMPTY form before any field was filled.
-                # Hash the screen before the invoke; if it changed afterwards
-                # the invoke landed — skip the stale-coordinate click and let
-                # reflection judge the real effect. A provably inert invoke
-                # (delta=0, e.g. Teams' Save button) still falls through to
-                # the pixel click as before.
+                # WebView2 providers often THROW from Invoke while the button
+                # is still PRESSED. Retrying at the pre-invoke coordinates then
+                # clicks whatever the actuation put there — invoking 'New
+                # meeting' opened a form whose Save button sat 25px away, and
+                # the fallback saved the empty form. So: hash before; if the
+                # screen changed, the invoke landed and the stale click is
+                # skipped. A provably inert invoke still falls through.
                 _pre_invoke = None
                 try:
-                    from core.capture.screenshot import frame_phash
+                    from desktop.capture import frame_phash
                     _pre_invoke = frame_phash(self.capturer.capture())
                 except Exception:
                     pass
-                if windows_uia.invoke_element(step.target, timeout_s=2.5):
+                if uia.invoke_element(step.target, timeout_s=2.5):
                     self._last_was_invoke = True
                     return True
                 if _pre_invoke is not None:
@@ -2613,33 +2035,6 @@ class TaskOrchestrator:
                             return True
                     except Exception:
                         pass
-
-        # ── Drag ──────────────────────────────────────────────────────────────
-        elif step.action_type == "drag":
-            if not step.target:
-                self.log("  drag has no source target")
-                return False
-            src = self.grounder.ground(step.target)
-            if not src.found or src.confidence < self.grounder.min_confidence:
-                self.log(f"  drag: could not find source '{step.target}'")
-                return False
-            x, y = src.x, src.y
-            if step.value:
-                # "x,y" pixel coords or element description
-                if "," in step.value and all(
-                    p.strip().lstrip("-").isdigit() for p in step.value.split(",", 1)
-                ):
-                    px, py = step.value.split(",", 1)
-                    x2, y2 = int(px.strip()), int(py.strip())
-                else:
-                    dst = self.grounder.ground(step.value)
-                    if not dst.found or dst.confidence < self.grounder.min_confidence:
-                        self.log(f"  drag: could not find destination '{step.value}'")
-                        return False
-                    x2, y2 = dst.x, dst.y
-            else:
-                self.log("  drag has no destination (value empty)")
-                return False
 
         # ── Scroll ────────────────────────────────────────────────────────────
         elif step.action_type == "scroll":
@@ -2659,9 +2054,9 @@ class TaskOrchestrator:
             else:
                 # H10: extraction found nothing. We still don't block the task
                 # (the user may want partial results), but we record the miss and
-                # mark the run degraded so it is not stored as a clean reusable
-                # success — "read me the value" tasks that found no value must not
-                # masquerade as fully-successful in memory.
+                # mark the run degraded so it is not recorded as a clean
+                # success — "read me the value" tasks that found no value must
+                # not masquerade as fully-successful in the task history.
                 self._extracted_data[key] = ""
                 self._degraded = True
                 self.log(f"  [EXTRACT] nothing found for '{key}' — marked incomplete")
@@ -2687,7 +2082,7 @@ class TaskOrchestrator:
                 _r = self.grounder.ground_fast(step.target, ocr_threshold=0.8)
                 if _r.found and _r.confidence >= self.grounder.min_confidence:
                     x, y = _r.x, _r.y
-                elif self._ocr_value_on_screen(step.value):
+                elif self.truth.value_on_screen(step.value):
                     # Filling a text field REMOVES its placeholder label
                     # ('Add title' vanishes once the title is typed), so a
                     # re-attempt can never ground the label again even though
@@ -2724,7 +2119,7 @@ class TaskOrchestrator:
             _r = self.grounder.ground_fast(step.target, ocr_threshold=0.8)
             if _r.found and _r.confidence >= self.grounder.min_confidence:
                 x, y = _r.x, _r.y
-            elif self._ocr_value_on_screen(step.value):
+            elif self.truth.value_on_screen(step.value):
                 self.log(
                     f"  [SET-CHECK] '{step.target}' not groundable but its "
                     f"value is already on screen — field already set"
@@ -2744,534 +2139,28 @@ class TaskOrchestrator:
         # model call during which the user hit Stop — do not fire the action.
         if self._stop_event.is_set():
             return False
-        return self.actor.execute(step, x=x, y=y, x2=x2, y2=y2)
+        return self.actor.execute(step, x=x, y=y)
 
     # ── Deterministic terminal-command verification ─────────────────────────────
 
-    # Shell error fragments that indicate a command failed. Deliberately
-    # specific — a bare "error" would false-positive on file contents.
-    _SHELL_ERROR_MARKERS = (
-        "is denied", "cannot find", "could not find", "not recognized",
-        "no such file", "exception", "categoryinfo", "command not found",
-        "permission denied", "syntax error", "fatal:", "access denied",
-    )
 
-    def _verify_command_effect(
-        self, subtask: SubTask, started_at: float, typed_ok: bool
-    ) -> tuple:
-        """Ground-truth verification for "run: <command>" subtasks.
 
-        A successful shell command usually prints NOTHING (just a new empty
-        prompt) — OCR reflection mis-reads that silence as failure. Instead:
-          1. delete commands  → success when the target no longer exists
-          2. create/redirect  → success when the target exists AND is fresh
-             (mtime within this subtask — stale files from old runs don't pass)
-          3. anything else    → success when no shell error text is on screen
-        Returns (ok, reason).
-        """
-        import os
 
-        m = re.search(r"run:\s*(.+)$", subtask.description,
-                      re.IGNORECASE | re.DOTALL)
-        cmd = (m.group(1) if m else subtask.description).strip()
-        time.sleep(0.8)   # let the command finish writing
 
-        _PATH = r"(\"[^\"]+\"|'[^']+'|\S+)"
 
-        def _norm(p: str) -> str:
-            return os.path.expandvars(p.strip().strip("'\""))
 
-        # 1. Deletion — target must be gone
-        m_del = re.search(rf"^(?:del|rm|remove-item)\s+(?:-\S+\s+)*{_PATH}",
-                          cmd, re.IGNORECASE)
-        if m_del:
-            t = _norm(m_del.group(1))
-            if not os.path.exists(t):
-                return True, f"'{t}' no longer exists"
-            return False, f"'{t}' still exists — delete did not run or failed"
 
-        # 2. Creation — redirect target or ni/touch/mkdir argument must exist
-        #    and be fresh (modified during this subtask).
-        m_new = re.search(rf">>?\s*{_PATH}", cmd) or re.search(
-            rf"^(?:ni|new-item|touch|mkdir|md)\s+(?:-\S+\s+)*{_PATH}",
-            cmd, re.IGNORECASE)
-        if m_new:
-            t = _norm(m_new.group(1))
-            if os.path.exists(t):
-                try:
-                    fresh = os.path.getmtime(t) >= started_at - 2
-                except OSError:
-                    fresh = True
-                if fresh:
-                    return True, f"'{t}' exists on disk (freshly written)"
-                return False, (
-                    f"'{t}' exists but was NOT modified by this command "
-                    f"(stale file from an earlier run)"
-                )
-            return False, (
-                f"expected '{t}' on disk but it does not exist — "
-                f"the command did not run or failed"
-            )
 
-        # 3. Generic command — shell silence means success
-        if not typed_ok:
-            return False, "Enter pressed but no command was typed first"
-        try:
-            img = self.capturer.capture()
-            img.thumbnail(OCR_THUMB)
-            text = " ".join(
-                w.text for w in self._ocr.extract(img) if w.conf >= 0.6
-            ).lower()
-            hit = next((mk for mk in self._SHELL_ERROR_MARKERS if mk in text), None)
-            if hit:
-                return False, f"error text visible in terminal output ('{hit}')"
-            return True, "no error output — shell silence means success"
-        except Exception:
-            return True, "no error detected (output check unavailable)"
 
-    @staticmethod
-    def _subtask_save_target(subtask) -> str | None:
-        """Extract the destination path from a "save ... as <path>" subtask.
 
-        Returns the expanded path string when the subtask is a save-to-named-file
-        (the description contains "save ... as <something with a / or \\>"), else
-        None. Lets the orchestrator confirm the save deterministically on disk
-        instead of OCR-reading a silent editor.
-        """
-        import os
-        desc = subtask.description or ""
-        m = re.search(
-            r"\bsave\b[^\n]*?\bas\s+['\"]?([^'\"\n]+?)['\"]?\s*$",
-            desc, re.IGNORECASE,
-        )
-        if not m:
-            return None
-        path = m.group(1).strip().rstrip(".")
-        # Only a real path (has a separator + filename) is disk-verifiable.
-        if "/" not in path and "\\" not in path:
-            return None
-        return os.path.expanduser(os.path.expandvars(path))
 
-    @staticmethod
-    def _subtask_type_payload(subtask) -> str | None:
-        """Extract the literal text a "... type: <text>" subtask asks to type.
 
-        Returns the payload when the subtask ends with the text to type (the
-        router phrases typing subtasks as "click in the document area and
-        type: <text>"), else None. Lets the orchestrator complete the subtask
-        deterministically the moment that text has been typed and verified —
-        otherwise the planner re-types the text or drifts into save steps that
-        belong to a later subtask.
-        """
-        desc = subtask.description or ""
-        m = re.search(r"\btype:?\s+['\"]?(.+?)['\"]?\s*$", desc, re.IGNORECASE)
-        if not m:
-            return None
-        payload = m.group(1).strip()
-        # Too-short payloads ("type notepad") are launcher/search idioms, not a
-        # document-typing goal — don't short-circuit those.
-        return payload if len(payload) >= 6 else None
 
-    # Commit verbs that SUBMIT-and-CLOSE a form. A subtask ending in one of
-    # these is complete the moment that button is clicked and verified — the
-    # form is gone afterward, so its filled-state can never be re-verified.
-    _SUBMIT_LABELS = (
-        "save", "send", "schedule", "create", "submit", "book", "done",
-        "update", "post", "finish", "confirm", "publish",
-    )
 
-    @classmethod
-    def _subtask_submit_target(cls, subtask) -> str | None:
-        """The commit button a form-fill subtask ends by clicking, else None.
 
-        Router format is "...set X, set Y, then click Save to create the
-        meeting" — a field-setting body followed by a terminal commit click.
-        Returns the commit button's label ("Save") so a verified click on it
-        can close the subtask instead of looping. Returns None for anything
-        that isn't a fill-then-commit subtask (a bare "click Save" subtask is
-        handled by the single-click path instead).
-        """
-        desc = subtask.description or ""
-        # Must actually fill fields first — otherwise it's not a form-commit
-        # subtask and the single-click path already covers it.
-        if not re.search(r"\b(set|add|type|enter|fill|choose|select)\b", desc, re.IGNORECASE):
-            return None
-        labels = "|".join(cls._SUBMIT_LABELS)
-        # The LAST commit-verb click in the description is the terminal submit.
-        matches = list(re.finditer(
-            rf"\bclick\s+(?:the\s+|on\s+)?['\"]?({labels})\b", desc, re.IGNORECASE,
-        ))
-        if not matches:
-            return None
-        return matches[-1].group(1)
 
-    @staticmethod
-    def _required_form_values(subtask) -> list[str]:
-        """Concrete values a form-fill subtask must place before it commits.
 
-        Parsed from the router's "set X to '<v>' / set the date to <v> / add
-        attendee <v>" phrasing: quoted strings (title), dates, times, and email
-        addresses. Used by the COMMIT-GUARD to refuse a Save/Submit until every
-        one of these is actually present in the live form.
-        """
-        desc = subtask.description or ""
-        vals: list[str] = []
-        vals += re.findall(r"'([^']{2,})'", desc)                       # quoted (title)
-        vals += re.findall(r'"([^"]{2,})"', desc)
-        # dates m/d/yyyy → normalised to the un-padded form the app displays
-        vals += [f"{int(mo)}/{int(da)}/{yr}"
-                 for mo, da, yr in re.findall(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", desc)]
-        vals += re.findall(r"\b\d{1,2}:\d{2}\s*[AaPp]\.?[Mm]\.?\b", desc)  # times
-        vals += re.findall(r"[\w.+-]+@[\w.-]+\.\w+", desc)                # emails
-        seen, out = set(), []
-        for v in vals:
-            k = v.strip().lower()
-            if k and k not in seen:
-                seen.add(k)
-                out.append(v.strip())
-        return out
 
-    @staticmethod
-    def _value_in_controls(value: str, controls_text: str) -> bool:
-        """Is `value` currently present in the UIA control readback text?
-
-        Field values surface as "[Edit = 'PROJECT DISCUSSION']" /
-        "[ComboBox = '7/29/2026']". Dates are matched in both padded and
-        un-padded forms (07/29/2026 vs 7/29/2026)."""
-        t = (controls_text or "").lower()
-        v = value.strip().lower()
-        if v and v in t:
-            return True
-        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})$", value.strip())
-        if m:
-            mo, da, yr = m.groups()
-            for var in (f"{int(mo)}/{int(da)}/{yr}", f"{int(mo):02d}/{int(da):02d}/{yr}"):
-                if var.lower() in t:
-                    return True
-        return False
-
-    def _ocr_value_on_screen(self, value: str | None) -> bool:
-        """Strict OCR check: is `value` literally on the live screen?
-
-        Used to salvage a set_value/select whose field LABEL cannot be
-        grounded: if the requested value is already visible, the field
-        already holds it (an earlier attempt filled it and thereby removed
-        the placeholder label the grounder is searching for).
-
-        STRICT by design — alphanumeric-normalised substring match, and the
-        value must normalise to >= 8 characters. Short values like times
-        ('3:00 PM' -> '300pm') are always rejected: with fields side by side,
-        the Start-time default '3:30 PM' would otherwise satisfy a check for
-        End time '3:30 PM' and silently skip setting it. Titles, emails and
-        full dates are long and distinctive enough to be safe.
-        """
-        _ocr = getattr(self, "_ocr", None)
-        if not value or _ocr is None:
-            return False
-        try:
-            if not _ocr.is_available():
-                return False
-        except Exception:
-            return False
-        _norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())  # noqa: E731
-        variants = {_norm(value)}
-        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})$", value.strip())
-        if m:
-            mo, da, yr = m.groups()
-            # apps render dates un-padded ('7/29/2026') — match both forms
-            variants.add(f"{int(mo)}{int(da)}{yr}")
-            variants.add(f"{int(mo):02d}{int(da):02d}{yr}")
-        # Gate on the value's DISTINCTIVENESS (its longest normalised form),
-        # then match every variant: a full date passes the gate at 8 chars
-        # ('07292026') and must still match the un-padded 7-char rendering
-        # ('7292026') apps actually display. Times never pass the gate.
-        if max(len(v) for v in variants) < 8:
-            return False
-        try:
-            img = self.capturer.capture()
-            img.thumbnail(OCR_THUMB)
-            words = _ocr.extract(img)
-            text = _norm(" ".join(w.text for w in words))
-            return any(v in text for v in variants)
-        except Exception:
-            return False
-
-    def _unfilled_form_values(self, subtask, controls_text: str) -> list[str]:
-        """Required form values NOT yet provably present on the form.
-
-        UIA path: read each value back from the CLICKABLE CONTROLS list.
-        OCR path (no controls list): a field's EMPTINESS can't be proven, but
-        the PRESENCE of long, distinctive values (title / full date / email —
-        never short times) can be tested positively on the live screen via
-        the strict _ocr_value_on_screen check. Without this, the OCR path
-        let Save fire with only the title set and Teams created a meeting at
-        the DEFAULT date/time with no attendee — reported as a full success
-        (live 19:33). Values too short to check safely are skipped, so times
-        never block."""
-        if "CLICKABLE CONTROLS" in (controls_text or ""):
-            return [v for v in self._required_form_values(subtask)
-                    if not self._value_in_controls(v, controls_text)]
-        missing = []
-        for v in self._required_form_values(subtask):
-            _is_date = bool(re.match(r"\d{1,2}/\d{1,2}/\d{4}$", v.strip()))
-            if len(re.sub(r"[^a-z0-9]", "", v.lower())) < 8 and not _is_date:
-                continue   # short/ambiguous (times) — cannot be checked safely
-                # (dates always pass: an un-padded '7/29/2026' normalises to 7
-                # chars but is date-shaped and thus distinctive)
-            if not self._ocr_value_on_screen(v):
-                missing.append(v)
-        return missing
-
-    @staticmethod
-    def _targets_match(a: str | None, b: str | None) -> bool:
-        """True when two control labels are the same modulo case/spacing/quotes,
-        or one is a whole-word prefix of the other ('Save' ⊆ 'Save and close')."""
-        def _norm(s):
-            return re.sub(r"[^a-z0-9 ]", "", (s or "").lower()).strip()
-        na, nb = _norm(a), _norm(b)
-        if not na or not nb:
-            return False
-        if na == nb:
-            return True
-        # Whole-word containment: the commit label appears as a word in the
-        # step target (planner may describe it as "Save button" / "Save meeting").
-        wa, wb = set(na.split()), set(nb.split())
-        return wa <= wb or wb <= wa
-
-    @staticmethod
-    def _is_single_click_subtask(subtask) -> bool:
-        """True when the subtask's whole goal is ONE click/open of a control.
-
-        A "click the New meeting button" subtask is DONE the instant that click
-        lands and materially changes the screen — but on the OCR-only path the
-        goal-check can't confirm it, because the WebView2 result is invisible to
-        OCR and, worse, the opened form's own title often repeats the button's
-        label ("New meeting"), which the goal-check reads as "button still
-        present → not clicked" and loops forever. When the subtask is a bare
-        single click, a reflection-verified click IS the completion — trust it.
-
-        Excludes multi-part subtasks (form fills: "set the title ..., then click
-        Save") — those contain conjunctions or extra field verbs and must still
-        run the full plan/verify loop.
-        """
-        desc = (subtask.description or "").strip().lower()
-        if not desc:
-            return False
-        # Must start by describing a click/open of something.
-        if not re.match(
-            r"^(with[^,]*,\s*)?(then\s+)?(click|open|select|press|tap|go to|"
-            r"navigate to|switch to)\b",
-            desc,
-        ):
-            return False
-        # Any second action verb means it is NOT a bare click (form fills,
-        # type-and-save, add-attendee sequences all trip one of these).
-        if re.search(
-            r"\b(then|set|type|enter|fill|add|choose|save|create|send|"
-            r"delete|remove|check|toggle|write)\b",
-            # Drop the leading "with ... open," preamble the router prepends —
-            # its verbs describe prior state, not this subtask's actions.
-            re.sub(r"^with[^,]*,\s*", "", desc),
-        ):
-            return False
-        return True
-
-    @staticmethod
-    def _texts_equivalent(a: str, b: str) -> bool:
-        """True when two strings are the same text modulo case/whitespace/quotes.
-
-        Fuzzy (difflib) because the planner re-emits the payload from the
-        subtask description and may vary punctuation slightly. Containment
-        counts only when lengths are comparable, so typing a fragment of the
-        payload never passes as the full text.
-        """
-        import difflib
-
-        def _norm(s: str) -> str:
-            return re.sub(r"\s+", " ", (s or "").strip().strip("'\"")).lower()
-
-        na, nb = _norm(a), _norm(b)
-        if not na or not nb:
-            return False
-        if (na in nb or nb in na) and min(len(na), len(nb)) / max(len(na), len(nb)) >= 0.8:
-            return True
-        return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.85
-
-    def _file_saved_fresh(self, path: str, started_at: float) -> bool:
-        """True if `path` exists and was written during this subtask.
-
-        Freshness (mtime >= started_at - 2) prevents a stale file from an earlier
-        run from falsely passing the save.
-        """
-        import os
-        try:
-            if not os.path.exists(path):
-                return False
-            return os.path.getmtime(path) >= started_at - 2
-        except OSError:
-            return False
-
-    def _typed_text_in_focused_control(
-        self, text: str | None, target: str | None = None,
-    ) -> bool:
-        """Deterministic type verification: the focused control's accessible
-        value contains the text that was just typed — and, when the step
-        names a destination field, the focused control IS that field.
-
-        Content alone is not enough: an attendee email typed into the Title
-        field still "contains the typed text" (seen live). Reads the real
-        widget from the accessibility tree — exact and ~50 ms, versus the
-        ~3-4 s OCR+LLM reflection call it replaces. Returns False (fall back
-        to reflection) when the text is trivial, contains a credential
-        placeholder, the control exposes no readable value, or the focused
-        control's name does not match the intended field.
-        """
-        if not text or len(text.strip()) < 2 or "{{cred:" in text:
-            return False
-        try:
-            from core import windows_uia
-            info = windows_uia.focused_element_info()
-            value = (info or {}).get("value") or ""
-            if not value:
-                return False
-
-            def _norm(s: str) -> str:
-                return re.sub(r"\s+", " ", s).strip().lower()
-
-            if target:
-                name = _norm((info or {}).get("name") or "")
-                want = _norm(target)
-                if not name or (want not in name and name not in want):
-                    self.log(
-                        f"  [TYPE-VERIFY] Focus is on '{name or '?'}', not "
-                        f"'{target}' — text landed in the wrong field"
-                    )
-                    return False
-            return _norm(text) in _norm(value)
-        except Exception:
-            return False
-
-    def _click_holds_focus(self, step: ActionStep) -> bool:
-        """True when the clicked point lies inside the control that owns
-        keyboard focus and that control accepts text input.
-
-        A click whose effect is placing the caret produces zero pixel change
-        (the caret is invisible to the phash diff), so reflection scores it as
-        a no-op and retries it forever. The accessibility tree is the ground
-        truth: if the focused control contains the clicked coordinates and is
-        a text control, the click achieved everything a click can achieve.
-        Works for any app and any task — no target-name matching involved.
-
-        The clicked PIXEL itself must also be a text control. WebView apps
-        (new Outlook, Teams) expose one focused DocumentControl whose rect
-        spans nearly the whole window — "focused rect contains the point"
-        alone rescued dead clicks on buttons for 10+ minutes (seen live),
-        which also kept the dead-point blacklist from ever firing.
-        """
-        try:
-            from core import windows_uia
-            xy = getattr(self, "_last_click_xy", None)
-            if not xy:
-                return False
-            at_point = windows_uia.control_type_at_point(*xy)
-            if at_point not in ("EditControl", "DocumentControl"):
-                return False
-            info = windows_uia.focused_element_info()
-            if not info or info["control_type"] not in (
-                "EditControl", "DocumentControl",
-            ):
-                return False
-            left, top, right, bottom = info["rect"]
-            return left <= xy[0] <= right and top <= xy[1] <= bottom
-        except Exception:
-            return False
-
-    def _save_dialog_visible(self) -> bool:
-        """True when a Windows Save/Save-As dialog is on screen.
-
-        Detected by its stable static labels (immune to the dynamic content OCR
-        struggles with). Used to confirm ctrl+s opened a dialog BEFORE typing the
-        path — so we never type a path into the document body of an already-named
-        file that ctrl+s saved silently.
-        """
-        # Accessibility tree first — exact control names straight from the
-        # dialog, immune to OCR misreading small labels on a downscaled
-        # screenshot (which made this check miss an open dialog entirely).
-        try:
-            from core import windows_uia
-            verdict = windows_uia.save_dialog_open()
-            if verdict is not None:
-                return verdict
-        except Exception:
-            pass
-        # OCR fallback — UIA unavailable or timed out.
-        try:
-            img = self.capturer.capture()
-            img.thumbnail(OCR_THUMB)
-            text = " ".join(
-                w.text for w in self._ocr.extract(img) if w.conf >= 0.6
-            ).lower()
-            return "file name" in text and ("save" in text or "cancel" in text)
-        except Exception:
-            return False
-
-    # Teams/Office left-rail views switch via ctrl+<digit>; the reliable,
-    # perception-independent proof the switch happened is the foreground WINDOW
-    # TITLE (Win32 GetWindowText, readable even when the UIA tree and OCR
-    # grounding are disabled). ctrl+3's own view is 'Teams', which collides
-    # with the app suffix 'Microsoft Teams', so only the title HEAD (text before
-    # '|') is matched.
-    _TEAMS_VIEW_BY_KEY = {
-        "1": "Activity", "2": "Chat", "3": "Teams",
-        "4": "Calendar", "5": "Calls",
-    }
-    _NAV_VIEW_WORDS = (
-        "calendar", "activity", "chat", "calls", "teams",
-        "files", "mail", "inbox",
-    )
-
-    def _view_switch_confirmed(self, step: ActionStep) -> bool:
-        """True when the foreground window title proves a left-rail/view switch
-        reached the view this step aimed for.
-
-        Applies to a view-switch hotkey (ctrl+<digit>) or a "click the X button
-        in the sidebar / switch to X view" step. The title head (text before
-        '|', e.g. 'Calendar | Microsoft Teams') must contain the target view
-        name. Deterministic and independent of OCR/UIA, so it works on the
-        VLM-only path where the title bar is otherwise invisible.
-        """
-        key = (step.key or "").lower()
-        low = (step.description or "").lower()
-        is_nav_hotkey = bool(re.fullmatch(r"ctrl\+\d", key))
-        is_nav_desc = any(
-            p in low for p in ("switch to", "sidebar", "left rail",
-                               "left-rail", "navigate to")
-        )
-        if not (is_nav_hotkey or is_nav_desc):
-            return False
-        # Candidate view names: the one the hotkey digit maps to, plus any view
-        # word attached to button/tab/view/icon in the description ("Calendar
-        # button", "Calendar view"). Requiring that attachment keeps app-context
-        # mentions ("with Microsoft Teams already open, …") from matching.
-        candidates: list[str] = []
-        if is_nav_hotkey:
-            v = self._TEAMS_VIEW_BY_KEY.get(key.split("+")[1])
-            if v:
-                candidates.append(v.lower())
-        for m in re.finditer(r"(\w+)\s+(?:button|tab|view|icon)", low):
-            if m.group(1) in self._NAV_VIEW_WORDS:
-                candidates.append(m.group(1))
-        if not candidates:
-            return False
-        try:
-            from core.capture.screen_snapshot import _get_foreground_hwnd_and_title
-            _, title = _get_foreground_hwnd_and_title()
-        except Exception:
-            return False
-        head = (title or "").split("|")[0].strip().lower()
-        if not head:
-            return False
-        return any(c in head for c in candidates)
 
     def _try_save_as(self, target: str, started_at: float) -> bool:
         """Deterministically perform Windows "Save As <target>" and verify on disk.
@@ -3297,7 +2186,7 @@ class TaskOrchestrator:
         typed_path = target.replace("/", "\\")
 
         # Already saved (e.g. an earlier step did it) — nothing to do.
-        if self._file_saved_fresh(target, started_at):
+        if groundtruth.file_saved_fresh(target, started_at):
             return True
 
         self.log(f"  [SAVE-AS] Saving deterministically to '{typed_path}'")
@@ -3305,18 +2194,18 @@ class TaskOrchestrator:
         # 1. Open the Save dialog from the editor — unless one is already open
         #    (a prior step may have left it up), in which case reopening it is at
         #    best a no-op and at worst dismisses it.
-        if not self._save_dialog_visible():
+        if not self.truth.save_dialog_visible():
             if not self._execute_step(
                 _step("hotkey", key="ctrl+s", desc="Open Save dialog")
             ):
                 return False
-            self._wait_for_settle(0.8, 3.0)
+            self.truth.wait_for_settle(0.8, 3.0)
 
         # 2. Confirm a dialog is actually open before typing — otherwise ctrl+s may
         #    have saved silently (already-named file) and typing would corrupt the
         #    document body.
-        if not self._save_dialog_visible():
-            if self._file_saved_fresh(target, started_at):
+        if not self.truth.save_dialog_visible():
+            if groundtruth.file_saved_fresh(target, started_at):
                 self.log(f"  [SAVE-AS] '{target}' saved (no dialog needed)")
                 return True
             self.log("  [SAVE-AS] Save dialog not detected — deferring to planning loop")
@@ -3333,8 +2222,8 @@ class TaskOrchestrator:
             time.sleep(0.3)
             _field_val = None
             try:
-                from core import windows_uia
-                _field_val = (windows_uia.focused_element_info() or {}).get("value")
+                from desktop import uia
+                _field_val = (uia.focused_element_info() or {}).get("value")
             except Exception:
                 pass
             if not _field_val:
@@ -3357,7 +2246,7 @@ class TaskOrchestrator:
         self._execute_step(_step("key_press", key="enter", desc="Confirm save"))
         for i in range(10):
             time.sleep(0.4)
-            if self._file_saved_fresh(target, started_at):
+            if groundtruth.file_saved_fresh(target, started_at):
                 self.log(f"  [SAVE-AS] '{target}' written to disk — confirmed")
                 return True
             if i == 2:
@@ -3382,7 +2271,7 @@ class TaskOrchestrator:
         when no handler is wired; MEDIUM commands are allowed but logged.
         """
         try:
-            from core.action_firewall import Decision, Severity, decide, evaluate
+            from core.firewall import Decision, Severity, decide, evaluate
         except Exception:
             return True  # never let a safety-module import error break execution
         verdict = evaluate(text)
@@ -3505,301 +2394,19 @@ class TaskOrchestrator:
     # OS-specific OCR signals that confirm an app opened successfully.
     # Keys are lowercase fragments of the subtask description.
 
-    # Maps description keyword → Windows process executable name.
-    # Used by _verify_launch on Windows for reliable process-based checking
-    # (immune to the OCR false-positive caused by the GUI agent's own window text).
-    _PROCESS_MAP_WINDOWS: dict = {
-        "windows terminal": "WindowsTerminal.exe",
-        "terminal":         "WindowsTerminal.exe",
-        "command prompt":   "cmd.exe",
-        "powershell":       "powershell.exe",
-        "notepad":          "notepad.exe",
-        "calculator":       "CalculatorApp.exe",
-        "paint":            "mspaint.exe",
-        "file explorer":    "explorer.exe",
-        "explorer":         "explorer.exe",
-        "edge":             "msedge.exe",
-        "firefox":          "firefox.exe",
-        "chrome":           "chrome.exe",
-        "brave":            "brave.exe",
-        "vs code":          "Code.exe",
-        "visual studio":    "devenv.exe",
-        "task manager":     "Taskmgr.exe",
-        "snipping tool":    "SnippingTool.exe",
-        "wordpad":          "wordpad.exe",
-        "settings":         "SystemSettings.exe",
-        "zoom":             "Zoom.exe",
-        "teams":            "ms-teams.exe",
-        "slack":            "slack.exe",
-        "skype":            "Skype.exe",
-        "thunderbird":      "thunderbird.exe",
-    }
 
-    _APP_SIGNALS: dict = {
-        "calculator":      ["Calculator", "Standard", "Scientific"],
-        "notepad":         ["Notepad", "Untitled", "File"],
-        "paint":           ["Paint", "Home", "Image"],
-        "command prompt":  ["cmd", "C:\\", "Microsoft"],
-        "powershell":      ["PowerShell", "PS", "Windows"],
-        "windows terminal": ["Windows Terminal", "Terminal", "PowerShell"],
-        "terminal":        ["Terminal", "PowerShell", "cmd"],
-        "file explorer":   ["File Explorer", "This PC", "Documents", "Quick access"],
-        "explorer":        ["File Explorer", "This PC", "Documents", "Quick access"],
-        "edge":            ["Microsoft Edge", "New Tab", "Search"],
-        "firefox":         ["Firefox", "Mozilla", "Search"],
-        "chrome":          ["Google Chrome", "New Tab", "Search"],
-        "vs code":         ["Explorer", "Extensions", "Welcome", "Visual Studio"],
-        "visual studio":   ["Explorer", "Extensions", "Welcome", "Visual Studio"],
-        "libreoffice":     ["Writer", "Calc", "Impress", "LibreOffice"],
-        "thunderbird":     ["Thunderbird", "Inbox", "Compose"],
-        "settings":        ["Settings", "System", "Bluetooth", "Windows Update"],
-        "task manager":    ["Task Manager", "Processes", "CPU"],
-        "snipping tool":   ["Snipping Tool", "New", "Mode"],
-        "wordpad":         ["WordPad", "Home", "Document"],
-        "zoom":            ["Zoom", "New Meeting", "Schedule", "Join"],
-        "teams":           ["Teams", "Chat", "Calendar", "Meet"],
-        "slack":           ["Slack", "Channels", "Direct messages"],
-    }
 
-    # Generic words that don't make useful OCR signals on their own
-    _GENERIC_NAME_WORDS = frozenset((
-        "the", "a", "an", "app", "application", "browser", "program", "tool",
-    ))
 
-    def _derive_launch_signals(self, description: str) -> list[str]:
-        """Fallback for apps absent from the curated _APP_SIGNALS table: derive OCR
-        signal words directly from the app name in "open <AppName>" — e.g.
-        "open Brave Browser" → ["Brave Browser", "Brave"]. This keeps launch
-        verification working for ANY installed app, not just well-known ones.
-        Preserves original casing (unlike `desc`) since OCR text is case-sensitive.
-        """
-        m = re.search(
-            r"\b(?:open|launch|start)\s+(?:the |a |an )?"
-            r"([A-Za-z0-9][\w+-]*(?:[ \t]+[A-Za-z0-9][\w+-]*)*?)"
-            r"(?:[ \t]+(?:using|via|by|with|and)\b|[.,!?]|$)",
-            description,
-        )
-        if not m:
-            return []
-        name = m.group(1).strip().rstrip(".")
-        words = [w for w in name.split()
-                 if len(w) >= 3 and w.lower() not in self._GENERIC_NAME_WORDS]
-        if not words:
-            return []
-        return [name] + words[:2]
 
-    # Processes that are effectively always running, so bare "is it running"
-    # checks are meaningless for confirming a launch (H9). For these we require a
-    # NEW visible top-level window owned by the process instead.
-    _ALWAYS_RUNNING_WINDOWS = frozenset({
-        "explorer.exe",   # the Windows shell itself
-    })
 
-    def _is_process_running(self, exe_name: str) -> bool:
-        """Check if a process with the given executable name is running (Windows only)."""
-        try:
-            out = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
-                capture_output=True, text=True, timeout=3,
-            ).stdout
-            return exe_name.lower() in out.lower()
-        except Exception:
-            return False
 
-    def _checkpoint_still_valid(self, resume_descs: list[str]) -> bool:
-        """Can a resume checkpoint's claimed effects still be on the machine?
 
-        Validates the one claim the OS can check deterministically: every
-        app-LAUNCH subtask in the checkpoint must still have a visible window.
-        An app closed between runs invalidates everything checkpointed after
-        its launch (the navigation/forms lived inside that window). Checkpoints
-        with no recognisable launch subtask are accepted as before — their
-        effects (files, settings) cannot be cheaply disproven.
-        """
-        for desc in resume_descs or []:
-            body = re.sub(r"^\s*with\b[^,]*,\s*", "", (desc or "").lower()).strip()
-            if not (body.startswith("open") or body.startswith("launch")):
-                continue
-            proc = next(
-                (exe for key, exe in self._PROCESS_MAP_WINDOWS.items()
-                 if key in body),
-                None,
-            )
-            if proc is None:
-                continue
-            try:
-                if self._count_process_windows(proc) < 1:
-                    return False
-            except Exception:
-                # Can't check — don't invalidate on infrastructure failure.
-                continue
-        return True
 
-    def _count_process_windows(self, exe_name: str) -> int:
-        """Count visible, non-trivial top-level windows owned by `exe_name`.
 
-        Used both for launch confirmation (H9: explorer.exe is always running,
-        so only a window proves anything) and for new-window verification when
-        the app was already running before the launch subtask started (focusing
-        the pre-existing window keeps the count flat; a real launch raises it).
-        """
-        try:
-            import ctypes
-            import ctypes.wintypes
-            user32 = ctypes.windll.user32
-            target = exe_name.lower()
-            count = [0]
 
-            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
-            def _cb(hwnd, _):
-                if not user32.IsWindowVisible(hwnd):
-                    return True
-                rect = ctypes.wintypes.RECT()
-                user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                if (rect.right - rect.left) < 200 or (rect.bottom - rect.top) < 120:
-                    return True  # skip tray/tooltip/zero-size windows
-                pid = ctypes.wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                h_proc = ctypes.windll.kernel32.OpenProcess(0x0410, False, pid.value)
-                if not h_proc:
-                    return True
-                buf = ctypes.create_unicode_buffer(260)
-                try:
-                    ctypes.windll.psapi.GetModuleFileNameExW(h_proc, None, buf, 260)
-                except Exception:
-                    try:
-                        ctypes.windll.kernel32.GetModuleFileNameExW(h_proc, None, buf, 260)
-                    except Exception:
-                        buf.value = ""
-                ctypes.windll.kernel32.CloseHandle(h_proc)
-                import os as _os
-                if buf.value and _os.path.basename(buf.value).lower() == target:
-                    count[0] += 1
-                return True
-
-            user32.EnumWindows(_cb, 0)
-            return count[0]
-        except Exception:
-            return 0
-
-    def _process_has_visible_window(self, exe_name: str) -> bool:
-        """True if `exe_name` owns at least one visible, non-trivial top-level window."""
-        return self._count_process_windows(exe_name) > 0
-
-    def _launch_confirmed(self, exe_name: str) -> bool:
-        """Confirm an app launched. Uses window presence for always-running
-        processes (H9), bare process existence otherwise.
-        """
-        if exe_name.lower() in self._ALWAYS_RUNNING_WINDOWS:
-            return self._process_has_visible_window(exe_name)
-        # For normal apps, a running process is a strong signal, but prefer a
-        # visible window when we can confirm one (avoids the background-process
-        # false positive). Fall back to process existence if window enumeration
-        # found nothing (some apps draw via non-standard windows).
-        if self._process_has_visible_window(exe_name):
-            return True
-        return self._is_process_running(exe_name)
-
-    def _verify_launch(self, subtask) -> bool:
-        desc = subtask.description.lower()
-        if "already open" in desc or "already running" in desc:
-            return True
-        # Only run verification for genuine app-launch subtasks.
-        # The old bare "open" substring match triggered on phrases like
-        # "right click on the desktop to open the context menu" — a false positive
-        # that caused the agent to retry with a Start-menu search.
-        # New rule: require "launch"/"search launcher" explicitly, OR "open" paired
-        # with a known-app keyword from the curated signal tables.
-        _app_vocab = set(self._PROCESS_MAP_WINDOWS) | set(self._APP_SIGNALS)
-        _is_app_launch = (
-            any(w in desc for w in ("launch", "search launcher"))
-            or ("open" in desc and any(k in desc for k in _app_vocab))
-        )
-        if not _is_app_launch:
-            return True
-
-        # Use process-based check (immune to GUI-text false positives)
-        matched_proc = next(
-            (self._PROCESS_MAP_WINDOWS[k] for k in self._PROCESS_MAP_WINDOWS if k in desc),
-            None,
-        )
-        if matched_proc:
-            label = matched_proc.split(".")[0]
-            baseline = self._launch_window_baseline.get(matched_proc)
-            for attempt, wait_s in enumerate([1.5, 2.5]):
-                time.sleep(wait_s)
-                if baseline is not None:
-                    # App pre-existed this subtask: a bare process check is
-                    # vacuous and focusing the old window must NOT pass —
-                    # only a NEW window proves the launch.
-                    if self._count_process_windows(matched_proc) > baseline:
-                        self.log(f"  [CHECK] '{label}' NEW window confirmed")
-                        return True
-                elif self._launch_confirmed(matched_proc):
-                    self.log(f"  [CHECK] '{label}' process confirmed running")
-                    return True
-                if attempt == 0:
-                    self.log(f"  [CHECK] '{label}' not yet confirmed — retrying in 2.5s")
-            self.log(f"  [CHECK] Launch of '{matched_proc}' not confirmed")
-            return False
-
-        # Fallback: OCR-based signal check (apps not in the curated process map)
-        matched_key = next(
-            (k for k in self._APP_SIGNALS if k in desc), None
-        )
-        signals = (
-            self._APP_SIGNALS[matched_key] if matched_key
-            else self._derive_launch_signals(subtask.description)
-        )
-        if not signals:
-            return True
-        label = matched_key or signals[0]
-
-        for attempt, wait_s in enumerate([1.5, 2.5]):
-            time.sleep(wait_s)
-            try:
-                # Filter to foreground regions to exclude GUI agent window text.
-                snapshot = capture_snapshot(self.capturer, self._ocr)
-                ocr_words = {r.text for r in snapshot.ocr_regions if r.is_in_foreground}
-                all_ocr_text = " ".join(ocr_words)
-                if any(sig in all_ocr_text for sig in signals):
-                    self.log(f"  [CHECK] '{label}' confirmed on screen")
-                    return True
-                if attempt == 0:
-                    self.log(f"  [CHECK] '{label}' not yet visible — retrying in 2.5s")
-            except Exception as e:
-                logger.warning(f"[ORCHESTRATOR] Launch check error: {e}")
-                return True
-
-        self.log(f"  [CHECK] Expected '{label}' on screen but not found")
-        return False
 
     # ── Adaptive inter-subtask wait ───────────────────────────────────────────
 
-    def _wait_for_settle(self, min_s: float = 0.5, max_s: float = 3.0, poll_interval: float = 0.25):
-        """Wait until the screen stops changing (transitions complete) or max_s elapses.
-        Polls OCR text every poll_interval seconds; if two consecutive reads are identical
-        the screen has settled and we return early. Never returns in less than min_s.
-        On any error falls back to sleeping max_s.
-        """
-        import imagehash as _ih
-        try:
-            time.sleep(min_s)
-            deadline = time.time() + (max_s - min_s)
-            prev_hash = None
-            while time.time() < deadline:
-                img = self.capturer.capture()
-                img.thumbnail((320, 180))
-                cur_hash = str(_ih.phash(img))
-                if prev_hash is not None and cur_hash == prev_hash:
-                    self.log("  [SETTLE] Screen stable — proceeding")
-                    return
-                prev_hash = cur_hash
-                time.sleep(poll_interval)
-            self.log(f"  [SETTLE] Max wait {max_s:.1f}s reached — proceeding anyway")
-        except Exception as e:
-            logger.debug(f"[SETTLE] Error: {e} — falling back to fixed wait")
-            time.sleep(max_s)
 
     # ── Screen context ─────────────────────────────────────────────────────────
 
@@ -3811,7 +2418,7 @@ class TaskOrchestrator:
         Falls back to a flat token list if snapshot capture fails.
         """
         try:
-            self._refresh_own_window_mask()
+            self.mask.refresh()
             snapshot = capture_snapshot(self.capturer, self._ocr)
             return snapshot.format_for_planner()
         except Exception:
@@ -3837,25 +2444,3 @@ class TaskOrchestrator:
 
     # ── Topological sort ──────────────────────────────────────────────────────
 
-    def _topological_sort(self, subtasks: list[SubTask]) -> list[SubTask]:
-        by_id = {s.id: s for s in subtasks}
-        in_degree = {s.id: len(s.depends_on) for s in subtasks}
-        dependents = {s.id: [] for s in subtasks}
-        for s in subtasks:
-            for dep_id in s.depends_on:
-                if dep_id in dependents:
-                    dependents[dep_id].append(s.id)
-
-        order, queue = [], [s for s in subtasks if not s.depends_on]
-        while queue:
-            current = queue.pop(0)
-            order.append(current)
-            for dep_id in dependents.get(current.id, []):
-                in_degree[dep_id] -= 1
-                if in_degree[dep_id] == 0:
-                    queue.append(by_id[dep_id])
-
-        if len(order) != len(subtasks):
-            logger.warning("[ORCHESTRATOR] Dependency cycle — falling back to ID order")
-            return sorted(subtasks, key=lambda s: s.id)
-        return order

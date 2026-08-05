@@ -1,4 +1,4 @@
-# core/action_firewall.py
+# core/firewall.py
 """Action firewall — a deterministic guard that inspects text the agent is about to
 type (and certain key actions) for destructive or dangerous operations BEFORE
 they are executed.

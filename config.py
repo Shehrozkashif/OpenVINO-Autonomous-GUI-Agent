@@ -101,13 +101,3 @@ VLM_COORD_SPACE = "pixels"   # "auto" | "norm1000" | "pixels"
 # which is more robust on the few WebView2 buttons that swallow synthesized pixel
 # clicks. Env AGENT_FORCE_MOUSE=1/0 overrides this per-run.
 FORCE_MOUSE = True
-
-# Second-pass "zoom" refinement for VLM grounding (ScreenSpot-Pro technique):
-# crop a window around the coarse estimate at full resolution and re-ask the VLM.
-# DISABLED by default: live testing showed it makes THIS model WORSE, because
-# UI-TARS-1.5-int8's grounding bias is FRAME-RELATIVE (it anchors near the top of
-# whatever image it sees), so cropping just re-anchors "too high" onto the crop
-# (Chat 3px→30px, Calendar 153px→287px). The code is kept behind this flag for
-# future models/content where zoom-in grounding does help. Coordinate accuracy on
-# distinct targets comes from the pixel transform above, not from zoom.
-VLM_ZOOM_REFINE = False

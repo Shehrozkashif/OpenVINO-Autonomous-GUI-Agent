@@ -1,0 +1,53 @@
+name: CI
+
+# The unit suite is deliberately runnable without Windows, a GPU or a model
+# server: policy lives in core/, Windows facts live in desktop/ and are mocked.
+# That is what lets this run on ubuntu-latest in under a minute.
+
+on:
+  push:
+    branches: [main, windows-only-refactor]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint + unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]   # floor and recommended, per README
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # PyQt6 is left out on purpose. The GUI is a Windows-only desktop app
+          # and is exercised on the Windows machine; installing Qt here would
+          # add a display-server dependency to every run for 15 widget tests,
+          # which test_ui.py already skips cleanly via pytest.importorskip.
+          # Everything that decides what the agent DOES is covered below.
+          grep -v '^PyQt6' requirements.txt > requirements-ci.txt
+          pip install -r requirements-ci.txt -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit tests
+        run: pytest tests/unit -rs

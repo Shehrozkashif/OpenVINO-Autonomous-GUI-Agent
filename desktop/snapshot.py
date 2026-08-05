@@ -1,4 +1,4 @@
-# core/capture/screen_snapshot.py
+# desktop/snapshot.py
 """ScreenSnapshot — structured world model for the current display state.
 
 Captures foreground window identity and assigns each OCR word to its
@@ -181,9 +181,9 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
     4. Assign each OCR word to the topmost containing window rect.
     5. Mark each region is_in_foreground based on window ownership.
     """
-    # Avoid importing at module level to prevent circular imports.
-    # OCREngine lives in agents.grounding; screen_snapshot lives in core.capture.
-    from agents.grounding import OCRWord  # noqa: PLC0415
+    # Imported here, not at module level: desktop.ocr imports this module's
+    # sibling helpers, and a top-level import would close the cycle.
+    from desktop.ocr import OCRWord  # noqa: PLC0415
 
     ts = time.time()
 
@@ -194,12 +194,12 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
     interactive: list = []
     if _IS_WINDOWS:
         try:
-            from core.windows_uia import get_interactive_elements  # noqa: PLC0415
+            from desktop.uia import get_interactive_elements  # noqa: PLC0415
             interactive = get_interactive_elements()
         except Exception:
             interactive = []
 
-    from core.capture.screenshot import OCR_THUMB
+    from desktop.capture import OCR_THUMB
 
     img = capturer.capture()
     thumb = img.copy()

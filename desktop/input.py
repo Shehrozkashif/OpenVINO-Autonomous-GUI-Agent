@@ -1,4 +1,4 @@
-# core/controller.py
+# desktop/input.py
 """Windows desktop controller — raw Win32 SendInput, no third-party input library.
 
 Mouse/keyboard events are injected via ctypes bindings to user32.SendInput
@@ -288,7 +288,8 @@ def _resolve_key(name: str):
 def _send_key_name(name: str) -> bool:
     """Press and release a named key (e.g. "enter", "f5", "a"), shift-holding if needed.
     Returns False for unknown key names so the step fails honestly instead of
-    reporting a success for a key press that never happened."""
+    reporting a success for a key press that never happened.
+    """
     resolved = _resolve_key(name)
     if resolved is None:
         logger.warning(f"[Controller] Unknown key '{name}' — skipping")
@@ -428,7 +429,7 @@ class DesktopController:
         # NEVER log secret values. Redact to a fixed mask of constant length.
         _shown = "***" if sensitive else f"'{text[:40]}'"
         if use_clipboard:
-            from utils.clipboard import paste_type
+            from desktop.clipboard import paste_type
             if paste_type(text, _send_hotkey, sensitive=sensitive):
                 logger.info(f"[ACTION] type (clipboard) {_shown}")
                 return True
@@ -464,24 +465,6 @@ class DesktopController:
         dy = clicks if direction == "up" else -clicks
         _mouse_event(_MOUSEEVENTF_WHEEL, data=dy * 120)
         logger.info(f"[ACTION] scroll {direction} {clicks}× @ ({x},{y})")
-        return True
-
-    def drag(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.4) -> bool:
-        """Click-and-drag from (x1,y1) to (x2,y2). Used for text selection and drag-drop."""
-        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-        _glide_cursor(x1, y1)
-        time.sleep(0.1)
-        _mouse_event(_MOUSEEVENTF_LEFTDOWN)
-        time.sleep(0.05)
-        steps = max(10, int(duration / 0.02))
-        for i in range(1, steps + 1):
-            px = x1 + (x2 - x1) * i / steps
-            py = y1 + (y2 - y1) * i / steps
-            _set_cursor_pos(int(px), int(py))
-            time.sleep(duration / steps)
-        _mouse_event(_MOUSEEVENTF_LEFTUP)
-        time.sleep(0.1)
-        logger.info(f"[ACTION] drag ({x1},{y1}) → ({x2},{y2})")
         return True
 
     def release_all_modifiers(self) -> None:

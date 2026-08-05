@@ -28,7 +28,7 @@ pip install -r requirements.txt       # runtime
 pip install -r requirements-dev.txt   # pytest + ruff (to run the test suite)
 ```
 
-### 4. Prepare the models (only needed for live/e2e testing)
+### 4. Prepare the models (only needed for live testing and real runs)
 
 Model ids live in `config.py` — the single source of truth. `start.py` pulls the
 LLM and converts UI-TARS into the OpenVINO Model Server repository, then launches
@@ -49,13 +49,18 @@ python start.py                              # prepares models + starts OVMS + U
 ### 5. Run tests
 
 ```bash
-pytest                              # unit tests — fast, no backend or desktop required
-python tests/e2e/test_pipeline.py   # end-to-end — requires OVMS running + a live desktop
+pytest                                 # 453 unit tests — no backend or desktop needed
+python tests/live/test_usecases.py     # real desktop — requires OVMS + Windows
 ```
 
 The unit suite (`tests/unit/`) must pass on a machine with no model server and
-no GPU; anything that needs a live backend belongs in `tests/e2e/` or
-`tests/live/` instead.
+no GPU; anything that needs a live backend belongs in `tests/live/` instead.
+
+Build test doubles from `tests/unit/conftest.py` (`make_grounder`,
+`make_reflector`, `make_llm`, `make_memory`) rather than bare `MagicMock`s. A
+raw mock returns a mock from `min_confidence`, and comparing that to a float
+raises inside the orchestrator — a failure that looks like a real bug but is
+only a badly built double.
 
 ---
 
@@ -69,7 +74,7 @@ no GPU; anything that needs a live backend belongs in `tests/e2e/` or
   (`list`/`dict`/`tuple` over `typing.List`/`Dict`/`Tuple`, and `X | None` over
   `Optional[X]`).
 - Agent constructors must accept `InferenceClient` (the Protocol in
-  `core/protocols.py`), not a concrete client class.
+  `core/inference.py`), not a concrete client class.
 - Heavy or optional dependencies may be imported lazily inside functions
   (e.g. `sentence_transformers`, `ctypes` Windows calls) — everything else is
   imported at module top.
@@ -82,18 +87,26 @@ no GPU; anything that needs a live backend belongs in `tests/e2e/` or
 
 | Rule | Reason |
 |------|--------|
-| All OS input goes through `core/controller.py` | Single place for keyboard/mouse injection (raw Win32 SendInput via ctypes) and the kill switch |
+| Dependencies point one way: `ui → core → agents → desktop` | Each layer stays testable and replaceable on its own |
+| `desktop/` reports facts and never decides | Policy built on those facts lives in `core/` and is unit-testable without Windows |
+| New "did it work?" checks belong in `core/groundtruth.py`, not inline in the loop | Ground truth beats model judgment — keeping the checks together is what makes that principle enforceable |
+| All OS input goes through `desktop/input.py` | Single place for keyboard/mouse injection (raw Win32 SendInput via ctypes) and the kill switch |
 | Grounding coordinates are always physical screen pixels | Capture returns physical pixels; the controller expects physical pixels |
 | Agents depend on the `InferenceClient` Protocol, never on `OVMSClient` directly | Keeps the inference backend (OVMS today, anything else tomorrow) drop-in replaceable |
-| `type` steps must pass the action firewall (`core/action_firewall.py`) | Deterministic protection against destructive shell commands |
-| Tasks completed via degraded paths must not be stored in success memory | Broken plans would otherwise poison future routing hints |
+| `type` steps must pass the action firewall (`core/firewall.py`) | Deterministic protection against destructive shell commands |
+| Every prompt lives in `agents/prompts.py` | The prompt is behaviour; keeping them together makes behaviour reviewable |
+| Orchestrator log strings are an interface — `ui/events.py` parses them | Changing a log format silently changes the mission timeline |
+| New budgets/limits go in `core/runstate.py` | Nothing may loop unbounded, and every bound must be findable in one place |
+| Nothing in the loop may read `core/history.py` back | The agent must decide from the live screen. Feeding past runs into planning changes behaviour based on state the user cannot see — it once replaced a correct decomposition with a stale plan |
 
 ---
 
 ## Submitting Changes
 
-1. Ensure `pytest` passes and `ruff check .` is clean.
-2. Update docstrings and `README.md` if you change any public API or workflow.
+1. Ensure `pytest` passes and `ruff check .` is clean (CI runs both on every
+   push — see `.github/workflows/ci.yml`).
+2. Update docstrings, `README.md` and `ARCHITECTURE.md` if you change any
+   public API, module layout or workflow.
 3. Open a pull request against `main` with a clear description of what changed
    and why.
 

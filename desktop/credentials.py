@@ -1,4 +1,4 @@
-# utils/credentials.py
+# desktop/credentials.py
 """Credential manager — stores username/password pairs keyed by site/app name.
 
 Storage backends (in preference order):

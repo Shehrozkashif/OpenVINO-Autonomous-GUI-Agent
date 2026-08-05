@@ -9,6 +9,7 @@ Organised by concern (each section was originally its own file):
   3. Visual planning recovery path and the planner parse-error fix
 """
 import sys
+import time
 
 sys.path.insert(0, ".")
 
@@ -18,8 +19,11 @@ import pytest
 
 from agents.planning import PlanningAgent, PlanningParseError, _parse_visual_action
 from agents.reflection import ReflectionResult
-from core.orchestrator import OrchestratorConfig, TaskOrchestrator
-from core.protocols import ActionStep, SubTask
+from core import subtasks
+from core.orchestrator import TaskOrchestrator
+from core.runstate import OrchestratorConfig, SubtaskRun
+from core.types import ActionStep, SubTask
+from tests.unit.conftest import make_history
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. Planning prompt safety — "when in doubt, stop" bias and LOOP PREVENTION rule
@@ -162,11 +166,11 @@ class TestLoopPrevention:
         msg = _user_msg(client)
         assert "loop prevention" in msg.lower()
 
-    def test_loop_prevention_present_with_failure_hints(self):
+    def test_loop_prevention_present_with_step_history(self):
         agent, client = _make_agent()
         agent.plan_next_step(
             _subtask(),
-            failure_hints=["clicking 'New' dismissed the submenu"],
+            completed=["clicked 'New'"],
         )
         msg = _user_msg(client)
         assert "loop prevention" in msg.lower()
@@ -259,21 +263,14 @@ class TestRightClickOverride:
         assert step is not None
         assert step.action_type == "right_click"
 
-    def test_right_click_startswith_overrides_click(self):
-        """Subtask starting with 'right click' (no 'on') is overridden."""
-        step = _planner("click").plan_next_step(_sub("right click the taskbar icon"))
-        assert step is not None
-        assert step.action_type == "right_click"
-
-    def test_right_click_hyphenated_on_overrides_click(self):
-        """'right-click on X' with hyphen is overridden."""
-        step = _planner("click").plan_next_step(_sub("right-click on the selected file"))
-        assert step is not None
-        assert step.action_type == "right_click"
-
-    def test_right_click_hyphenated_startswith_overrides_click(self):
-        """Subtask starting with 'right-click' (hyphen, no 'on') is overridden."""
-        step = _planner("click").plan_next_step(_sub("right-click the desktop"))
+    @pytest.mark.parametrize("description", [
+        "right click the taskbar icon",       # no "on"
+        "right-click on the selected file",   # hyphenated
+        "right-click the desktop",            # hyphenated, no "on"
+    ])
+    def test_right_click_phrasings_override_click(self, description):
+        """Every way a user writes "right click" must beat the LLM's "click"."""
+        step = _planner("click").plan_next_step(_sub(description))
         assert step is not None
         assert step.action_type == "right_click"
 
@@ -495,13 +492,11 @@ def _make_orch(plan_steps, reflections, visual_replan_after=2):
     planner = MagicMock()
     planner.plan_steps = MagicMock(side_effect=[[s] for s in plan_steps] + [None] * 10)
 
-    memory = MagicMock()
-    memory.get_failure_hints = MagicMock(return_value=[])
-    memory.store_failure_pattern = MagicMock()
+    history = make_history()
 
     orch = TaskOrchestrator(
         router=MagicMock(), planner=planner, grounder=grounder, actor=actor,
-        reflector=reflector, capturer=MagicMock(), task_memory=memory,
+        reflector=reflector, capturer=MagicMock(), history=history,
         config=OrchestratorConfig(
             max_retries_per_step=1, max_steps_per_subtask=10,
             consecutive_failures_limit=5,
@@ -564,18 +559,27 @@ class TestVisualReplanEscalation:
         orch._plan_visual.assert_not_called()
 
     def test_vlm_infrastructure_error_falls_back_to_text_planner(self):
-        """A VLM error during visual replan degrades to the text planner."""
+        """A VLM error during visual replan degrades to the text planner.
+
+        A model-swap timeout is infrastructure, not a planning verdict: the
+        cycle must still produce an action from the text path instead of
+        propagating the error and killing the subtask.
+        """
+        step_c = _click_step("C")
         orch = _make_orch(
-            plan_steps=[_click_step("A"), _click_step("B"), _click_step("C")],
-            reflections=[_FAIL, _FAIL, _SUCCESS],
+            plan_steps=[step_c],
+            reflections=[_SUCCESS],
         )
         orch._plan_visual = MagicMock(side_effect=RuntimeError("model swap timeout"))
 
-        result = orch._execute_subtask(SubTask(id=1, description="do thing", depends_on=[]))
+        run = SubtaskRun(started_at=time.time())
+        run.consecutive_failures = 2          # at the visual-escalation threshold
+        outcome, step = orch._plan_next_step(
+            run, SubTask(id=1, description="do thing", depends_on=[]), [])
 
-        assert result is True
-        # Text planner was used for the step after the VLM error
-        assert orch.planner.plan_steps.call_count >= 3
+        orch._plan_visual.assert_called_once()
+        assert outcome == "step", "the text planner must still supply an action"
+        assert step.target == step_c.target
 
 
 class TestPlannerParseErrorInOrchestrator:
@@ -596,14 +600,14 @@ class TestPlannerParseErrorInOrchestrator:
 class TestExplicitCoordParsing:
 
     def test_valid_coords(self):
-        assert TaskOrchestrator._explicit_coords("123,456") == (123, 456)
+        assert subtasks.explicit_coords("123,456") == (123, 456)
 
     def test_coords_with_spaces(self):
-        assert TaskOrchestrator._explicit_coords(" 12 , 34 ") == (12, 34)
+        assert subtasks.explicit_coords(" 12 , 34 ") == (12, 34)
 
     def test_text_value_is_not_coords(self):
-        assert TaskOrchestrator._explicit_coords("hello,world") is None
+        assert subtasks.explicit_coords("hello,world") is None
 
     def test_none_and_plain_text(self):
-        assert TaskOrchestrator._explicit_coords(None) is None
-        assert TaskOrchestrator._explicit_coords("down") is None
+        assert subtasks.explicit_coords(None) is None
+        assert subtasks.explicit_coords("down") is None

@@ -20,12 +20,10 @@ import pytest
 
 from agents.action import ActionExecutionAgent
 from agents.planning import PlanningAgent
-from core.orchestrator import (
-    DEDUP_LIMIT_BY_ACTION_TYPE,
-    OrchestratorConfig,
-    TaskOrchestrator,
-)
-from core.protocols import ActionStep, SubTask
+from core.orchestrator import TaskOrchestrator
+from core.runstate import DEDUP_LIMIT_BY_ACTION_TYPE, OrchestratorConfig
+from core.types import ActionStep, SubTask
+from tests.unit.conftest import make_grounder, make_history, make_reflector
 
 
 def _step(action_type, target=None, value=None, key=None):
@@ -46,30 +44,30 @@ class TestActionAgentDispatch:
         return ActionExecutionAgent(controller=MagicMock())
 
     def test_set_value_routes_to_uia(self):
-        with patch("core.windows_uia.set_element_value", return_value=True) as sv:
+        with patch("desktop.uia.set_element_value", return_value=True) as sv:
             ok = self._agent().execute(_step("set_value", target="Topic", value="Weekly Sync"))
         assert ok is True
         sv.assert_called_once_with("Topic", "Weekly Sync")
 
     def test_select_routes_to_uia(self):
-        with patch("core.windows_uia.select_option", return_value=True) as so:
+        with patch("desktop.uia.select_option", return_value=True) as so:
             ok = self._agent().execute(_step("select", target="Start time", value="3:00 PM"))
         assert ok is True
         so.assert_called_once_with("Start time", "3:00 PM")
 
     def test_invoke_routes_to_uia(self):
-        with patch("core.windows_uia.invoke_element", return_value=True) as inv:
+        with patch("desktop.uia.invoke_element", return_value=True) as inv:
             ok = self._agent().execute(_step("invoke", target="Save"))
         assert ok is True
         inv.assert_called_once_with("Save")
 
     def test_uia_miss_returns_false_for_planner_fallback(self):
-        with patch("core.windows_uia.select_option", return_value=False):
+        with patch("desktop.uia.select_option", return_value=False):
             ok = self._agent().execute(_step("select", target="Nope", value="X"))
         assert ok is False
 
     def test_missing_fields_fail_without_calling_uia(self):
-        with patch("core.windows_uia.set_element_value") as sv:
+        with patch("desktop.uia.set_element_value") as sv:
             assert self._agent().execute(_step("set_value", target="Topic")) is False
             assert self._agent().execute(_step("set_value", value="text")) is False
             assert self._agent().execute(_step("select", target="Time")) is False
@@ -77,9 +75,9 @@ class TestActionAgentDispatch:
         sv.assert_not_called()
 
     def test_set_value_substitutes_credentials(self):
-        with patch("core.windows_uia.set_element_value", return_value=True) as sv, \
-             patch("utils.credentials.has_tokens", return_value=True), \
-             patch("utils.credentials.substitute", return_value="realsecret"):
+        with patch("desktop.uia.set_element_value", return_value=True) as sv, \
+             patch("desktop.credentials.has_tokens", return_value=True), \
+             patch("desktop.credentials.substitute", return_value="realsecret"):
             ok = self._agent().execute(
                 _step("set_value", target="Password", value="{{cred:zoom:password}}")
             )
@@ -137,13 +135,15 @@ class TestPlannerParsesStructuredActions:
 
 def _orch():
     orch = TaskOrchestrator(
-        router=MagicMock(), planner=MagicMock(), grounder=MagicMock(),
-        actor=MagicMock(), reflector=MagicMock(), capturer=MagicMock(),
-        task_memory=MagicMock(),
+        router=MagicMock(),
+        planner=MagicMock(plan_next_step_visual=MagicMock(return_value=None)),
+        grounder=make_grounder(),
+        actor=MagicMock(), reflector=make_reflector(), capturer=MagicMock(),
+        history=make_history(),
         config=OrchestratorConfig(max_steps_per_subtask=3),
         on_step_log=lambda _: None, ocr=MagicMock(),
     )
-    orch._wait_for_settle = MagicMock()
+    orch.truth.wait_for_settle = MagicMock()
     return orch
 
 
@@ -186,14 +186,14 @@ class TestOrchestratorPolicy:
 class TestUiaHelpers:
 
     def test_norm_text_collapses_whitespace_and_case(self):
-        from core.windows_uia import _norm_text
+        from desktop.uia import _norm_text
         assert _norm_text("  Weekly   Sync ") == "weekly sync"
         assert _norm_text(None) == ""
 
     def test_actions_are_safe_noops_without_uiautomation(self):
         # On machines without the uiautomation package (e.g. Linux CI) the
         # actions must return False, never raise.
-        import core.windows_uia as wu
+        import desktop.uia as wu
         with patch.object(wu, "_available", False), patch.object(wu, "_load", return_value=False):
             assert wu.set_element_value("Topic", "x") is False
             assert wu.select_option("Time", "3:00 PM") is False
@@ -210,42 +210,39 @@ class TestAppAnchor:
 
     def test_launch_subtask_sets_anchor_from_foreground(self):
         orch = _orch()
-        orch._foreground_app = lambda: (1234, 42, "olk.exe")
-        orch._maybe_set_app_anchor("open Outlook")
-        assert orch._app_anchor == (1234, 42, "olk.exe")
+        with patch("desktop.system.foreground_app", return_value=(1234, 42, "olk.exe")):
+            orch.anchor.adopt_foreground("open Outlook")
+        assert orch.anchor.window == (1234, 42, "olk.exe")
 
     def test_launch_verbs_all_anchor(self):
         for verb in ("open", "launch", "start", "Open", "Launch"):
             orch = _orch()
-            orch._foreground_app = lambda: (1, 2, "app.exe")
-            orch._maybe_set_app_anchor(f"{verb} SomeApp")
-            assert orch._app_anchor == (1, 2, "app.exe"), verb
+            with patch("desktop.system.foreground_app", return_value=(1, 2, "app.exe")):
+                orch.anchor.adopt_foreground(f"{verb} SomeApp")
+            assert orch.anchor.window == (1, 2, "app.exe"), verb
 
     def test_non_launch_subtask_does_not_anchor(self):
         orch = _orch()
-        orch._app_anchor = None
-        orch._foreground_app = lambda: (1234, 42, "olk.exe")
-        orch._maybe_set_app_anchor("with Outlook already open, click New Appointment")
-        assert orch._app_anchor is None
+        with patch("desktop.system.foreground_app", return_value=(1234, 42, "olk.exe")):
+            orch.anchor.adopt_foreground("with Outlook already open, click New Appointment")
+        assert orch.anchor.window is None
 
     def test_already_running_phrase_does_not_anchor(self):
         orch = _orch()
-        orch._app_anchor = None
-        orch._foreground_app = lambda: (1234, 42, "olk.exe")
-        orch._maybe_set_app_anchor("open Outlook which is already running")
-        assert orch._app_anchor is None
+        with patch("desktop.system.foreground_app", return_value=(1234, 42, "olk.exe")):
+            orch.anchor.adopt_foreground("open Outlook which is already running")
+        assert orch.anchor.window is None
 
     def test_own_window_never_anchors(self):
         orch = _orch()
-        orch._app_anchor = None
-        orch._own_hwnd = 777
-        orch._foreground_app = lambda: (777, 42, "python.exe")
-        orch._maybe_set_app_anchor("open Notepad")
-        assert orch._app_anchor is None
+        orch.mask.hwnd = 777          # the agent's own window
+        with patch("desktop.system.foreground_app", return_value=(777, 42, "python.exe")):
+            orch.anchor.adopt_foreground("open Notepad")
+        assert orch.anchor.window is None
 
     def test_refocus_without_anchor_is_noop(self):
         orch = _orch()
-        orch._ensure_anchor_foreground()   # must not raise off-Windows
+        orch.anchor.ensure_foreground()   # must not raise off-Windows
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -260,7 +257,7 @@ class TestAppAnchor:
 
 from types import SimpleNamespace
 
-import core.windows_uia as wu
+import desktop.uia as wu
 
 
 class _FakePatternId:
@@ -356,9 +353,9 @@ class TestSetValueKeyboardFallback:
         return agent
 
     def _run(self, agent, focused_value="Tue 7/7/2026"):
-        with patch("core.windows_uia.set_element_value", return_value=False), \
-             patch("core.windows_uia.focus_element", return_value=True) as fe, \
-             patch("core.windows_uia.focused_element_info",
+        with patch("desktop.uia.set_element_value", return_value=False), \
+             patch("desktop.uia.focus_element", return_value=True) as fe, \
+             patch("desktop.uia.focused_element_info",
                    return_value={"value": focused_value}), \
              patch("agents.action.time.sleep"):
             ok = agent.execute(_step("set_value", target="Start date",
@@ -387,8 +384,8 @@ class TestSetValueKeyboardFallback:
 
     def test_focus_failure_skips_typing(self):
         agent = self._agent()
-        with patch("core.windows_uia.set_element_value", return_value=False), \
-             patch("core.windows_uia.focus_element", return_value=False):
+        with patch("desktop.uia.set_element_value", return_value=False), \
+             patch("desktop.uia.focus_element", return_value=False):
             ok = agent.execute(_step("set_value", target="Start date",
                                      value="7/7/2026"))
         assert ok is False
@@ -396,8 +393,8 @@ class TestSetValueKeyboardFallback:
 
     def test_value_pattern_success_skips_fallback(self):
         agent = self._agent()
-        with patch("core.windows_uia.set_element_value", return_value=True), \
-             patch("core.windows_uia.focus_element") as fe:
+        with patch("desktop.uia.set_element_value", return_value=True), \
+             patch("desktop.uia.focus_element") as fe:
             ok = agent.execute(_step("set_value", target="Add title",
                                      value="project progress"))
         assert ok is True
@@ -419,7 +416,7 @@ class TestTypeFocusesNamedTarget:
         return ActionExecutionAgent(controller)
 
     def _step(self, target):
-        from core.protocols import ActionStep
+        from core.types import ActionStep
         return ActionStep(id=1, subtask_id=1, action_type="type",
                           target=target, value="a@b.com", key=None,
                           description="type email", verification="")
@@ -427,7 +424,7 @@ class TestTypeFocusesNamedTarget:
     def test_type_with_target_focuses_via_tree(self):
         from unittest import mock
         agent = self._agent()
-        with mock.patch("core.windows_uia.focus_element",
+        with mock.patch("desktop.uia.focus_element",
                         return_value=True) as f:
             assert agent.execute(self._step("Add required attendees")) is True
         f.assert_called_once_with("Add required attendees")
@@ -435,14 +432,14 @@ class TestTypeFocusesNamedTarget:
     def test_type_without_target_skips_focus(self):
         from unittest import mock
         agent = self._agent()
-        with mock.patch("core.windows_uia.focus_element") as f:
+        with mock.patch("desktop.uia.focus_element") as f:
             assert agent.execute(self._step(None)) is True
         f.assert_not_called()
 
     def test_focus_failure_still_types(self):
         from unittest import mock
         agent = self._agent()
-        with mock.patch("core.windows_uia.focus_element", return_value=False):
+        with mock.patch("desktop.uia.focus_element", return_value=False):
             assert agent.execute(self._step("Add required attendees")) is True
         agent.controller.type_text.assert_called_once()
 
@@ -480,7 +477,7 @@ class TestSelectValuePatternFallback:
             return []
 
     def _run_select(self, vp):
-        import core.windows_uia as wu
+        import desktop.uia as wu
         combo = self._FakeCombo(vp)
         with patch.object(wu, "_load", return_value=True), \
              patch.object(wu, "_thread_com_init", return_value=None), \
@@ -503,7 +500,7 @@ class TestSelectValuePatternFallback:
 class TestSelectMissCapture:
 
     def test_miss_is_captured_and_popped_once(self):
-        import core.windows_uia as wu
+        import desktop.uia as wu
 
         class _NoItems:
             ControlTypeName = "MenuItemControl"

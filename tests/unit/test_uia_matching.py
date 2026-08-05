@@ -1,5 +1,5 @@
 # tests/unit/test_uia_matching.py
-"""Two-tier UIA matching (core/windows_uia._walk_and_match).
+"""Two-tier UIA matching (desktop/uia._walk_and_match).
 
 Regression for a live failure: the planner targeted "NEW" (meaning Zoom's
 "New meeting" button) and the walk returned a decorative "NEW" feature badge
@@ -15,7 +15,7 @@ Rules under test:
   3. An exact interactive match wins with conf=1.0.
   4. GetClickablePoint() is preferred over the bounding-rect center.
 """
-from core.windows_uia import _walk_and_match
+from desktop.uia import _walk_and_match
 
 
 class _Rect:
@@ -109,7 +109,7 @@ class TestClickablePoint:
 # ═══════════════════════════════════════════════════════════════════════════
 from unittest import mock
 
-import core.windows_uia as wu
+import desktop.uia as wu
 
 
 def _batch(*items):

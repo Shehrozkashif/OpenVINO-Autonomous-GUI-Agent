@@ -33,6 +33,8 @@ _test_ovms.bat
 logs/
 @AutomationLog.txt
 *.db
+# task history database written by core/history.py
+data/
 
 # ── Test / lint cache ────────────────────────────────────────────────────────
 .pytest_cache/

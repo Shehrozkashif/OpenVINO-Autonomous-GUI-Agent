@@ -4,7 +4,7 @@
 Dispatches each step to a _do_<action_type> handler. Pointer/keyboard steps
 go through DesktopController (raw Win32 SendInput); the structured
 set_value / select / invoke steps go through the UIA patterns in
-core/windows_uia, with a focus-and-type keyboard fallback for fields that
+desktop/uia, with a focus-and-type keyboard fallback for fields that
 expose no writable ValuePattern.
 """
 import re
@@ -12,8 +12,8 @@ import time
 
 from loguru import logger
 
-from core.controller import DesktopController
-from core.protocols import ActionStep
+from core.types import ActionStep
+from desktop.input import DesktopController
 
 
 def _alnum(s: str) -> str:
@@ -42,9 +42,9 @@ def _should_use_clipboard_for(step, text: str) -> bool:
 
 
 def _screen_center():
-    """Return (cx, cy) of the primary screen — used as fallback for scroll/drag."""
+    """Return (cx, cy) of the primary screen — the scroll fallback point."""
     try:
-        from core.capture.screenshot import _screen_size
+        from desktop.capture import _screen_size
         w, h = _screen_size()
         return w // 2, h // 2
     except Exception:
@@ -63,62 +63,44 @@ class ActionExecutionAgent:
         self.controller = controller
         self._should_use_clipboard = _should_use_clipboard_for
 
-    def execute(
-        self,
-        step: ActionStep,
-        x: int = None,
-        y: int = None,
-        x2: int = None,
-        y2: int = None,
-    ) -> bool:
+    def execute(self, step: ActionStep, x: int = None, y: int = None) -> bool:
         """Execute one ActionStep. Returns True on success, False on failure.
 
-        x, y:      screen coordinates from UIGroundingAgent (source element).
-        x2, y2:    destination coordinates for drag steps.
-
-        Dispatches to the _do_<action_type> method for the step; every handler
-        shares the (step, x, y, x2, y2) signature.
+        x, y are the screen coordinates from UIGroundingAgent (None for
+        keyboard steps). Dispatches to the _do_<action_type> method; every
+        handler shares the (step, x, y) signature.
         """
         handler = getattr(self, f"_do_{step.action_type}", None)
         if handler is None:
             logger.error(f"[ACTION] Unknown action_type: '{step.action_type}'")
             return False
         try:
-            return handler(step, x, y, x2, y2)
+            return handler(step, x, y)
         except Exception as e:
             logger.error(f"[ACTION] Step {step.id} raised exception: {e}")
             return False
 
     # ── Pointer actions (coordinates come from the Grounding Agent) ──────────
 
-    def _do_click(self, step, x, y, x2, y2) -> bool:
+    def _do_click(self, step, x, y) -> bool:
         if x is None or y is None:
             logger.error(f"[ACTION] click step {step.id} missing coordinates")
             return False
         return self.controller.click(x, y)
 
-    def _do_right_click(self, step, x, y, x2, y2) -> bool:
+    def _do_right_click(self, step, x, y) -> bool:
         if x is None or y is None:
             logger.error(f"[ACTION] right_click step {step.id} missing coordinates")
             return False
         return self.controller.right_click(x, y)
 
-    def _do_double_click(self, step, x, y, x2, y2) -> bool:
+    def _do_double_click(self, step, x, y) -> bool:
         if x is None or y is None:
             logger.error(f"[ACTION] double_click step {step.id} missing coordinates")
             return False
         return self.controller.double_click(x, y)
 
-    def _do_drag(self, step, x, y, x2, y2) -> bool:
-        if x is None or y is None:
-            logger.error(f"[ACTION] drag step {step.id} missing source coordinates")
-            return False
-        if x2 is None or y2 is None:
-            logger.error(f"[ACTION] drag step {step.id} missing destination coordinates")
-            return False
-        return self.controller.drag(x, y, x2, y2)
-
-    def _do_scroll(self, step, x, y, x2, y2) -> bool:
+    def _do_scroll(self, step, x, y) -> bool:
         # Use screen center if grounding found no specific target
         sx, sy = x or 0, y or 0
         if sx == 0 and sy == 0:
@@ -136,7 +118,7 @@ class ActionExecutionAgent:
 
     # ── Keyboard actions ──────────────────────────────────────────────────────
 
-    def _do_type(self, step, x, y, x2, y2) -> bool:
+    def _do_type(self, step, x, y) -> bool:
         if not step.value:
             logger.error(f"[ACTION] type step {step.id} has no value")
             return False
@@ -145,8 +127,8 @@ class ActionExecutionAgent:
         # attendee email into the Title field on a live run — the click that
         # was supposed to move focus never landed.
         if step.target:
-            from core import windows_uia
-            if not windows_uia.focus_element(step.target):
+            from desktop import uia
+            if not uia.focus_element(step.target):
                 logger.warning(
                     f"[ACTION] type step {step.id}: could not focus "
                     f"'{step.target}' via the tree — typing into current focus"
@@ -157,7 +139,7 @@ class ActionExecutionAgent:
             value, use_clipboard=use_cb, sensitive=sensitive
         )
 
-    def _do_key_press(self, step, x, y, x2, y2) -> bool:
+    def _do_key_press(self, step, x, y) -> bool:
         # Tolerate models that put key in value instead of key field
         key = (step.key or step.value or "").strip()
         if not key:
@@ -165,7 +147,7 @@ class ActionExecutionAgent:
             return False
         return self.controller.press_key(key)
 
-    def _do_hotkey(self, step, x, y, x2, y2) -> bool:
+    def _do_hotkey(self, step, x, y) -> bool:
         key = (step.key or step.value or "").strip()
         if not key:
             logger.error(f"[ACTION] hotkey step {step.id} has no key")
@@ -179,7 +161,7 @@ class ActionExecutionAgent:
 
     # ── Passive actions ───────────────────────────────────────────────────────
 
-    def _do_wait(self, step, x, y, x2, y2) -> bool:
+    def _do_wait(self, step, x, y) -> bool:
         try:
             duration = float(step.value or "1.0")
         except (ValueError, TypeError):
@@ -192,21 +174,21 @@ class ActionExecutionAgent:
     # ── UIA structured-control actions ────────────────────────────────────────
     # Deterministic form-control manipulation through the accessibility
     # tree (ValuePattern / SelectionItemPattern / InvokePattern) with
-    # read-back verification inside windows_uia. Returning False sends
+    # read-back verification inside uia. Returning False sends
     # the planner down the click/type fallback path.
 
-    def _do_set_value(self, step, x, y, x2, y2) -> bool:
+    def _do_set_value(self, step, x, y) -> bool:
         if not step.target or step.value is None:
             logger.error(f"[ACTION] set_value step {step.id} needs target and value")
             return False
         value, sensitive = self._substitute_credentials(step.value)
-        from core import windows_uia
-        if windows_uia.set_element_value(step.target, value):
+        from desktop import uia
+        if uia.set_element_value(step.target, value):
             return True
         # Fields without a writable ValuePattern (date/time segments, custom
         # web widgets) still take keyboard input: focus via the tree, replace
         # the content, verify by reading the focused control back.
-        if not windows_uia.focus_element(step.target):
+        if not uia.focus_element(step.target):
             # Pixel fallback: the orchestrator grounds the field label and
             # passes its coordinates — click the field to focus it, then
             # replace the content by typing. No read-back is possible without
@@ -236,7 +218,7 @@ class ActionExecutionAgent:
         if not self.controller.type_text(value, sensitive=sensitive):
             return False
         time.sleep(0.3)   # let the app commit the input before read-back
-        info = windows_uia.focused_element_info() or {}
+        info = uia.focused_element_info() or {}
         typed = _alnum(value)
         seen = _alnum(str(info.get("value", "")))
         ok = bool(typed) and bool(seen) and (typed in seen or seen in typed)
@@ -250,12 +232,12 @@ class ActionExecutionAgent:
             )
         return ok
 
-    def _do_select(self, step, x, y, x2, y2) -> bool:
+    def _do_select(self, step, x, y) -> bool:
         if not step.target or not step.value:
             logger.error(f"[ACTION] select step {step.id} needs target and value")
             return False
-        from core import windows_uia
-        if windows_uia.select_option(step.target, step.value):
+        from desktop import uia
+        if uia.select_option(step.target, step.value):
             return True
         # Pixel fallback (mirrors set_value): click the combobox, replace its
         # text with the wanted option, commit with Enter. Editable comboboxes
@@ -275,12 +257,12 @@ class ActionExecutionAgent:
             return True
         return False
 
-    def _do_invoke(self, step, x, y, x2, y2) -> bool:
+    def _do_invoke(self, step, x, y) -> bool:
         if not step.target:
             logger.error(f"[ACTION] invoke step {step.id} needs a target")
             return False
-        from core import windows_uia
-        return windows_uia.invoke_element(step.target)
+        from desktop import uia
+        return uia.invoke_element(step.target)
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
@@ -292,7 +274,7 @@ class ActionExecutionAgent:
         happened, so the controller can suppress logging of the typed text.
         """
         try:
-            from utils.credentials import has_tokens, substitute
+            from desktop.credentials import has_tokens, substitute
             if has_tokens(value):
                 value = substitute(value)
                 logger.info("[ACTION] credential substitution applied")

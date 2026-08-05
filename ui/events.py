@@ -43,7 +43,6 @@ _RX_UNCERTAIN    = re.compile(r"^\s*Uncertain result - retrying")
 _RX_RETRY        = re.compile(r"^\s*Retry (\d+)/(\d+)")
 _RX_STEP_FAILED  = re.compile(r"^\s*Step failed - re-evaluating")
 _RX_EXTRACT      = re.compile(r"\[EXTRACT\] '(.+?)' = '(.*)'")
-_RX_MEMORY       = re.compile(r"\[MEMORY\] Similar past task found \(sim=([\d.]+)\)")
 _RX_TASK_DONE    = re.compile(r"\[TASK DONE\] (.*) \(([\d.]+)s\)")
 _RX_STOPPED      = re.compile(r"\[TASK\] Stopped by user")
 _RX_FIREWALL     = re.compile(r"\[FIREWALL\] (.*)")
@@ -113,7 +112,6 @@ class AgentEventBus(QObject):
     retrying         = pyqtSignal(int, int)          # attempt, max
     guard_event      = pyqtSignal(str, str)          # kind, message
     extracted        = pyqtSignal(str, str)          # key, value
-    memory_hint      = pyqtSignal(float)             # similarity
     task_done        = pyqtSignal(str, float)        # summary, elapsed_s
     raw_line         = pyqtSignal(str)
     # Deep pipeline events (via the loguru bridge)
@@ -163,23 +161,30 @@ class AgentEventBus(QObject):
             if sub.strip():
                 self._parse(sub)
 
-    def _parse(self, line: str):
+    def _parse(self, line: str) -> bool:
         """Match one log line against the known pipeline patterns.
 
         Handlers are grouped by lifecycle area and tried in order; each
         returns True when its pattern matched (first match wins, same as
         the original single cascade).
+
+        Returns True when some handler recognised the line. That is not the
+        same as "a signal fired": a line may only advance the state machine,
+        which stays silent if the state was already there. Tests assert on
+        recognition, so a log format the UI has stopped understanding fails
+        loudly instead of quietly emptying the mission timeline.
         """
         for handle in (
             self._parse_task_events,       # mission start / plan ready / subtasks
             self._parse_step_events,       # step start / verify / retry / fail
-            self._parse_data_events,       # extracted values, memory hints
+            self._parse_data_events,       # extracted values
             self._parse_guard_events,      # firewall, visual replan, loop guards
             self._parse_task_end_events,   # mission complete / stopped
             self._parse_pipeline_events,   # grounding, execution, VLM (loguru bridge)
         ):
             if handle(line):
-                return
+                return True
+        return False
 
     def _parse_task_events(self, line: str) -> bool:
         """Mission start, router plan, and per-subtask lifecycle lines."""
@@ -263,16 +268,12 @@ class AgentEventBus(QObject):
         return False
 
     def _parse_data_events(self, line: str) -> bool:
-        """Extracted values and memory-recall hints."""
+        """Values the agent read off the screen and reported back."""
         m = _RX_EXTRACT.search(line)
         if m:
             self.extracted.emit(m.group(1), m.group(2))
             return True
 
-        m = _RX_MEMORY.search(line)
-        if m:
-            self.memory_hint.emit(float(m.group(1)))
-            return True
         return False
 
     def _parse_guard_events(self, line: str) -> bool:

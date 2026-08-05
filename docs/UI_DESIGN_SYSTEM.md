@@ -64,7 +64,7 @@ the orchestrator masks its own window out of screen captures by that substring.
 | `SUCCESS / WARNING / DANGER / INFO` | `#34D399 / #F5B544 / #F8716E / #60A5FA` | Verification & safety semantics |
 
 Action-type hues (timeline chips): click=cyan, type=violet, keys=blue,
-scroll=teal, drag=pink, extract=amber, wait=gray.
+scroll=teal, extract=amber, wait=gray.
 
 **State → color language** (used by orb, chips, headlines):
 idle gray · routing/planning violet · executing cyan · verifying blue ·
@@ -118,9 +118,9 @@ CPU-rendered in Qt and would steal cycles from inference.
 ### 6.2 Home — hero
 
 Hierarchy: `PulseOrb(104)` + headline → **MissionComposer** (the primary
-NL prompt box with `Run Task`) → suggested-mission chips (2 from memory +
-canned) → metric tiles (automations learned / successful runs / avg duration /
-failure patterns avoided) → recent automations (clickable cards).
+NL prompt box with `Run Task`) → suggested-mission chips (2 from history +
+canned) → metric tiles (automations learned / successful runs / avg duration)
+→ recent automations (clickable cards).
 
 UX rationale: the first five seconds must say *"an intelligent agent is ready —
 tell it what to do."* The composer is the largest interactive element on
@@ -141,14 +141,17 @@ Honesty rule: the sweep means "agent active", the chip shows the *actual*
 current step. Bounding boxes are future work (requires the grounder exposing
 coordinates — see §9).
 
-### 6.4 Agent Sessions / 6.5 Workflows / 6.6 Memory
+### 6.4 Agent Sessions / 6.5 Workflows / 6.6 Task History
 
 Sessions: history cards (runs badge, subtask count, avg duration, last run,
-**Run again**). Workflows: the same memory reframed as a *library* — 2-column
-grid, primary **Run workflow** per card; sells the agent's learning loop.
-Memory: transparency view — semantic memory (learned tasks, reinforcement
-counts) and episodic memory (failure patterns the planner now avoids). Seeing
-"what it learned to avoid" converts failures into visible progress → trust.
+**Run again**). Workflows: the same records reframed as a *library* — 2-column
+grid, primary **Run workflow** per card; turns a past run into a one-click
+rerun. Task History: transparency view — every task that completed cleanly,
+with how many times it has been run.
+
+These three pages read `core/history.py` and nothing else. The agent does not
+read them back: it plans from the live screen, so what the user sees here is a
+record, never a hidden input to the next run.
 
 ### 6.7 Screen History
 
@@ -208,11 +211,11 @@ removed after each fade (stacked `QGraphicsOpacityEffect`s slow painting).
   contaminate OCR/planning — needs the same masking treatment as the main
   window before shipping.
 * Per-session step-level history persistence (currently sessions persist via
-  TaskMemory; step traces live only in the timeline).
+  `TaskHistory`; step traces live only in the timeline).
 
 ## 10. Verification
 
-* `tests/unit/test_ui_smoke.py` — feeds verbatim orchestrator log lines
+* `tests/unit/test_ui.py` — feeds verbatim orchestrator log lines
   through the runtime signal path and asserts timeline/panel/stats state;
   checks the `main.py` contract and the window-title masking contract.
 * `tests/unit/test_ui_interactions.py` — click-through audit: every button is

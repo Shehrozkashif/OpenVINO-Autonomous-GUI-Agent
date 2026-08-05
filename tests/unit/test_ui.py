@@ -60,13 +60,12 @@ def _no_live_screen_capture(monkeypatch):
 # Verbatim log lines as core/orchestrator.py emits them
 ORCHESTRATOR_LOG = [
     "[TASK START] 'open notepad and type hello'",
-    "[MEMORY] Similar past task found (sim=0.91)",
     "[ROUTER] 2 sub-task(s)",
     "\n[SUBTASK 1] Open Notepad",
     "  Step 1: [key_press] Open the search launcher",
     "  Verified (conf=0.95)",
     "  Step 2: [type] Type 'notepad' in the search box",
-    "  Uncertain result — retrying (uncertain outcome (conf=0.50, threshold=0.95))",
+    "  Uncertain result - retrying (uncertain outcome (conf=0.50, threshold=0.95))",
     "  Retry 1/3…",
     "  Verified (conf=0.88)",
     "  [CHECK] 'notepad' process confirmed running",
@@ -74,7 +73,7 @@ ORCHESTRATOR_LOG = [
     "\n[SUBTASK 2] Type hello in Notepad",
     "  Step 1: [click] Click the Notepad text area",
     "  Verification failed: text area not focused (conf=0.97)",
-    "  Step failed — re-evaluating next action",
+    "  Step failed - re-evaluating next action",
     "  [VISUAL-REPLAN] Text planning stuck — asking VLM with screenshot",
     "  Step 2: [type] Type hello",
     "  [FIREWALL] MEDIUM risk detected: shell keyword",
@@ -98,7 +97,6 @@ def test_event_bus_parses_orchestrator_stream(app):
     bus.retrying.connect(lambda a, t: events.append(("retry", a, t)))
     bus.guard_event.connect(lambda k, m: events.append(("guard", k)))
     bus.extracted.connect(lambda k, v: events.append(("extract", k, v)))
-    bus.memory_hint.connect(lambda s: events.append(("memory", s)))
     bus.task_done.connect(lambda s, e: events.append(("done", e)))
 
     for line in ORCHESTRATOR_LOG:
@@ -115,10 +113,40 @@ def test_event_bus_parses_orchestrator_stream(app):
     assert any(e[0] == "guard" and e[1] == "FIREWALL" for e in events)
     assert any(e[0] == "guard" and e[1] == "VISION" for e in events)
     assert ("extract", "page_title", "Untitled - Notepad") in events
-    assert ("memory", 0.91) in events
     assert ("done", 42.3) in events
     assert bus.steps_total == 4
     assert bus.last_confidence == 0.92
+
+
+@pytest.mark.parametrize("fixture_name", ["ORCHESTRATOR_LOG", "PIPELINE_LOG"])
+def test_every_log_line_is_understood(app, fixture_name):
+    """No line in either fixture may fall through the parser unrecognised.
+
+    Orchestrator log strings are a public interface — ui/events.py parses them
+    to drive the mission timeline — so a line the UI no longer understands is
+    a silent bug: the timeline simply goes quiet for it.
+
+    Three lines were dead this way before this test existed. Two were written
+    with em-dashes ("Step failed — re-evaluating") that core/orchestrator.py
+    never emits; it uses ASCII hyphens. One was a [MEMORY] hint removed from
+    the backend. All three sat in a fixture whose comment promised verbatim
+    output, which is exactly how the drift went unnoticed.
+
+    Recognition, not emission, is the contract: some lines only advance the
+    state machine, which stays silent when the state is already correct.
+    """
+    fixtures = {"ORCHESTRATOR_LOG": ORCHESTRATOR_LOG, "PIPELINE_LOG": PIPELINE_LOG}
+    bus = AgentEventBus()
+    unparsed = [
+        sub.strip()
+        for line in fixtures[fixture_name]
+        for sub in line.splitlines()
+        if sub.strip() and not bus._parse(sub)
+    ]
+    assert not unparsed, (
+        f"{fixture_name}: the UI does not understand these lines, so the "
+        "mission timeline would stay silent for them:\n  "
+        + "\n  ".join(unparsed))
 
 
 # Verbatim loguru lines from a real run (agents/, core/ — via LoguruBridge)

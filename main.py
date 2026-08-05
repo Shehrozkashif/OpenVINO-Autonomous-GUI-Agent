@@ -2,7 +2,7 @@
 """Desktop GUI Agent — application entry point."""
 import sys
 
-from utils.platform_utils import enable_dpi_awareness
+from desktop.system import enable_dpi_awareness
 
 # Must run before Qt and before the first screen capture so screenshots, UIA
 # rectangles, and mouse input all share one physical-pixel coordinate space.
@@ -12,15 +12,16 @@ from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from agents.action import ActionExecutionAgent
-from agents.grounding import OCREngine, UIGroundingAgent
+from agents.grounding import UIGroundingAgent
 from agents.planning import PlanningAgent
 from agents.reflection import ReflectionAgent
 from agents.router import RouterAgent
-from core.capture.screenshot import ScreenCapture
-from core.controller import DesktopController
+from core.history import TaskHistory
+from core.inference import OVMSClient
 from core.orchestrator import OrchestratorConfig, TaskOrchestrator
-from core.ovms_client import OVMSClient
-from memory.task_memory import TaskMemory
+from desktop.capture import ScreenCapture
+from desktop.input import DesktopController
+from desktop.ocr import OCREngine
 from ui.main_window import DesktopGUIAgent
 
 
@@ -37,7 +38,7 @@ def _warmup_models(client: OVMSClient) -> None:
         # be slow on locked-down machines) so the router's app hint is ready
         # before the first decompose instead of timing out inside it.
         try:
-            from utils.platform_utils import installed_apps
+            from desktop.system import installed_apps
             apps = installed_apps()
             logger.info(f"[STARTUP] Installed-app catalogue: {len(apps)} apps")
         except Exception as e:
@@ -83,7 +84,7 @@ def build_orchestrator() -> TaskOrchestrator:
     capturer = ScreenCapture()
     controller = DesktopController()
     ocr = OCREngine()
-    task_memory = TaskMemory()
+    history = TaskHistory()
 
     _warmup_models(client)
 
@@ -94,7 +95,7 @@ def build_orchestrator() -> TaskOrchestrator:
         actor=ActionExecutionAgent(controller),
         reflector=ReflectionAgent(client, capturer, ocr=ocr),
         capturer=capturer,
-        task_memory=task_memory,
+        history=history,
         config=OrchestratorConfig(max_retries_per_step=3, reflection_wait_s=1.0),
         ocr=ocr,
     )

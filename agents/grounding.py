@@ -9,7 +9,6 @@ Three-stage pipeline:
 If all stages fail, returns found=False so the orchestrator can retry.
 """
 import base64
-import difflib
 import io
 import json
 import os
@@ -19,14 +18,15 @@ from dataclasses import dataclass
 from typing import Optional
 
 import imagehash
-import numpy as np
 from loguru import logger
 from PIL import Image
 
-from core.capture.screenshot import OCR_THUMB, ScreenCapture, _screen_size
-from core.protocols import InferenceClient
-from core.windows_uia import find_element as _uia_find
-from core.windows_uia import is_available as _uia_ok
+from agents import coords
+from core.inference import InferenceClient
+from desktop.capture import OCR_THUMB, ScreenCapture, _screen_size
+from desktop.ocr import OCREngine, OCRWord
+from desktop.uia import find_element as _uia_find
+from desktop.uia import is_available as _uia_ok
 
 _ocr_grounding_disabled_logged = False
 
@@ -48,14 +48,6 @@ def _ocr_grounding_disabled() -> bool:
         logger.info("[OCR] Stage 1 grounding disabled via AGENT_DISABLE_OCR — VLM takes over")
     return True
 
-
-def _vlm_zoom_enabled() -> bool:
-    """True when the Stage-2 VLM zoom refinement (config.VLM_ZOOM_REFINE) is on."""
-    try:
-        import config as _cfg  # noqa: PLC0415
-        return bool(getattr(_cfg, "VLM_ZOOM_REFINE", True))
-    except Exception:
-        return True
 
 # ── VLM prompt constants ──────────────────────────────────────────────────────
 
@@ -95,177 +87,6 @@ _ROLE_WORDS = {
     "left", "right", "center", "middle", "upper", "lower", "primary", "main",
     "current", "active", "focused", "corner", "side", "edge", "near",
 }
-
-
-# ── OCR layer ─────────────────────────────────────────────────────────────────
-
-@dataclass
-class OCRWord:
-    text: str
-    x: int      # left pixel in image coords
-    y: int      # top pixel
-    w: int      # width
-    h: int      # height
-    conf: float # 0.0 – 1.0
-    is_in_foreground: bool = True    # set by capture_snapshot(); default True for plain OCR results
-    element_type: str = "document_text"  # "foreground_interactive" when tagged by capture_snapshot()
-
-    @property
-    def cx(self) -> int:
-        return self.x + self.w // 2
-
-    @property
-    def cy(self) -> int:
-        return self.y + self.h // 2
-
-
-class OCREngine:
-    """Wraps RapidOCR (pure Python ONNX, no system deps) with fuzzy text search.
-    Initialised lazily on first use. Results are cached by perceptual hash so
-    repeated calls on an unchanged screen skip the ONNX inference entirely.
-    """
-
-    _CACHE_TTL = 2.5   # seconds before a cached result expires
-    _CACHE_MAX = 30    # maximum number of entries to keep
-
-    def __init__(self):
-        self._ocr = None
-        self._available: bool | None = None
-        self._cache: dict[str, tuple] = {}   # phash_str → (words, timestamp)
-
-    def is_available(self) -> bool:
-        if self._available is None:
-            try:
-                from rapidocr_onnxruntime import RapidOCR
-                self._ocr = RapidOCR()
-                self._available = True
-                logger.info("[OCR] RapidOCR initialised")
-            except Exception as e:
-                self._available = False
-                logger.warning(f"[OCR] RapidOCR not available: {e}")
-        return self._available
-
-    def extract(self, image: Image.Image) -> list[OCRWord]:
-        """Run OCR and return detected text boxes.
-        Transparently caches by perceptual hash — unchanged screens reuse the
-        previous result without running the ONNX model again (~150 ms saved).
-        """
-        if not self.is_available():
-            return []
-
-        # ── Cache lookup ──────────────────────────────────────────────────────
-        phash_str: str | None = None
-        try:
-            phash_str = str(imagehash.phash(image))
-            cached = self._cache.get(phash_str)
-            if cached is not None:
-                words, ts = cached
-                if time.time() - ts < self._CACHE_TTL:
-                    logger.debug("[OCR] Cache hit — skipping inference")
-                    return words
-        except Exception:
-            phash_str = None  # hash failed; run inference uncached
-
-        # ── Run inference ─────────────────────────────────────────────────────
-        img_np = np.array(image.convert("RGB"))
-        try:
-            results, _ = self._ocr(img_np)
-        except Exception as e:
-            logger.warning(f"[OCR] Inference error: {e}")
-            return []
-        if not results:
-            return []
-
-        words: list[OCRWord] = []
-        for item in results:
-            if len(item) < 3:
-                continue
-            box, text, conf = item[0], item[1], item[2]
-            xs = [int(p[0]) for p in box]
-            ys = [int(p[1]) for p in box]
-            x, y = min(xs), min(ys)
-            w, h = max(xs) - x, max(ys) - y
-            if not str(text).strip():
-                continue
-            words.append(OCRWord(str(text).strip(), x, y, max(w, 1), max(h, 1), float(conf)))
-
-        logger.debug(f"[OCR] Extracted {len(words)} text regions")
-
-        # ── Cache store ───────────────────────────────────────────────────────
-        if phash_str is not None:
-            self._cache[phash_str] = (words, time.time())
-            if len(self._cache) > self._CACHE_MAX:
-                oldest = min(self._cache, key=lambda k: self._cache[k][1])
-                del self._cache[oldest]
-
-        return words
-
-    def find_text(
-        self,
-        words: list[OCRWord],
-        query: str,
-        threshold: float = 0.60,
-        foreground_only: bool = False,
-    ) -> OCRWord | None:
-        """Fuzzy-match query against all OCR words.
-        Checks windows of 1-3 consecutive words to handle multi-word labels.
-        When foreground_only=True, words with is_in_foreground=False are skipped.
-        """
-        if not words or not query.strip():
-            return None
-        q = query.strip().lower()
-        best: tuple[float, OCRWord] | None = None
-
-        for window in range(1, 4):
-            for i in range(len(words) - window + 1):
-                group = words[i : i + window]
-                if foreground_only and any(not w.is_in_foreground for w in group):
-                    continue
-                if foreground_only and any(w.element_type != "foreground_interactive" for w in group):
-                    continue
-                combined = " ".join(w.text for w in group).lower()
-
-                if q == combined:
-                    score = 1.0
-                elif q in combined and len(q) >= 3:
-                    # Penalise matches where query is a tiny fragment of a long text.
-                    # e.g. "folder" inside a 100-char Monitor event line → ~0.25, rejected.
-                    length_penalty = min(1.0, (len(q) / max(len(combined), 1)) * 4)
-                    score = 0.95 * length_penalty
-                elif combined in q and len(combined) >= 4 and re.search(
-                    rf"(?:^|\s){re.escape(combined)}(?:$|\s)", q
-                ):
-                    # Whole-word containment only: "save" may stand in for
-                    # "save button", but "meet" must NOT match "new meeting"
-                    # (fragment of "meeting" — a different control entirely).
-                    score = 0.90
-                else:
-                    len_ratio = min(len(q), len(combined)) / max(len(q), len(combined))
-                    score = 0.0 if len_ratio < 0.4 else difflib.SequenceMatcher(None, q, combined).ratio()
-
-                if score >= threshold:
-                    gx  = min(w.x for w in group)
-                    gy  = min(w.y for w in group)
-                    gx2 = max(w.x + w.w for w in group)
-                    gy2 = max(w.y + w.h for w in group)
-                    merged = OCRWord(
-                        text=" ".join(w.text for w in group),
-                        x=gx, y=gy, w=gx2 - gx, h=gy2 - gy,
-                        conf=min(w.conf for w in group),
-                        is_in_foreground=all(w.is_in_foreground for w in group),
-                        element_type=(
-                            "foreground_interactive"
-                            if all(w.element_type == "foreground_interactive" for w in group)
-                            else "document_text"
-                        ),
-                    )
-                    if best is None or score > best[0]:
-                        best = (score, merged)
-
-        if best:
-            logger.debug(f"[OCR] Best match for '{query}': '{best[1].text}' score={best[0]:.2f}")
-            return best[1]
-        return None
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
@@ -316,81 +137,6 @@ class ElementCache:
 
 
 # Bracket styles UI-TARS uses around click(start_box=...) coordinates:
-# '[[', '[[[', '(', '[(', etc.
-_BOX_OPEN = r"[\[\(]{0,4}"
-_BOX_CLOSE = r"[\]\)]{0,4}"
-
-
-class _VLMSaysNotFound(Exception):
-    """VLM answered found=false — stop parsing, the element is not on screen."""
-
-
-def _qwen_resize_dim(dim: int, factor: int = 28) -> int:
-    """qwen2.5-VL smart_resize rounds each image side to a multiple of `factor`
-    (28 = patch_size 14 × merge_size 2). Our screenshots are always far below the
-    model's max_pixels (12,845,056 px, per its preprocessor_config.json), so the
-    pixel-budget branch of smart_resize never fires — the model simply sees the
-    sent image rounded to the nearest /28, and (being qwen2.5-VL based) emits
-    ABSOLUTE pixel coordinates in THAT resized space. Mapping back to screen
-    therefore divides by the /28-rounded dimension, not the raw sent dimension.
-    """
-    return max(factor, int(round(dim / factor)) * factor)
-
-
-@dataclass
-class _CoordSpace:
-    """Maps coordinate values from one VLM answer to screen pixels.
-
-    UI-TARS-1.5 (qwen2.5-VL) emits ABSOLUTE pixel coordinates in the smart-resized
-    image space. This object carries the dimensions + configured convention so
-    every parser applies the exact same conversion rules. Pixel divisions use the
-    /28-rounded (smart-resized) dimension via _disp(), matching what the model saw.
-    """
-
-    screen_w: int
-    screen_h: int
-    display_w: int   # size of the image sent to the VLM (fallback: screen)
-    display_h: int
-    mode: str        # config.VLM_COORD_SPACE: "auto" | "pixels" | "norm1000"
-
-    def _disp(self, dim: int) -> int:
-        """Divisor for pixel-valued coords: the /28 smart-resized dimension."""
-        return _qwen_resize_dim(dim) if dim > 1 else dim
-
-    def px_to_screen(self, px: float, py: float) -> tuple[int, int]:
-        """Scale resized-image pixels to screen pixels, clamped to screen bounds."""
-        return (
-            min(int(px / self._disp(self.display_w) * self.screen_w), self.screen_w - 1),
-            min(int(py / self._disp(self.display_h) * self.screen_h), self.screen_h - 1),
-        )
-
-    def scale_x(self, val: float) -> int:
-        return self._scale(val, self.screen_w, self.display_w)
-
-    def scale_y(self, val: float) -> int:
-        return self._scale(val, self.screen_h, self.display_h)
-
-    def _scale(self, val: float, screen_dim: int, display_dim: int) -> int:
-        """Convert a single VLM coordinate to screen pixels.
-
-        A pinned mode ("pixels" / "norm1000") is applied deterministically.
-        In "auto": if val > 1000 it must be a resized-space pixel, not 0-1000;
-        if display_dim is available and val fits within it, treat as pixel;
-        otherwise fall back to 0-1000 normalised interpretation. All pixel
-        divisions use the /28 smart-resized dimension (_disp).
-        """
-        rd = self._disp(display_dim)
-        if self.mode == "pixels" and display_dim > 1:
-            return min(int(val / rd * screen_dim), screen_dim - 1)
-        if self.mode == "norm1000" and val <= 1000:
-            return min(int(val / 1000 * screen_dim), screen_dim - 1)
-        if val > 1000:
-            return min(int(val / rd * screen_dim), screen_dim - 1)
-        if display_dim > 1 and val <= display_dim:
-            return min(int(val / rd * screen_dim), screen_dim - 1)
-        return int(val / 1000 * screen_dim)
-
-
 class UIGroundingAgent:
     """Locates UI elements by natural language description.
 
@@ -770,12 +516,6 @@ class UIGroundingAgent:
             result = self._vlm_coords(target, img_b64, int(display.width), int(display.height),
                                       avoid=dead)
             if result and not self._near_dead(result[0], result[1], dead):
-                # Zoom refinement: re-ground on a full-res crop around the coarse
-                # point so a small target fills the frame (ScreenSpot-Pro trick).
-                if _vlm_zoom_enabled():
-                    refined = self._vlm_zoom_refine(target, result, avoid=dead)
-                    if refined and not self._near_dead(refined[0], refined[1], dead):
-                        return refined
                 return result
 
         return None
@@ -822,7 +562,7 @@ class UIGroundingAgent:
                 text = text.split("</think>")[-1].strip()
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-            result = self._parse_coords(text, self.screen_w, self.screen_h, display_w, display_h)
+            result = coords.parse_coords(text, self.screen_w, self.screen_h, display_w, display_h)
             if result:
                 x, y, conf = result
                 logger.info(f"[GROUNDING/S2-VLM] '{target}' -> screen({x},{y}) conf={conf:.2f}")
@@ -830,253 +570,6 @@ class UIGroundingAgent:
         except Exception as e:
             logger.warning(f"[GROUNDING/S2-VLM] Error: {e}")
         return None
-
-    def _vlm_zoom_refine(
-        self, target: str, coarse: tuple, avoid: list | tuple = (),
-    ) -> tuple[int, int, float, str, str] | None:
-        """Second-pass zoom refinement (ScreenSpot-Pro technique).
-
-        Crop a window around the coarse screen point at FULL resolution, upscale
-        it 2× so a small target fills the frame, and re-ask the VLM. UI-TARS
-        grounds large targets far more accurately than small ones, so this
-        sharply cuts the error on tiny/dense elements. Returns a refined
-        (x, y, conf, method, element_type) in SCREEN coords, or None to keep the
-        coarse result. The crop window (⅓ screen) is generous enough to still
-        contain the true target even when the coarse estimate is off by ~100 px.
-        """
-        try:
-            cx, cy, cconf = coarse[0], coarse[1], coarse[2]
-            full = self.capturer.capture()
-            W, H = full.size
-            cw, ch = max(240, W // 3), max(240, H // 3)
-            x0 = max(0, min(cx - cw // 2, W - cw))
-            y0 = max(0, min(cy - ch // 2, H - ch))
-            crop = full.crop((x0, y0, x0 + cw, y0 + ch))
-            zoom = 2
-            big = crop.resize((cw * zoom, ch * zoom), Image.LANCZOS)
-            resp = self.client.query_vlm(
-                prompt=_VLM_COORD_PROMPT.format(target=target),
-                image_base64=self._encode(big),
-                max_tokens=120, temperature=0.0,
-                system_prompt=_UITARS_SYSTEM_PROMPT,
-            )
-            text = resp.content.strip()
-            if "</think>" in text:
-                text = text.split("</think>")[-1].strip()
-            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-            # Map raw (in upscaled-crop space) -> crop space (screen dims here =
-            # crop dims, display dims = upscaled image), then add the crop offset.
-            r = self._parse_coords(text, cw, ch, big.width, big.height)
-            if not r:
-                return None
-            rx, ry, rconf = r
-            sx, sy = x0 + rx, y0 + ry
-            sx = max(0, min(sx, self.screen_w - 1))
-            sy = max(0, min(sy, self.screen_h - 1))
-            if self._near_dead(sx, sy, avoid):
-                return None
-            logger.info(
-                f"[GROUNDING/S2-ZOOM] '{target}' refined ({cx},{cy}) -> ({sx},{sy})"
-            )
-            return (sx, sy, max(cconf, rconf), "vlm_zoom", "foreground_interactive")
-        except Exception as e:
-            logger.debug(f"[GROUNDING/S2-ZOOM] refine failed: {e}")
-            return None
-
-    def _parse_coords(
-        self, text: str, screen_w: int, screen_h: int,
-        display_w: int = 0, display_h: int = 0,
-    ) -> tuple[int, int, float] | None:
-        """Parse VLM output into screen pixel coordinates (x, y, confidence).
-
-        display_w/display_h: size of the image that was sent to the VLM.
-        When the model returns pixel-valued coordinates they are in the display
-        image's coordinate space and must be scaled to screen space:
-            screen_x = (pixel_x / display_w) * screen_w
-        If display dims are not provided, pixel coords are used as-is (clipped).
-
-        Handles the formats UI-TARS may emit — one parser method per format:
-          action: click(start_box='[[x1,y1,x2,y2]]')   → _parse_click_box
-          JSON:   {"x": 0.5, "y": 0.3, ...}            → _parse_json_coords
-          Point:  <point>500 300</point>               → _parse_point_tag
-          BBox:   (x1,y1),(x2,y2)                      → _parse_paren_bbox
-        Value-scale interpretation (0-1 / 0-1000 / display pixels) is shared:
-        see _CoordSpace and _xy_to_screen.
-        """
-        # Explicit not-found answer — fast, clean exit (no format warning)
-        if "not_found" in text.lower():
-            logger.debug("[GROUNDING/S2] VLM reports element not visible")
-            return None
-
-        space = self._vlm_coord_space(screen_w, screen_h, display_w, display_h)
-        try:
-            for parse in (
-                self._parse_click_box,
-                self._parse_json_coords,
-                self._parse_point_tag,
-                self._parse_paren_bbox,
-            ):
-                result = parse(text, space)
-                if result:
-                    return result
-        except _VLMSaysNotFound:
-            return None
-
-        logger.debug(f"[GROUNDING/S2] Unrecognised VLM format: '{text[:100]}'")
-        return None
-
-    @staticmethod
-    def _vlm_coord_space(
-        screen_w: int, screen_h: int, display_w: int, display_h: int,
-    ) -> "_CoordSpace":
-        """Build the coordinate-mapping context for one VLM answer.
-
-        The coordinate convention of the served model comes from config.
-        "auto" keeps the value-range heuristics in _CoordSpace/_xy_to_screen;
-        pin to "pixels" or "norm1000" in config.py (calibrate once with
-        tests/live/test_vlm_coordinates.py) for deterministic parsing.
-        """
-        try:
-            import config as _cfg
-            mode = str(getattr(_cfg, "VLM_COORD_SPACE", "auto")).lower()
-        except Exception:
-            mode = "auto"
-        # Effective display dimensions for pixel-to-screen scaling.
-        # Fall back to screen dims (identity scale) when not provided.
-        return _CoordSpace(
-            screen_w=screen_w, screen_h=screen_h,
-            display_w=display_w if display_w > 1 else screen_w,
-            display_h=display_h if display_h > 1 else screen_h,
-            mode=mode,
-        )
-
-    @staticmethod
-    def _xy_to_screen(
-        space: "_CoordSpace", xv: float, yv: float,
-        conf: float, conf_px: float, *,
-        strict_1000: bool, honor_pinned: bool = True,
-    ) -> tuple[int, int, float]:
-        """Map one (x, y) pair to screen pixels via the value-range tiers.
-
-        Tier order (first match wins):
-          1. both values in 0-1     → normalised floats (most accurate)
-          2. pinned config mode     → deterministic per-axis scaling
-          3. both values in 0-1000  → UI-TARS native 0-1000 scale
-          4. anything larger        → raw display pixels (conf_px applies)
-        strict_1000: the 0-1000 tier additionally requires values > 1
-        (used by the JSON parser, whose 0-1 tier is exact).
-        honor_pinned: the salvaged-numbers JSON fallback skips tier 2,
-        matching the original behaviour of that path.
-        """
-        if 0.0 <= xv <= 1.0 and 0.0 <= yv <= 1.0:
-            return (int(xv * space.screen_w), int(yv * space.screen_h), conf)
-        if honor_pinned and space.mode in ("pixels", "norm1000"):
-            return (space.scale_x(xv), space.scale_y(yv), conf)
-        in_thousand = (
-            (1.0 < xv <= 1000 and 1.0 < yv <= 1000) if strict_1000
-            else (xv <= 1000 and yv <= 1000)
-        )
-        if in_thousand:
-            return (
-                int(xv / 1000 * space.screen_w),
-                int(yv / 1000 * space.screen_h),
-                conf,
-            )
-        sx, sy = space.px_to_screen(xv, yv)
-        return (sx, sy, conf_px)
-
-    def _parse_click_box(
-        self, text: str, space: "_CoordSpace",
-    ) -> tuple[int, int, float] | None:
-        """UI-TARS native action format: click(start_box='[[x1, y1, x2, y2]]').
-
-        Bracket style varies wildly: '[[', '[[[', '(', '[(', etc., and the
-        model sometimes emits a 2-value centre point instead of a full bbox.
-        Scale interpretation: the prompt asks for 0-1000 but the OVMS-served
-        INT4 UI-TARS often emits coordinates in the screenshot's pixel space
-        instead — _CoordSpace.scale_x/y applies the per-value heuristic.
-        """
-        m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _BOX_OPEN +
-            r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
-            + _BOX_CLOSE + r"'?\s*\)",
-            text,
-        )
-        if m:
-            x1, y1, x2, y2 = (float(m.group(i)) for i in range(1, 5))
-            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-            return (space.scale_x(cx), space.scale_y(cy), 0.90)
-
-        # 2-value form: model emits [[cx, cy]] or (cx, cy) instead of a full bbox.
-        m = re.search(
-            r"(?:click|tap)\s*\(\s*start_box\s*=\s*'?" + _BOX_OPEN +
-            r"(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)"
-            r"\s*[\]\)\s']+",
-            text,
-        )
-        if m:
-            cx, cy = float(m.group(1)), float(m.group(2))
-            return (space.scale_x(cx), space.scale_y(cy), 0.80)
-        return None
-
-    def _parse_json_coords(
-        self, text: str, space: "_CoordSpace",
-    ) -> tuple[int, int, float] | None:
-        """JSON block — x/y may be:
-          0-1 normalised floats  (model followed instructions)
-          1-1000 integers        (UI-TARS native 0-1000 scale leaked into JSON)
-          > 1000                 (raw display pixels — scale by display dims)
-        Also handles malformed JSON like {"x": 658, 294} (missing "y": key)
-        by salvaging the first two numbers at reduced confidence.
-        """
-        m = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if not m:
-            return None
-        raw_json = re.sub(r",\s*([\]}])", r"\1", m.group())
-        try:
-            data = json.loads(raw_json)
-            if not data.get("found", True):
-                raise _VLMSaysNotFound
-            xv, yv = float(data["x"]), float(data["y"])
-            conf = float(data.get("confidence", 0.7))
-            return self._xy_to_screen(space, xv, yv, conf, conf, strict_1000=True)
-        except (json.JSONDecodeError, ValueError, KeyError):
-            # Fallback: try to extract two numbers from the JSON string
-            nums = re.findall(r'[\d]+(?:\.\d+)?', raw_json)
-            if len(nums) >= 2:
-                try:
-                    xv, yv = float(nums[0]), float(nums[1])
-                    return self._xy_to_screen(
-                        space, xv, yv, 0.65, 0.65,
-                        strict_1000=True, honor_pinned=False,
-                    )
-                except ValueError:
-                    pass
-            return None
-
-    def _parse_point_tag(
-        self, text: str, space: "_CoordSpace",
-    ) -> tuple[int, int, float] | None:
-        """<point>cx cy</point> — 0-1000 scale or display-space pixels."""
-        m = re.search(r'<point>\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s*</point>', text)
-        if not m:
-            return None
-        px, py = float(m.group(1)), float(m.group(2))
-        return self._xy_to_screen(space, px, py, 0.85, 0.75, strict_1000=False)
-
-    def _parse_paren_bbox(
-        self, text: str, space: "_CoordSpace",
-    ) -> tuple[int, int, float] | None:
-        """(x1,y1),(x2,y2) bounding box — take the centre point."""
-        m = re.search(
-            r'\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\),\s*\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\)',
-            text
-        )
-        if not m:
-            return None
-        x1, y1, x2, y2 = (float(m.group(i)) for i in range(1, 5))
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        return self._xy_to_screen(space, cx, cy, 0.85, 0.75, strict_1000=False)
 
     def _rephrase_targets(self, target: str) -> list[str]:
         """Ask the LLM for up to 3 alternative text labels for the same UI element.

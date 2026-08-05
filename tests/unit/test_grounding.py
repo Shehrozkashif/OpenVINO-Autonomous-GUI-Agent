@@ -3,54 +3,60 @@
 
 Organised by concern (each section was originally its own file):
 
-  1. UIGroundingAgent._parse_coords — UI-TARS coordinate string formats
+  1. agents/coords.parse_coords — UI-TARS coordinate string formats
   2. OCR element_type semantics in the grounding pipeline
 """
 import unittest
 from unittest.mock import MagicMock
 
-from agents.grounding import ElementCache, GroundingResult, OCREngine, OCRWord, UIGroundingAgent
-from core.protocols import ActionStep
+from agents.coords import _qwen_resize_dim, parse_coords
+from agents.grounding import ElementCache, GroundingResult, UIGroundingAgent
+from core.anchor import AppAnchor
+from core.groundtruth import GroundTruth
+from core.types import ActionStep
+from desktop.capture import OwnWindowMask
+from desktop.ocr import OCREngine, OCRWord
+from tests.unit.conftest import make_history
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. UIGroundingAgent._parse_coords — formats UI-TARS emits in practice,
+# 1. agents/coords.parse_coords — formats UI-TARS emits in practice,
 #    including malformed bracket counts seen in live runs.
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _agent():
-    """Bare agent instance — _parse_coords needs no collaborators."""
-    return UIGroundingAgent.__new__(UIGroundingAgent)
-
-
-_W, _H = 1000, 1000   # identity scaling for 0-1000 coords
+# UI-TARS emits absolute pixels in the SMART-RESIZED image space (each side
+# rounded to a multiple of 28), and _CoordSpace divides by that rounded
+# dimension. Sizing the screen to the rounded dimension makes the transform an
+# identity, so these tests measure PARSING only — the pixel transform itself is
+# calibrated against UIA ground truth in tests/live/test_vlm_coordinates.py.
+_W = _H = _qwen_resize_dim(1000)   # 1008
 
 
 class TestParseCoordsBracketTolerance:
 
     def test_standard_four_value_bbox(self):
-        r = _agent()._parse_coords("click(start_box='[[100, 200, 300, 400]]')", _W, _H)
+        r = parse_coords("click(start_box='[[100, 200, 300, 400]]')", _W, _H)
         assert r is not None
         x, y, _ = r
         assert (x, y) == (200, 300)
 
     def test_triple_bracket_two_value_form(self):
         """Regression: live UI-TARS output 'click(start_box='[[[287, 569]')'."""
-        r = _agent()._parse_coords("click(start_box='[[[287, 569]')", _W, _H)
+        r = parse_coords("click(start_box='[[[287, 569]')", _W, _H)
         assert r is not None
         x, y, _ = r
         assert (x, y) == (287, 569)
 
     def test_triple_bracket_four_value_form(self):
-        r = _agent()._parse_coords("click(start_box='[[[10, 20, 30, 40]]]')", _W, _H)
+        r = parse_coords("click(start_box='[[[10, 20, 30, 40]]]')", _W, _H)
         assert r is not None
         x, y, _ = r
         assert (x, y) == (20, 30)
 
     def test_not_found_returns_none(self):
-        assert _agent()._parse_coords("not_found()", _W, _H) is None
+        assert parse_coords("not_found()", _W, _H) is None
 
     def test_garbage_returns_none(self):
-        assert _agent()._parse_coords("the element is near the top", _W, _H) is None
+        assert parse_coords("the element is near the top", _W, _H) is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -156,7 +162,8 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
     """
 
     def _make_orchestrator(self, ground_result: GroundingResult):
-        from core.orchestrator import OrchestratorConfig, TaskOrchestrator
+        from core.orchestrator import TaskOrchestrator
+        from core.runstate import OrchestratorConfig
 
         grounder = MagicMock()
         grounder.min_confidence = 0.5
@@ -167,9 +174,6 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
 
         capturer = MagicMock()
         reflector = MagicMock()
-        task_memory = MagicMock()
-        task_memory.find_similar.return_value = None
-
         ocr = MagicMock()
         ocr.is_available.return_value = False
         ocr.extract.return_value = []
@@ -180,7 +184,7 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
         orch.actor = actor
         orch.capturer = capturer
         orch.reflector = reflector
-        orch.memory = task_memory
+        orch.history = make_history()
         orch.config = OrchestratorConfig()
         orch.log = lambda msg: None
         orch._stop_event = MagicMock()
@@ -189,6 +193,11 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
         orch._extracted_data = {}
         orch._screen_w = 1920
         orch._screen_h = 1080
+        # Collaborators normally built in __init__ (bypassed here by __new__).
+        orch.mask = OwnWindowMask(capturer)
+        orch.mask.hwnd = None                       # no GUI window to mask
+        orch.anchor = AppAnchor()                   # unanchored: every click allowed
+        orch.truth = GroundTruth(capturer, ocr)
 
         return orch, grounder, actor
 

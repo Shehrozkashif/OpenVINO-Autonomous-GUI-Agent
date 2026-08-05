@@ -1,7 +1,5 @@
 # tests/unit/test_capture.py
-import base64
-
-from core.capture.screenshot import ScreenCapture
+from desktop.capture import ScreenCapture
 
 
 def test_screenshot_returns_pil_image():
@@ -9,15 +7,6 @@ def test_screenshot_returns_pil_image():
     img = cap.capture()
     assert img.width > 0
     assert img.height > 0
-
-
-def test_base64_encoding_is_valid_jpeg():
-    cap = ScreenCapture()
-    b64 = cap.capture_as_base64()
-    assert isinstance(b64, str)
-    raw = base64.b64decode(b64)
-    # JPEG magic bytes: FF D8
-    assert raw[:2] == b'\xff\xd8'
 
 
 def test_resize_works():

@@ -1,5 +1,12 @@
-# utils/platform_utils.py
-"""Windows platform detection utilities — imported by router, planner, and start."""
+# desktop/system.py
+"""Windows facts: DPI, windows, processes, installed apps, GPUs.
+
+Everything here answers a question about the machine — never what to do about
+the answer. Policy built on these facts lives in core/ (groundtruth.py decides
+whether a launch counted; anchor.py decides which window the task owns).
+Every function is best-effort and returns a safe empty value off Windows or on
+failure, so callers never have to guard the platform themselves.
+"""
 import os
 import subprocess
 from dataclasses import dataclass
@@ -33,6 +40,181 @@ def enable_dpi_awareness() -> None:
         ctypes.windll.user32.SetProcessDPIAware()            # system-aware (Vista+)
     except Exception:
         pass   # non-Windows or restricted environment — nothing to do
+
+
+# ── Windows and processes ─────────────────────────────────────────────────────
+# Ground truth for "what is on screen and who owns it". The orchestrator uses
+# these to prove a launch happened, to keep the task inside its own app, and to
+# refuse clicks that would land in another process.
+
+_MIN_REAL_WINDOW = (200, 120)   # smaller than this is a tray/tooltip, not a window
+
+
+def _exe_of_pid(pid: int) -> str:
+    """Executable file name (no path) of a process id, "" when unavailable."""
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        h = kernel32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED_INFORMATION
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(260)
+            size = ctypes.c_ulong(260)
+            if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                return buf.value.rsplit("\\", 1)[-1]
+        finally:
+            kernel32.CloseHandle(h)
+    except Exception:
+        pass
+    return ""
+
+
+def foreground_app() -> tuple[int, int, str]:
+    """(hwnd, pid, exe_name) of the current foreground window; zeros on failure."""
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return 0, 0, ""
+        pid = ctypes.c_ulong()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return hwnd, pid.value, _exe_of_pid(pid.value)
+    except Exception:
+        return 0, 0, ""
+
+
+def window_title(hwnd: int) -> str:
+    """Title text of a window handle, "" when it cannot be read."""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(512)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+        return buf.value or ""
+    except Exception:
+        return ""
+
+
+def window_owner_at_point(x: int, y: int) -> tuple[int, int, str]:
+    """(root_hwnd, pid, exe_name) of the window that owns screen pixel (x, y).
+
+    This is what a click there would actually hit — the OS's own answer, read
+    before any input fires.
+    """
+    try:
+        import ctypes
+        import ctypes.wintypes
+        user32 = ctypes.windll.user32
+        user32.WindowFromPoint.argtypes = [ctypes.wintypes.POINT]
+        user32.WindowFromPoint.restype = ctypes.wintypes.HWND
+        h = user32.WindowFromPoint(ctypes.wintypes.POINT(int(x), int(y)))
+        if not h:
+            return 0, 0, ""
+        root = user32.GetAncestor(h, 2) or h   # 2 = GA_ROOT
+        pid = ctypes.wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
+        if not pid.value:
+            return int(root), 0, ""
+        return int(root), pid.value, _exe_of_pid(pid.value)
+    except Exception:
+        return 0, 0, ""
+
+
+def is_process_running(exe_name: str) -> bool:
+    """True when a process with this executable name is in the task list."""
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout
+        return exe_name.lower() in out.lower()
+    except Exception:
+        return False
+
+
+def count_process_windows(exe_name: str) -> int:
+    """Count visible, non-trivial top-level windows owned by `exe_name`.
+
+    Used for launch confirmation (explorer.exe is always running, so only a
+    window proves anything) and for new-window verification when the app was
+    already running: focusing the old window keeps the count flat, a real
+    launch raises it.
+    """
+    try:
+        import ctypes
+        import ctypes.wintypes
+        user32 = ctypes.windll.user32
+        target = exe_name.lower()
+        count = [0]
+        min_w, min_h = _MIN_REAL_WINDOW
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+        def _cb(hwnd, _):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            rect = ctypes.wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            if (rect.right - rect.left) < min_w or (rect.bottom - rect.top) < min_h:
+                return True
+            pid = ctypes.wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if _exe_of_pid(pid.value).lower() == target:
+                count[0] += 1
+            return True
+
+        user32.EnumWindows(_cb, 0)
+        return count[0]
+    except Exception:
+        return 0
+
+
+def process_has_visible_window(exe_name: str) -> bool:
+    """True when `exe_name` owns at least one visible, non-trivial window."""
+    return count_process_windows(exe_name) > 0
+
+
+# Foreground processes where a click or a re-typed command cannot help: command
+# errors need corrected text, not mouse input.
+TERMINAL_PROCESSES = frozenset({
+    "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
+    "conhost.exe", "openconsole.exe",
+})
+
+
+def foreground_is_terminal() -> bool:
+    """True when a console window owns the foreground. False under pytest —
+    the test process itself runs inside a terminal.
+    """
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return False
+    try:
+        from desktop.snapshot import (
+            _get_foreground_hwnd_and_title,
+            _get_foreground_process,
+        )
+        hwnd, _ = _get_foreground_hwnd_and_title()
+        return _get_foreground_process(hwnd).lower() in TERMINAL_PROCESSES
+    except Exception:
+        return False
+
+
+def own_console_is_foreground() -> bool:
+    """True when the agent's OWN host console owns the foreground.
+
+    Typing then would inject into the terminal session that launched the agent.
+    Best-effort: under Windows Terminal the console is a hidden ConPTY handle
+    that is never foreground, so this stays inert there.
+    """
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return False
+    try:
+        import ctypes
+        own = ctypes.windll.kernel32.GetConsoleWindow()
+        if not own or not ctypes.windll.user32.IsWindowVisible(own):
+            return False
+        return bool(ctypes.windll.user32.GetForegroundWindow() == own)
+    except Exception:
+        return False
 
 
 # ── Installed apps ────────────────────────────────────────────────────────────

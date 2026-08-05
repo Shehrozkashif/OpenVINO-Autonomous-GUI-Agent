@@ -1,16 +1,29 @@
 # agents/planning.py
-"""Planning Agent — generates precise step sequences for sub-tasks.
-Uses Chain-of-Thought prompting for complex multi-step tasks.
-"""
+"""Planning Agent — subtask + live screen → the next action step(s).
 
+Two paths:
+  text   OCR/UIA screen context → LLM → JSON steps. The normal route.
+  visual a screenshot → UI-TARS → one action with pixel coordinates. The
+         recovery route, used when the text path has stalled: it sees the
+         icons and layout that text context is blind to.
+
+The prompts both paths send live in agents/prompts.py.
+"""
 import json
-import os
 import re
 
 from loguru import logger
 
-from core.protocols import ActionStep, InferenceClient, SubTask
-from utils.platform_utils import get_desktop_path
+from agents.prompts import (
+    COMPLETION_RULES,
+    OS_CONTEXT,
+    PLANNING_SYSTEM_PROMPT,
+    STEP_SCHEMA,
+    VISUAL_PLAN_PROMPT,
+    VISUAL_PLAN_SYSTEM,
+)
+from core.inference import InferenceClient
+from core.types import ActionStep, SubTask
 
 
 class PlanningParseError(Exception):
@@ -29,437 +42,17 @@ _ScreenSnapshot = None  # resolved on first use
 def _get_snapshot_class():
     global _ScreenSnapshot
     if _ScreenSnapshot is None:
-        from core.capture.screen_snapshot import ScreenSnapshot  # noqa: PLC0415
+        from desktop.snapshot import ScreenSnapshot  # noqa: PLC0415
         _ScreenSnapshot = ScreenSnapshot
     return _ScreenSnapshot
-
-_OS_CONTEXT     = "Microsoft Windows 11 desktop"
-_LAUNCHER_KEY   = "winleft"
-_LAUNCHER_NAME  = "Windows Start menu search"
-# Resolved LITERAL path from the shell (handles OneDrive-redirected
-# Desktops, where $env:USERPROFILE\Desktop does not exist). Forward
-# slashes on purpose: backslashes need \\ escaping inside the JSON the
-# LLM emits and small models mangle them (observed: path truncated to
-# "C:\" then hallucinated). PowerShell, cmd built-ins, and Windows file
-# dialogs all accept forward slashes.
-_DESKTOP_PATH   = get_desktop_path().replace("\\", "/")
-_ICON_NOTE = (
-    "Windows exposes every icon's accessible name through UI Automation, so "
-    "clicking a labelled desktop, taskbar, or Start-menu icon by its visible "
-    "text is exact and instant (faster and more reliable than the launcher)."
-)
-
-# ── Runtime machine identity ──────────────────────────────────────────────────
-_USER = os.getenv("USERNAME") or "user"
-# Use only the username — hostnames can be very long (e.g. laptop model names)
-# and OCR reliably finds the short username portion of the shell prompt.
-_SHELL_PROMPT = _USER
-
-
-_TERM_APP  = "cmd"
-_ECHO_CMD  = f"echo 'hello' > {_DESKTOP_PATH}/hello.txt"
-_MKDIR_CMD = f"mkdir {_DESKTOP_PATH}/projects"
-
-_LAUNCHER_NOTE = (
-    "Do NOT open apps by navigating the Start menu manually — use search instead."
-)
-_LAUNCHER_PATTERN_LABEL = (
-    "Search launcher pattern for Windows (Win key focuses search immediately — no click needed):"
-)
-_LAUNCHER_PATTERN_STEPS = (
-    '    key_press "winleft"  →  wait "0.5"  →  type "<app name>"  →  key_press "enter"'
-)
-
-_SEP = "\\"
-_TERMINAL_FRESH_LAUNCH = (
-    f'  key_press "winleft" → wait "0.5" → type "Windows Terminal" → key_press enter → wait "2.0"'
-    f'\n  STOP here if goal is just "open terminal". Terminal is open when PS prompt is visible.'
-    f'\n  If goal also includes running a command:'
-    f'\n    click {_SHELL_PROMPT} → type command → key_press enter'
-)
-
-_D = _DESKTOP_PATH   # already uses backslash from the assignment above
-_TERMINAL_COMMANDS = (
-    f"  Shell is PowerShell (Windows Terminal default) — use PowerShell syntax.\n"
-    f"  Use FORWARD slashes in paths (PowerShell accepts them; no escaping issues).\n"
-    f"  Create file  :  ni {_D}/name.txt -ItemType File\n"
-    f"  Write file   :  echo 'text' > {_D}/name.txt\n"
-    f"  Append file  :  echo 'text' >> {_D}/name.txt\n"
-    f"  Make folder  :  mkdir {_D}/foldername\n"
-    f"  Delete file  :  del {_D}/name.txt\n"
-    f"  Move/rename  :  move {_D}/old {_D}/new\n"
-    f"  Copy file    :  copy source destination\n"
-    f"  Run Python   :  python {_D}/script.py\n"
-    f"  Install pkg  :  pip install packagename\n"
-    f"  List files   :  dir {_D}\n"
-    f"  Git clone    :  git clone https://github.com/user/repo"
-)
-
-_STEP_SCHEMA = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
-            "id":           {"type": "integer"},
-            "action_type":  {"type": "string", "enum": [
-                "click", "right_click", "double_click",
-                "type", "key_press", "hotkey", "scroll", "wait", "drag", "extract",
-                "set_value", "select", "invoke",
-            ]},
-            "target":       {"type": ["string", "null"]},
-            "value":        {"type": ["string", "null"]},
-            "key":          {"type": ["string", "null"]},
-            "description":  {"type": "string"},
-            "verification": {"type": "string"},
-        },
-        "required": ["id", "action_type", "target", "value", "key",
-                     "description", "verification"],
-    },
-}
-
-PLANNING_SYSTEM_PROMPT = f"""You are a desktop automation agent on {_OS_CONTEXT}.
-Turn each sub-task into the SHORTEST correct sequence of atomic actions.
-
-━━━ DECISION TREE — follow this order every time ━━━
-1. READ screen context. If the EXACT app name or element label appears in the
-   visible screen text as an interactive element (desktop icon, taskbar button,
-   pinned tile) → click it by that label. ONE step. Stop.
-   CRITICAL: NEVER click an app icon using your training-data knowledge of where
-   it "should" be. Only click it if its name appears in the screen context text.
-   If the app name is NOT in the visible text → skip to step 3.
-2. USE a keyboard shortcut if one exists for the action (ctrl+s to save, etc.).
-3. OPEN the search launcher when the app is not visible in the screen text.
-   This is the correct default for launching any app not shown in screen context.
-
-━━━ ACTION REFERENCE ━━━
-click / right_click / double_click  →  target = exact visible text label (1-4 words MAX, never null)
-                                       GOOD targets: "Calculator" "Code" "File" "Save" "OK" "Username"
-                                       BAD targets:  "Calculator icon" "the VS Code app" "click here"
-type                                →  value  = exact string to type (never null)
-key_press                           →  key    = single key name:
-                                         enter escape tab super backspace delete space
-                                         f1-f12 up down left right home end print_screen
-hotkey                              →  key    = key combination:
-                                         ctrl+s  ctrl+c  ctrl+v  ctrl+z  ctrl+a  ctrl+l
-                                         ctrl+t  ctrl+w  ctrl+f  ctrl+p  ctrl+n  ctrl+o
-                                         ctrl+shift+s  ctrl+shift+p
-                                         alt+f4  alt+tab  alt+left
-scroll                              →  target = element to scroll over (null = scroll page center)
-                                       value  = "up" or "down" (default "down")
-drag                                →  target = source element text label (what to drag FROM)
-                                       value  = destination element text label (where to drag TO)
-                                       Use for: drag-and-drop files, reorder list items, resize panes
-extract                             →  target = description of what to read from screen
-                                       e.g. "the error message", "the page title", "the file path"
-                                       Use when the task says: "tell me", "what is", "read", "get the value"
-                                       The extracted text is returned to the user at task end.
-wait                                →  value  = seconds as string: "0.5" "1.0" "2.0" "3.0"
-set_value                           →  target = the field's visible label or accessible name
-                                       value  = exact text to put in the field
-                                       Sets a text field / combo box DIRECTLY through the
-                                       accessibility tree and verifies by read-back.
-                                       PREFER over click+type for labelled form fields.
-select                              →  target = the dropdown / list / tab control's name
-                                       value  = the option to choose (visible option text)
-                                       Opens the control if collapsed and selects the option
-                                       through the accessibility tree. PREFER over clicking
-                                       a dropdown and then clicking an option.
-invoke                              →  target = button / menu item / checkbox accessible name
-                                       Presses it through the accessibility tree — works even
-                                       when partially hidden. Use when a click on the same
-                                       label has already FAILED, or for checkboxes.
-
-━━━ LAUNCHING APPS ━━━
-PRIMARY — click a visible icon (ONLY when the exact app name appears in screen text):
-  The app name must appear in the visible screen context text as an interactive
-  element. If it is NOT there → skip this and use the search launcher below.
-  {_ICON_NOTE}
-  FORBIDDEN: Do NOT guess that "Calculator", "Notepad", or any app is in the
-  taskbar from training knowledge. If you cannot see the name in the screen text,
-  treat it as absent and use the search launcher.
-  CRITICAL: Company names ("Microsoft", "Google", "Apple") in copyright text,
-  window headers, or log output are NOT app icons. Only the EXACT short app name
-  (e.g. "Notepad", "Teams") visible as a taskbar/desktop element counts.
-  CRITICAL: A taskbar button labelled like "Terminal - 1 running window" switches
-  to an EXISTING window that may be busy running another program. If the context
-  contains a [NOTE] saying the app is already running, NEVER click such a button —
-  open a NEW window via the search launcher instead.
-
-FALLBACK → PREFERRED — search launcher (use whenever the app is not in screen text):
-  {_LAUNCHER_NOTE}
-
-  {_LAUNCHER_PATTERN_LABEL}
-  {_LAUNCHER_PATTERN_STEPS}
-      wait 1.5–2.0s after launch, then click the shell prompt or window to confirm focus.
-
-━━━ FOCUS MANAGEMENT ━━━
-• FIRST check the "Foreground window:" line in the screen context. If it already
-  names the target app (e.g. WindowsTerminal.exe, notepad.exe), the app IS focused —
-  type or press keys directly. Do NOT add a click step just to focus it.
-• Click a window before typing in it ONLY when it is not the foreground window.
-• Focus a terminal that is NOT foreground  →  click the username visible in the shell prompt (e.g. {_SHELL_PROMPT})
-• After alt+tab or clicking taskbar  →  always click target window before typing
-
-━━━ TERMINAL ━━━
-Desktop path : {_DESKTOP_PATH}
-
-Fresh terminal (use search launcher — reliable on all machines):
-{_TERMINAL_FRESH_LAUNCH}
-
-Terminal already open (from previous sub-task):
-  If "Foreground window" in screen context IS the terminal (WindowsTerminal.exe,
-  cmd.exe, powershell.exe): type command → key_press enter. NO click.
-  Only if another window is foreground: click {_SHELL_PROMPT} → wait "0.5" → type command → key_press enter
-
-Common commands ({_OS_CONTEXT}):
-{_TERMINAL_COMMANDS}
-
-COMMAND ERRORS — if the step history shows a command FAILED with an error message:
-  • Do NOT press enter again — re-running the identical command fails identically.
-  • Type a CORRECTED command that addresses the error, then press enter.
-  • "Could not find a part of the path" / "No such file or directory" → the
-    directory does not exist: create it first (mkdir <dir>) or use a path that
-    exists. Never reuse the failing path unchanged.
-  • "Access to the path is denied" → that location needs admin rights: use the
-    Desktop path shown above instead.
-  • FORBIDDEN recovery steps: ctrl+c (it INTERRUPTS the shell, it does not copy),
-    "copy error message", "troubleshoot", or any diagnostic step. The ONLY valid
-    recovery is typing a corrected command.
-
-━━━ VS CODE ━━━
-Launch   :  search launcher value="code" → wait "2.0"
-Open folder  :  hotkey ctrl+k, then ctrl+o → navigate → key_press enter
-New file     :  hotkey ctrl+n
-Save         :  hotkey ctrl+s
-Terminal     :  hotkey ctrl+grave
-Command palette  :  hotkey ctrl+shift+p → type command → key_press enter
-
-━━━ LIBREOFFICE ━━━
-Launch Writer  :  search launcher value="libreoffice writer" → wait "2.0"
-Launch Calc    :  search launcher value="libreoffice calc" → wait "2.0"
-Click in doc before typing. Save: ctrl+s. Save As: ctrl+shift+s → type name → enter.
-
-━━━ MICROSOFT TEAMS ━━━
-Switch left-rail views by CLICKING the rail icon by its visible NAME — the rail
-buttons ('Activity', 'Chat', 'Meet', 'Calendar', 'Calls', …) are exposed to the
-accessibility tree, so a click grounds them exactly and instantly (Stage 0 UIA).
-  A goal like "switch to the Calendar view" or "click the Calendar button in the
-  left sidebar" means: click "Calendar".  ONE step. Stop.
-The switch is confirmed when the window title becomes the view name
-(e.g. 'Calendar | Microsoft Teams') or the calendar grid appears.
-Do NOT use ctrl+<digit> shortcuts to pick a rail view: the digit→view mapping
-shifts between Teams versions (a recent build renumbered them when Copilot was
-added to the rail, so ctrl+4 now opens the WRONG view). Click the named icon.
-With the Calendar view open, the 'New meeting' button sits at the TOP-RIGHT of
-the calendar area — click it by its visible text.
-Never click an item in the chat/conversation LIST while the goal is switching
-views — opening a chat is not navigation.
-
-━━━ LOGIN / CREDENTIALS ━━━
-When a task requires entering a username or password, use credential tokens:
-  username field  →  type  value="{{cred:site:username}}"
-  password field  →  type  value="{{cred:site:password}}"
-  Replace "site" with the actual site or app (github.com, gmail.com, localhost, etc.)
-  The credentials are substituted from the user's stored credential file at runtime.
-
-Typical login flow:
-  1. click  target="username field visible text"  (or use Tab to focus it)
-  2. type   value="{{cred:site:username}}"
-  3. key_press  key="tab"                          (move to password field)
-  4. type   value="{{cred:site:password}}"
-  5. key_press  key="enter"                        (submit form)
-
-━━━ DEEP NAVIGATION / LONG PAGES ━━━
-To find content that may be below the fold (not visible on screen):
-  1. scroll  target=null  value="down"   (the system auto-scrolls and retries grounding)
-  2. Continue generating steps — grounding will retry after each scroll automatically.
-  Do NOT generate a long chain of scroll steps manually — one step is enough.
-
-━━━ FORMS / SCHEDULING DIALOGS (meetings, events, settings pages) ━━━
-Forms are filled FIELD BY FIELD with the structured actions — they act on the
-real control and self-verify, where blind clicking on a dropdown is a guess:
-  Text field ("Topic", "Title", "Search")    →  set_value target="<field label>" value="<text>"
-  Dropdown / combo (date, time, duration)    →  select target="<control name>" value="<option>"
-  select values must be the app's FULL option label, not the user's shorthand:
-  a time zone is '(UTC+04:00) Abu Dhabi, Muscat', never 'GST'. If the exact
-  label is unknown, click the dropdown open and take it from CLICKABLE
-  CONTROLS (scroll the open list to reveal options beyond the first few).
-  Checkbox / radio ("Waiting room", "AM/PM") →  invoke target="<label>"
-  Confirm the form                           →  click "Save" / "Schedule" / "Done" (visible text)
-FALLBACK: when set_value/select FAILS on a field (custom-drawn control), use the
-mouse route instead: click the field → hotkey ctrl+a → type the value, and give
-the type step target="<field label>" too — typing without a target lands in
-whichever field happens to hold focus (an attendee email once landed in Title).
-NEVER use click+type on a field whose exact name is in CLICKABLE CONTROLS
-unless set_value already failed on it this subtask.
-Dropdown fallback: click the dropdown → wait "0.5" → click the option text.
-Fill ALL fields the goal names before clicking Save/Schedule — a form submitted
-half-filled is a failed subtask even if the dialog closes.
-Field values come from the TASK, verbatim. NEVER invent placeholders — no
-'example@example.com', no 'Conference Room 1' (a live run saved a real meeting
-that invited example@example.com). Fields the task does not mention stay
-untouched.
-
-━━━ POPUP / DIALOG HANDLING ━━━
-If the screen shows an unexpected dialog, dismiss it BEFORE continuing:
-  Error / alert dialog      →  key_press "escape" or click "OK" / "Close"
-  "Save before closing?"    →  click "Don't Save" (or "Discard") to proceed, or "Save" to preserve
-  "Replace file?"           →  click "Replace" to overwrite
-  "Allow / Deny" permission →  click "Allow"
-  Any unrelated notification popup → key_press "escape"
-Always handle visible dialogs first — they block all other actions.
-
-━━━ TEXT SELECTION ━━━
-Select all text in a field  →  hotkey ctrl+a
-Select word under cursor     →  double_click on the word
-Select line in terminal      →  hotkey ctrl+a (bash) or triple-click
-Clear a text field           →  hotkey ctrl+a  → key_press "delete"
-Copy selected text           →  hotkey ctrl+c
-Paste                        →  hotkey ctrl+v
-Cut                          →  hotkey ctrl+x
-
-━━━ TAB-BASED FORM NAVIGATION ━━━
-  key_press "tab" moves forward between fields; "shift+tab" moves backward.
-  Use tab to move from one field to the next instead of clicking each field.
-
-━━━ WINDOWS SAVE / SAVE-AS DIALOG ━━━
-How to detect: screen text contains "File name" AND "Save" AND "Cancel".
-When this pattern is visible, a Save-As dialog is open. Your ONLY valid actions are:
-  a) If the GOAL names a file path or name (e.g. "save ... as C:/Users/.../haiku.txt"):
-       hotkey ctrl+a              (select all text in the filename field)
-       type  value="<the FULL path/name from the goal, with BACKSLASHES>"
-       key_press "enter"          (confirm — this is the step IMMEDIATELY after type)
-     ALWAYS type the exact path the goal specifies — NEVER accept the default
-     name, or the file saves to the wrong place with the wrong name.
-     WINDOWS: the filename field REJECTS forward slashes ("file name is not
-     valid"). Convert the path to backslashes: C:\\Users\\me\\Desktop\\haiku.txt
-  b) If no specific name is required: key_press "enter"  (save with current name)
-  c) "Replace existing file?" prompt → key_press "enter"  (confirm overwrite)
-CRITICAL: After typing the filename (step a), your very next step MUST be key_press "enter".
-          Do NOT type the filename again — it is already in the field.
-  ✗ NEVER press Ctrl+S when "File name" and "Cancel" are visible — it has no effect.
-     Ctrl+S opens the dialog from the editor. Once the dialog is open, use Enter only.
-
-━━━ STRICT RULES ━━━
-✓ Exact visible text as click target — never "button", "icon", "link"
-✓ Click a window before typing in it (except fresh terminal)
-✓ Combine all related text into ONE type step — never chain two type steps
-✓ Handle any dialog/popup you see before doing the next planned step
-✓ When the goal says "right click" or "right-click", ALWAYS output action_type: "right_click" — NEVER output "click" for a right-click action
-✗ Never invent an editor the task does not name — plain text goes in Notepad or the terminal
-✗ Never open Activities/search when a visible icon or hotkey works
-✗ Never add steps just to be safe — minimum steps only
-✗ Never type in terminal without first clicking the shell prompt (if terminal was already open)
-✗ Never re-launch an app that the sub-task description says is already open
-✗ Never use ctrl+alt+del — Windows intercepts it; it cannot be sent by automation
-✗ Never click an app icon whose name is not in the visible screen text
-✗ Never click a taskbar button labelled "... running window" to OPEN an app — it focuses an existing session instead of opening a new one
-✗ Never press ctrl+c in a terminal — it interrupts the shell, it does NOT copy text
-✗ Never plan "copy error message" or troubleshooting steps — fix the failing command instead
-✗ Never press Ctrl+S when a Save or Save-As dialog is already visible — use Enter instead
-
-━━━ OUTPUT ━━━
-Valid JSON array only. All 7 fields required. Unused fields = null. IDs start at 1.
-
-━━━ EXAMPLES ━━━
-
-EXAMPLE 1 — app icon visible in screen context (screen shows "Code"):
-[
-  {{"id":1,"action_type":"click","target":"Code","value":null,"key":null,"description":"Click VS Code icon visible in taskbar","verification":"VS Code window opens or comes to front"}},
-  {{"id":2,"action_type":"wait","target":null,"value":"1.0","key":null,"description":"Wait for VS Code to load","verification":"VS Code editor is visible"}}
-]
-
-EXAMPLE 2 — open terminal and run a command (no terminal icon visible — use search launcher):
-[
-  {{"id":1,"action_type":"key_press","target":null,"value":null,"key":"{_LAUNCHER_KEY}","description":"Open {_LAUNCHER_NAME}","verification":"Search box appears"}},
-  {{"id":2,"action_type":"wait","target":null,"value":"0.5","key":null,"description":"Wait for search to open","verification":"Search ready"}},
-  {{"id":3,"action_type":"type","target":null,"value":"{_TERM_APP}","key":null,"description":"Type terminal app name","verification":"Terminal result visible"}},
-  {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Launch terminal","verification":"Terminal window opens"}},
-  {{"id":5,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for prompt","verification":"Shell prompt visible"}},
-  {{"id":6,"action_type":"click","target":"{_SHELL_PROMPT}","value":null,"key":null,"description":"Click prompt to confirm focus","verification":"Terminal is active"}},
-  {{"id":7,"action_type":"type","target":null,"value":"{_ECHO_CMD}","key":null,"description":"Type command","verification":"Command visible at prompt"}},
-  {{"id":8,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute command","verification":"New prompt appears, no error"}}
-]
-
-EXAMPLE 3 — terminal already open AND foreground (screen context shows
-"Foreground window: ... (WindowsTerminal.exe)") — type directly, no focus click:
-[
-  {{"id":1,"action_type":"type","target":null,"value":"{_MKDIR_CMD}","key":null,"description":"Type command","verification":"Command at prompt"}},
-  {{"id":2,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Execute","verification":"New prompt, no error"}}
-]
-
-EXAMPLE 4 — fill a labelled form field directly through the accessibility tree:
-[
-  {{"id":1,"action_type":"set_value","target":"Title","value":"Weekly Sync","key":null,"description":"Set the meeting title field","verification":"Title field reads 'Weekly Sync'"}},
-  {{"id":2,"action_type":"set_value","target":"Add required attendees","value":"alex@example.com","key":null,"description":"Add the attendee","verification":"Attendee pill shows alex@example.com"}}
-]
-
-EXAMPLE 5 — launch app with search (no icon visible, no shortcut):
-[
-  {{"id":1,"action_type":"key_press","target":null,"value":null,"key":"{_LAUNCHER_KEY}","description":"Open {_LAUNCHER_NAME}","verification":"Search box visible"}},
-  {{"id":2,"action_type":"wait","target":null,"value":"0.5","key":null,"description":"Wait for search to open","verification":"Search ready"}},
-  {{"id":3,"action_type":"type","target":null,"value":"notepad","key":null,"description":"Type app name","verification":"App result visible"}},
-  {{"id":4,"action_type":"key_press","target":null,"value":null,"key":"enter","description":"Launch","verification":"App opens"}},
-  {{"id":5,"action_type":"wait","target":null,"value":"2.0","key":null,"description":"Wait for app to load","verification":"App window visible"}}
-]
-
-EXAMPLE 6 — type in a LibreOffice Writer document:
-[
-  {{"id":1,"action_type":"click","target":"document area","value":null,"key":null,"description":"Click document to focus it","verification":"Cursor visible in document"}},
-  {{"id":2,"action_type":"type","target":null,"value":"Hello World","key":null,"description":"Type text","verification":"Hello World visible in document"}},
-  {{"id":3,"action_type":"hotkey","target":null,"value":null,"key":"ctrl+s","description":"Save document","verification":"Title bar shows no unsaved indicator"}}
-]
-
-EXAMPLE 7 — fill a scheduling form (goal: "with the schedule-meeting form open,
-set topic to Weekly Sync, date to 07/10/2026, time to 3:00 PM, then save"):
-[
-  {{"id":1,"action_type":"set_value","target":"Topic","value":"Weekly Sync","key":null,"description":"Set meeting topic","verification":"Topic field shows Weekly Sync"}},
-  {{"id":2,"action_type":"set_value","target":"Date","value":"07/10/2026","key":null,"description":"Set meeting date","verification":"Date field shows 07/10/2026"}},
-  {{"id":3,"action_type":"select","target":"Start time","value":"3:00 PM","key":null,"description":"Pick start time","verification":"Start time shows 3:00 PM"}},
-  {{"id":4,"action_type":"click","target":"Save","value":null,"key":null,"description":"Save the meeting","verification":"Form closes, meeting appears in list"}}
-]"""
-
-
-# ── Visual planning (UI-TARS native action space) ─────────────────────────────
-# Used as a recovery path when text-based planning fails repeatedly: the VLM
-# sees the actual screenshot and proposes the next action directly, including
-# pixel coordinates — no OCR or grounding required.
-
-_VISUAL_PLAN_SYSTEM = (
-    "You are a GUI agent operating a computer. You see a screenshot and output "
-    "exactly ONE next action to progress toward the user's goal."
-)
-
-_VISUAL_PLAN_PROMPT = """\
-You are operating a {os_name} desktop. Screenshot attached.
-
-GOAL: {goal}
-{history}
-NEVER repeat an action the history marks as FAILED — especially a click at
-(or near) coordinates that already failed. Choose a DIFFERENT element or a
-different route to the goal instead.
-
-Output exactly ONE action line in this format (no explanation):
-
-click(start_box='[[x1, y1, x2, y2]]')        — left-click the element in that box
-left_double(start_box='[[x1, y1, x2, y2]]')  — double-click
-right_single(start_box='[[x1, y1, x2, y2]]') — right-click
-type(content='text to type')                 — type into the focused field
-hotkey(key='ctrl s')                         — press a key combination
-press(key='enter')                           — press a single key
-scroll(direction='down')                     — scroll the page
-wait()                                       — wait for the screen to settle
-finished()                                   — the goal is fully achieved
-
-All coordinates are on a 0-1000 scale where (0,0) is top-left and (1000,1000)
-is bottom-right of the screenshot."""
 
 
 def _resize28(dim: int) -> int:
     """qwen2.5-VL smart_resize rounds each image side to a multiple of 28
     (patch 14 × merge 2). Our screenshots stay well under the model's max_pixels,
     so the model sees the sent image rounded to /28 and emits absolute pixel
-    coordinates in that space. Mirror of grounding._qwen_resize_dim."""
+    coordinates in that space. Mirror of grounding._qwen_resize_dim.
+    """
     return max(28, int(round(dim / 28)) * 28)
 
 
@@ -569,42 +162,6 @@ def _parse_visual_action(
     raise PlanningParseError(f"unrecognised visual action: {text[:120]}")
 
 
-# Appended to every planning prompt: when to return steps vs. an empty
-# array (= goal achieved). Kept out of plan_steps() for readability.
-_COMPLETION_RULES = (
-    "\n\nReturn ALL remaining action steps, in order, needed to achieve "
-    "the goal. The steps run in sequence exactly as given; the system "
-    "re-plans automatically if one fails, so do NOT add contingency or "
-    "just-in-case steps.\n"
-    "Return [] ONLY when the goal is DEFINITIVELY complete:\n"
-    "  • ‘open terminal / Windows Terminal’: a shell prompt is visible "
-    "(text like ‘PS’, ‘C:\\>’, ‘$’, or a username prompt) = goal achieved.\n"
-    "  • ‘run: <command>’ in terminal: The command has been TYPED (in history) AND "
-    "Enter has been pressed (in history). If a shell prompt is now visible = goal achieved. "
-    "Do NOT press Enter again.\n"
-    "  • ‘open <any app>’: the app’s actual running content is on screen "
-    "(document area, file list, settings panel, etc.) = achieved.\n"
-    "  • ‘click <menu item>’: if a submenu panel or dialog opened AFTER the click = "
-    "goal achieved. Do NOT re-click the same item just because it is still visible "
-    "in the parent menu — parent menu items remain visible after their submenu opens.\n"
-    "  • ‘type X and press enter’ (rename/create dialog): step 1 = type X; "
-    "step 2 = key_press enter; step 3 = [] (done). "
-    "Do NOT type X again after it already appears in history — go straight to enter.\n"
-    "  • ‘type/write <text>’ (document/editor): once the text has been typed "
-    "(a type step is in history) = goal achieved → return []. "
-    "Do NOT type it again, and do NOT add save/close/extra steps the goal "
-    "does not mention — those belong to LATER subtasks.\n"
-    "CAUTION: An app name appearing in text does NOT mean the app is open — "
-    "it may be from the task description shown in the GUI agent’s own log window, "
-    "or a search result. Only return [] when the app’s active running content "
-    "is clearly visible.\n"
-    "LOOP PREVENTION: If the step you are about to plan has the same action_type, "
-    "target, value, and key as the immediately preceding completed step, do NOT "
-    "repeat it — plan the next logical action in sequence or return [].\n"
-    "When in doubt whether the goal is complete, return [] rather than adding "
-    "speculative steps."
-)
-
 
 class PlanningAgent:
     def __init__(self, client: InferenceClient):
@@ -633,15 +190,15 @@ class PlanningAgent:
             lines = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(completed[-8:]))
             history = f"\nSteps attempted so far (FAILED ones are marked):\n{lines}\n"
 
-        prompt = _VISUAL_PLAN_PROMPT.format(
-            os_name=_OS_CONTEXT, goal=subtask.description, history=history,
+        prompt = VISUAL_PLAN_PROMPT.format(
+            os_name=OS_CONTEXT, goal=subtask.description, history=history,
         )
         resp = self.client.query_vlm(
             prompt=prompt,
             image_base64=image_base64,
             max_tokens=150,
             temperature=0.0,
-            system_prompt=_VISUAL_PLAN_SYSTEM,
+            system_prompt=VISUAL_PLAN_SYSTEM,
         )
         step = _parse_visual_action(resp.content, subtask.id, screen_w, screen_h,
                                     display_w, display_h)
@@ -658,14 +215,12 @@ class PlanningAgent:
         screen_context: str = None,
         completed: list[str] = None,
         task_context: list[str] = None,
-        failure_hints: list[str] = None,
         snapshot=None,   # Optional[ScreenSnapshot] — when provided overrides screen_context
     ) -> ActionStep | None:
         """Compatibility wrapper around plan_steps(): first remaining step or None."""
         steps = self.plan_steps(
             subtask, screen_context, completed,
-            task_context=task_context, failure_hints=failure_hints,
-            snapshot=snapshot,
+            task_context=task_context, snapshot=snapshot,
         )
         return steps[0] if steps else None
 
@@ -675,7 +230,6 @@ class PlanningAgent:
         screen_context: str = None,
         completed: list[str] = None,
         task_context: list[str] = None,
-        failure_hints: list[str] = None,
         snapshot=None,   # Optional[ScreenSnapshot] — when provided overrides screen_context
     ) -> list[ActionStep] | None:
         """Dynamic planning: return ALL remaining action steps toward the subtask goal.
@@ -688,7 +242,6 @@ class PlanningAgent:
         sequence instead of once per step cuts most of the per-step cost.
 
         task_context:   descriptions of subtasks already completed in this overall task.
-        failure_hints:  known-bad target/action patterns from episodic failure memory.
         snapshot:       ScreenSnapshot from capture_snapshot(); when provided its
                         format_for_planner() output replaces the raw screen_context string.
         """
@@ -700,7 +253,7 @@ class PlanningAgent:
         messages = [
             {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
             {"role": "user", "content": self._build_planning_prompt(
-                subtask, screen_context, completed, task_context, failure_hints,
+                subtask, screen_context, completed, task_context,
             )},
         ]
         steps = self._query_with_retry(messages, subtask.id)
@@ -715,7 +268,6 @@ class PlanningAgent:
         screen_context: str,
         completed: list[str],
         task_context: list[str],
-        failure_hints: list[str],
     ) -> str:
         """Assemble the user prompt: goal + context blocks + completion rules."""
         # Inter-subtask context — what was done before this subtask
@@ -730,13 +282,7 @@ class PlanningAgent:
             lines = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(completed))
             history = f"\nSteps completed so far toward this goal:\n{lines}\n"
 
-        # Episodic failure hints — avoid patterns that failed before
-        failure_block = ""
-        if failure_hints:
-            hint_lines = "\n".join(f"  - {h}" for h in failure_hints)
-            failure_block = f"\nKnown failure patterns to avoid:\n{hint_lines}\n"
-
-        user_content = f"Goal: {subtask.description}{ctx_block}{history}{failure_block}"
+        user_content = f"Goal: {subtask.description}{ctx_block}{history}"
 
         # Reinforce the right_click rule in the user prompt when relevant
         _sd_lower = subtask.description.lower()
@@ -749,7 +295,7 @@ class PlanningAgent:
         if screen_context:
             user_content += f"\nText currently visible on screen: {screen_context}"
 
-        return user_content + _COMPLETION_RULES
+        return user_content + COMPLETION_RULES
 
     def _query_with_retry(self, messages: list[dict], subtask_id: int) -> list[ActionStep]:
         """One planning call, with a single temperature-0 retry on parse errors."""
@@ -758,7 +304,7 @@ class PlanningAgent:
         # in _parse_steps recovers the prefix, but headroom beats salvage.
         resp = self.client.query_llm(
             messages, max_tokens=1152, temperature=0.2,
-            response_schema=_STEP_SCHEMA,
+            response_schema=STEP_SCHEMA,
         )
         try:
             return self._parse_steps(resp.content, subtask_id)
@@ -770,7 +316,7 @@ class PlanningAgent:
             logger.warning(f"[PLANNING] parse error: {e} — retrying once at temperature 0")
             resp = self.client.query_llm(
                 messages, max_tokens=1152, temperature=0.0,
-                response_schema=_STEP_SCHEMA,
+                response_schema=STEP_SCHEMA,
             )
             try:
                 return self._parse_steps(resp.content, subtask_id)

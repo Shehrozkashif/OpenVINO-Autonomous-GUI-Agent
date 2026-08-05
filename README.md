@@ -14,7 +14,7 @@ OpenVINO™ Model Server. No cloud. No API keys. No data ever leaves your desk.
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![Backend](https://img.shields.io/badge/inference-OpenVINO%E2%84%A2%20Model%20Server-0068b5)](https://github.com/openvinotoolkit/model_server)
 [![GUI](https://img.shields.io/badge/GUI-PyQt6-41cd52)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Tests](https://img.shields.io/badge/tests-430%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-453%20passing-brightgreen)](#running-tests)
 
 [How It Works](#how-it-works) •
 [Architecture](#architecture) •
@@ -101,13 +101,14 @@ flowchart TB
         GUI --- EVBUS --- HUD
     end
 
-    subgraph ORCH_LAYER["&nbsp;Orchestration Layer · core/&nbsp;"]
+    subgraph ORCH_LAYER["&nbsp;Decision Layer · core/ — the loop and every policy&nbsp;"]
         direction LR
         ORCH["TaskOrchestrator<br/>retries · replanning ·<br/>deadlines · loop guard"]
+        TRUTH["Ground Truth<br/>disk · process ·<br/>window title · fields"]
+        ANCHOR["App Anchor<br/>stay in the<br/>task's window"]
         FIREWALL["Action Firewall<br/>injection-proof"]
-        KILL["Kill Switch<br/>triple-Esc"]
         MEMORY[("Task Memory<br/>SQLite")]
-        ORCH --- FIREWALL --- KILL --- MEMORY
+        ORCH --- TRUTH --- ANCHOR --- FIREWALL --- MEMORY
     end
 
     subgraph AGENT_LAYER["&nbsp;Agent Layer · agents/ — every agent depends only on the InferenceClient protocol&nbsp;"]
@@ -115,18 +116,18 @@ flowchart TB
         ROUTER["Router<br/>instruction →<br/>subtasks"]
         PLANNER["Planner<br/>one step at a time,<br/>from the live screen"]
         GROUND["Grounding<br/>UIA → OCR → VLM<br/>target → (x, y)"]
-        ACTION["Action<br/>click · type ·<br/>keys · drag"]
+        ACTION["Action<br/>click · type ·<br/>keys · form controls"]
         REFLECT["Reflection<br/>OCR→LLM verify ·<br/>VLM for visual steps"]
         ROUTER --- PLANNER --- GROUND --- ACTION --- REFLECT
     end
 
-    subgraph PLATFORM_LAYER["&nbsp;Platform Layer · core/capture · core/controller.py · utils/&nbsp;"]
+    subgraph PLATFORM_LAYER["&nbsp;World Layer · desktop/ — reports facts, never decides&nbsp;"]
         direction LR
-        PERCEPTION["Perception — ScreenCapture (GDI) · RapidOCR · Windows UIA"]
-        INPUT["Input — DesktopController (Win32 SendInput) · credential vault (OS keyring)"]
+        PERCEPTION["Perception — capture (GDI) · ocr (RapidOCR) · uia (accessibility tree)"]
+        INPUT["Effects — input (Win32 SendInput) · system (windows, processes) · credentials"]
     end
 
-    subgraph INFER_LAYER["&nbsp;Inference Layer · core/ovms_client.py — 100% local&nbsp;"]
+    subgraph INFER_LAYER["&nbsp;Inference Layer · core/inference.py — 100% local&nbsp;"]
         direction LR
         CLIENT["OVMSClient<br/>implements<br/>InferenceClient"]
         OVMS["OpenVINO™ Model Server<br/>qwen3-8b-int4-ov LLM ·<br/>ui-tars-1.5-7b-int8-ov VLM<br/>OpenAI API · :8000"]
@@ -143,13 +144,19 @@ flowchart TB
 The orchestrator owns the loop — it consults memory before routing, screens
 every typed command through the firewall, and arms the kill switch for the
 duration of a task. Agents do one job each and touch the world only through
-the platform layer. All model calls funnel through a single client behind the
-`InferenceClient` protocol (`core/protocols.py`), which is what let the
+the desktop layer. All model calls funnel through a single client behind the
+`InferenceClient` protocol (`core/inference.py`), which is what let the
 inference backend move to OpenVINO™ Model Server without touching an agent.
+
+Dependencies point one way — `ui → core → agents → desktop` — and the rule at
+the bottom boundary is that **`desktop/` reports facts and never decides**:
+`desktop.system.count_process_windows()` says how many windows an app owns,
+while `core.groundtruth` decides whether that counts as a launch. That split
+is why the whole policy layer is unit-tested on Linux with no GPU.
 
 | Agent | Consumes | Produces |
 |-------|----------|----------|
-| Router | instruction, screen context, memory hints | ordered `SubTask` list |
+| Router | instruction, screen context, installed apps | ordered `SubTask` list |
 | Planner | subtask, live OCR context, step history | next `ActionStep` (or *done*) |
 | Grounding | target description, screen | `(x, y)` + confidence |
 | Action | grounded step | real mouse / keyboard events |
@@ -159,8 +166,8 @@ The orchestrator also handles failure modes that show up in real runs: a
 **loop guard** stops a plan stuck repeating the same step, **idempotency
 protection** never blind-retries non-repeatable actions like typing or Enter,
 **visual replanning** escalates to the VLM when text-based planning stalls,
-and tasks completed via a recovery path are quarantined from success memory
-so broken plans can't poison future routing.
+and a task that only finished through a recovery path is marked degraded, so
+it is never recorded as a clean success.
 
 ### Long multi-step tasks
 
@@ -181,8 +188,6 @@ mechanisms:
   with everything already completed and produces a fresh plan for the
   remaining work using a different approach, instead of throwing the whole
   task away (capped at 2 replans).
-- **Checkpoint & resume** — every completed subtask is checkpointed; re-running
-  an interrupted instruction within 30 minutes plans only the remaining work.
 - **Clarifying questions** — instructions like *"schedule a Zoom meeting"*
   that omit required details (time, invitees) trigger a dialog asking for
   them **before** execution starts, instead of guessing.
@@ -282,7 +287,7 @@ python start.py --prompt "Search for OpenVINO documentation" --auto-run
 4. **Stop** any time — from the HUD, the GUI, or the keyboard kill switch
 
 Other pages: **Agent Sessions** (task history & re-run), **Workflows**,
-**Memory** (learned tasks & failure patterns), **Screen History** (frames
+**Task History** (tasks that completed cleanly), **Screen History** (frames
 recorded during missions), and **Settings**.
 
 <details>
@@ -330,31 +335,41 @@ intel-openvino-desktop-agent/
 ├── main.py                   ← Qt app + orchestrator wiring
 ├── config.py                 ← model ids & server settings (single source of truth)
 │
-├── agents/
-│   ├── action.py              # ActionExecutionAgent — executes steps
-│   ├── grounding.py           # UIGroundingAgent — text → (x, y), OCR engine
-│   ├── planning.py            # PlanningAgent — plans one step at a time
-│   ├── reflection.py          # ReflectionAgent — OCR→LLM / VLM verification
-│   └── router.py              # RouterAgent — decomposes instructions
+├── core/                      # the loop and its policy — decides what to do
+│   ├── orchestrator.py        # See → Plan → Act → Verify loop, recovery policy
+│   ├── runstate.py            # every budget and limit; per-subtask run state
+│   ├── groundtruth.py         # checks the OS can prove (disk, process, title, fields)
+│   ├── subtasks.py            # what a subtask's own words ask for
+│   ├── apps.py                # app name → executable / on-screen signals
+│   ├── anchor.py              # which window the task owns; clicks stay inside it
+│   ├── firewall.py            # deterministic destructive-command classifier
+│   ├── inference.py           # InferenceClient protocol + OVMS client
+│   ├── history.py             # SQLite record of completed tasks (for the UI)
+│   └── types.py               # SubTask, ActionStep
 │
-├── core/
-│   ├── capture/
-│   │   ├── screenshot.py      # Windows screen capture (GDI via PIL.ImageGrab)
-│   │   └── screen_snapshot.py # Foreground/background-aware OCR snapshot
-│   ├── windows_uia.py         # Stage 0: Windows UIA accessibility tree
-│   ├── ovms_client.py         # OVMSClient — LLM + VLM via OpenVINO Model Server
-│   ├── protocols.py           # Shared data models + InferenceClient protocol
-│   ├── action_firewall.py     # Deterministic destructive-command classifier
-│   ├── controller.py          # Keyboard/mouse (raw Win32 SendInput via ctypes) + kill switch
-│   └── orchestrator.py        # Central coordinator — runs the full loop
+├── agents/                    # one model-facing job each
+│   ├── router.py              # instruction → subtasks; replanning; clarifying questions
+│   ├── planning.py            # subtask + screen → next ActionStep(s)
+│   ├── grounding.py           # target text → (x, y): UIA → OCR → VLM
+│   ├── coords.py              # VLM answer → screen pixel
+│   ├── action.py              # executes one step
+│   ├── reflection.py          # OCR→LLM / VLM verification
+│   └── prompts.py             # every system prompt, in one file
 │
-├── memory/task_memory.py      # SQLite task + failure-pattern memory
-├── utils/                     # Platform detection, clipboard, credentials
+├── desktop/                   # Windows facts and effects — reports, never decides
+│   ├── uia.py                 # accessibility tree: search + structured actions
+│   ├── input.py               # Win32 SendInput mouse/keyboard + kill switch
+│   ├── capture.py             # GDI capture, frame hashing, own-window mask
+│   ├── ocr.py                 # RapidOCR engine + fuzzy label matching
+│   ├── snapshot.py            # foreground-aware OCR snapshot
+│   ├── system.py              # DPI, windows, processes, installed apps, GPUs
+│   ├── clipboard.py           # clipboard paste-typing
+│   └── credentials.py         # OS-keyring credential storage
+│
 ├── ui/                        # PyQt6 command-center GUI
 ├── tests/
-│   ├── unit/                  # Unit tests — fast, no backend or desktop required
-│   ├── e2e/                   # End-to-end pipeline checks (require a running OVMS)
-│   └── live/                  # Live tests against a real desktop (require OVMS + display)
+│   ├── unit/                  # 453 tests — fast, no backend or desktop required
+│   └── live/                  # real-desktop suites (require OVMS + display)
 ├── requirements.txt           # runtime deps (no ML framework — HTTP to OVMS)
 ├── requirements-export.txt    # one-time model-conversion toolchain
 └── requirements-dev.txt       # pytest + ruff
@@ -390,17 +405,14 @@ intel-openvino-desktop-agent/
 ```powershell
 venv\Scripts\activate
 
-# Unit tests — fast, no backend or desktop required
+# Unit tests — 453 tests, fast, no backend or desktop required
 pytest
 
 # Lint
 ruff check .
 
-# End-to-end pipeline check (requires OVMS running + a live desktop)
-python tests/e2e/test_pipeline.py
-
-# Long-horizon live suite (multi-subtask chains; LIVE_ZOOM=1 enables the
-# Zoom meeting-scheduling smoke test on machines with Zoom installed)
+# Long-horizon live suite (multi-subtask chains on a real desktop; needs OVMS.
+# LIVE_ZOOM=1 enables the Zoom meeting-scheduling smoke test where Zoom exists)
 python tests/live/test_longhorizon.py
 ```
 
@@ -417,6 +429,7 @@ python tests/live/test_longhorizon.py
 | Model files have `Access is denied` | Delete the model folder from an **elevated** terminal: `rd /s /q models\ui-tars-1.5-7b-int8-ov`, then re-run `python start.py` to re-export |
 | Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers |
 | Agent clicks wrong place | Lower screen scaling in Windows display settings |
+| Clicks happen with no visible mouse movement | `config.FORCE_MOUSE = True` (default) drives the real cursor; `False` uses the faster UIA pattern invoke |
 | First run takes very long | Expected — UI-TARS conversion (INT4 quantization of a 7B model) takes 30–60 minutes. The LLM (Qwen3) is pre-converted and downloads in minutes. Subsequent runs skip this step |
 
 ---

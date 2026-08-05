@@ -175,9 +175,6 @@ class IntelligencePanel(QWidget):
             lambda k, m: self._feed("guard", f"{k}: {m}"))
         bus.extracted.connect(
             lambda k, v: self._feed("extract", f"Extracted {k} = '{v}'"))
-        bus.memory_hint.connect(
-            lambda sim: self._feed(
-                "memory", f"Recognized a similar past task ({sim:.0%} match)"))
         bus.task_done.connect(
             lambda summary, s: self._feed("ok", f"{summary} ({s:.1f}s)"))
         bus.element_located.connect(self._on_element)

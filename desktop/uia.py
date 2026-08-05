@@ -1,4 +1,4 @@
-# core/windows_uia.py
+# desktop/uia.py
 """Windows UIAutomation (UIA) — Stage 0 grounding for Windows.
 
 Queries the Windows UI Automation tree for elements matching a text label.

@@ -14,7 +14,7 @@ import json
 from unittest.mock import MagicMock
 
 from agents.router import RouterAgent
-from core.protocols import SubTask
+from core.types import SubTask
 
 
 def _subs(*descriptions) -> list[SubTask]:
@@ -152,7 +152,7 @@ class TestInstalledAppHint:
 
     def _hint(self, instruction, apps):
         from unittest.mock import patch
-        with patch("utils.platform_utils.installed_apps", return_value=apps):
+        with patch("desktop.system.installed_apps", return_value=apps):
             return RouterAgent._installed_app_hint(instruction)
 
     def test_mentioned_installed_app_is_hinted(self):
@@ -192,7 +192,7 @@ class TestAppHintWholeWordMatching:
 
     def _hint(self, instruction):
         from unittest.mock import patch
-        with patch("utils.platform_utils.installed_apps", return_value=self._APPS):
+        with patch("desktop.system.installed_apps", return_value=self._APPS):
             return RouterAgent._installed_app_hint(instruction)
 
     def test_no_app_named_means_no_hint(self):

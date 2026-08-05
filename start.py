@@ -67,7 +67,7 @@ def banner():
 
 def check_gpus():
     """Detect GPUs, print a summary, return (gpu_type, gpus)."""
-    from utils.platform_utils import detect_gpus
+    from desktop.system import detect_gpus
 
     print(_bold("\nGPU Detection:"))
     gpus = detect_gpus()
