@@ -940,6 +940,14 @@ class TestVerifyLaunchTriggerCondition:
         "use the terminal already running",
         # no launch word at all
         "type TestFolder and press enter",
+        # Live 03:39 run, Teams: "open" + an app name inside a leading
+        # "with ...," clause, but the body is a plain click. verify_launch
+        # carried its own loose detector and demanded a NEW Teams window for
+        # this. It passed only because clicking New meeting happens to open a
+        # window; in-place, the subtask would have re-run and clicked twice.
+        "with the Calendar open in Microsoft Teams, click the New meeting button",
+        "with the schedule-meeting form open, set the title to PROJECT DISCUSSION",
+        "with Notepad open, click in the document area and type a haiku",
     ])
     def test_non_launch_subtasks_skip_verification(self, description):
         """True here means "nothing to verify" — never a process or OCR check."""

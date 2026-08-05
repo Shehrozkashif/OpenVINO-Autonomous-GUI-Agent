@@ -375,14 +375,15 @@ class GroundTruth:
         agent off to the Start menu.
         """
         desc = subtask.description.lower()
-        if "already open" in desc or "already running" in desc:
-            return True
-        app_vocab = set(apps.PROCESS_MAP) | set(apps.APP_SIGNALS)
-        is_app_launch = (
-            any(w in desc for w in ("launch", "search launcher"))
-            or ("open" in desc and any(k in desc for k in app_vocab))
-        )
-        if not is_app_launch:
+        # apps.is_launch_description() is the single definition of "this
+        # subtask launches an app". This method used to carry its own looser
+        # copy — any "open" plus any app word — which classified
+        # "with the Calendar open in Microsoft Teams, click the New meeting
+        # button" as a launch and demanded a NEW Teams window for a plain
+        # click. It passed only because that click happens to open a window;
+        # had the form opened in place, the subtask would have been re-run and
+        # New meeting clicked twice. One definition, in core/apps.py.
+        if not (apps.is_launch_description(desc) or "search launcher" in desc):
             return True
 
         proc = apps.process_for(desc)
