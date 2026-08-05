@@ -25,9 +25,9 @@ jobs:
         python-version: ["3.10", "3.12"]   # floor and recommended, per README
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -49,5 +49,9 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      # No display here, and that is deliberate. The suite has to pass on a
+      # bare runner: `_screen_size()` once raised "X connection failed" through
+      # TaskOrchestrator.__init__, which passed on every developer desktop and
+      # failed every test here. Do not add a virtual display to make it green.
       - name: Unit tests
         run: pytest tests/unit -rs

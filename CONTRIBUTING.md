@@ -53,8 +53,21 @@ pytest                                 # 453 unit tests — no backend or deskto
 python tests/live/test_usecases.py     # real desktop — requires OVMS + Windows
 ```
 
-The unit suite (`tests/unit/`) must pass on a machine with no model server and
-no GPU; anything that needs a live backend belongs in `tests/live/` instead.
+The unit suite (`tests/unit/`) must pass on a machine with no model server,
+no GPU and **no display**; anything that needs a live backend or a real screen
+belongs in `tests/live/` instead. The no-display part is easy to break by
+accident: `desktop/capture._screen_size()` once fell back to a real screen grab
+and raised `X connection failed` on CI, taking `TaskOrchestrator.__init__` with
+it — green on every developer desktop, red on every runner. Anything in
+`desktop/` that a constructor calls has to degrade instead of raise.
+
+### Run the CI checks before pushing
+
+```bash
+pre-commit install --install-hooks        # ruff + hygiene on every commit
+pre-commit install --hook-type pre-push   # unit suite before each push
+pre-commit run --all-files                # check everything right now
+```
 
 Build test doubles from `tests/unit/conftest.py` (`make_grounder`,
 `make_reflector`, `make_llm`, `make_memory`) rather than bare `MagicMock`s. A

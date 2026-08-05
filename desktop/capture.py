@@ -21,9 +21,26 @@ def _grab(x: int = 0, y: int = 0, w: int = 0, h: int = 0) -> Image.Image:
     return _pil_grab(x, y, w, h)
 
 
-def _screen_size() -> tuple:
-    # Use GetDeviceCaps to get physical pixel dimensions without doing a full
-    # screen capture (which ImageGrab.grab() would require).
+# Nominal size reported when the machine has no display at all. Nothing can be
+# grounded or clicked in that state, so the number is never used for real work —
+# it exists so constructing the agent does not explode on a headless box.
+_NO_DISPLAY_SIZE = (1920, 1080)
+_no_display_logged = False
+
+
+def _screen_size() -> tuple[int, int]:
+    """Physical pixel size of the primary display.
+
+    GetDeviceCaps answers without capturing a frame, so it is tried first on
+    Windows. PIL's grab is the cross-platform fallback — and it needs a display.
+
+    A headless machine (CI, a server session, a container) has none, and
+    ImageGrab raises "X connection failed". That must not take the caller down:
+    TaskOrchestrator.__init__ and UIGroundingAgent.__init__ both ask for the
+    screen size, so an exception here makes the entire policy layer
+    unconstructible off Windows — which is exactly where its tests run.
+    desktop/ reports facts; "there is no screen" is a fact, not a crash.
+    """
     try:
         import ctypes
         hdc = ctypes.windll.user32.GetDC(0)
@@ -34,8 +51,19 @@ def _screen_size() -> tuple:
             return w, h
     except Exception:
         pass
-    img = _pil_grab()
-    return img.width, img.height
+    try:
+        img = _pil_grab()
+        return img.width, img.height
+    except Exception as e:
+        global _no_display_logged
+        if not _no_display_logged:
+            _no_display_logged = True
+            logger.warning(
+                f"[CAPTURE] No display available ({e}) — reporting a nominal "
+                f"{_NO_DISPLAY_SIZE[0]}x{_NO_DISPLAY_SIZE[1]} screen. Capture "
+                f"and grounding cannot work here; only offline logic will run."
+            )
+        return _NO_DISPLAY_SIZE
 
 
 # ── Frame comparison ──────────────────────────────────────────────────────────

@@ -1,0 +1,44 @@
+# Pre-commit hooks — the same checks CI runs, before the push instead of after.
+#
+#   pip install -r requirements-dev.txt
+#   pre-commit install --install-hooks           # lint on commit
+#   pre-commit install --hook-type pre-push      # tests on push
+#
+# Split by cost: linting is instant and runs on every commit; the unit suite
+# takes ~40 s and runs on push, which is the last point where a red CI run can
+# still be avoided.
+#
+# One thing these hooks CANNOT catch: CI has no display, and this machine does.
+# `_screen_size()` used to raise "X connection failed" on a bare runner while
+# passing here, which broke every orchestrator test in CI and none locally.
+# The guard for that is tests/unit/test_capture.py::TestScreenSizeWithoutADisplay,
+# which fakes the missing display, so it runs everywhere — including here.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.1              # keep in step with requirements-dev.txt
+    hooks:
+      - id: ruff
+        name: ruff (lint, autofix)
+        args: [--fix]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=512]   # model weights belong in models/, which is ignored
+      - id: debug-statements   # no stray breakpoint() in a committed file
+
+  - repo: local
+    hooks:
+      - id: unit-tests
+        name: unit tests (no backend or desktop needed)
+        entry: pytest tests/unit -q
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
