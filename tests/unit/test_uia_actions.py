@@ -23,7 +23,13 @@ from agents.planning import PlanningAgent
 from core.orchestrator import TaskOrchestrator
 from core.runstate import DEDUP_LIMIT_BY_ACTION_TYPE, OrchestratorConfig
 from core.types import ActionStep, SubTask
-from tests.unit.conftest import make_grounder, make_history, make_reflector
+from tests.unit.conftest import (
+    goal_check_reply,
+    make_grounder,
+    make_history,
+    make_llm,
+    make_reflector,
+)
 
 
 def _step(action_type, target=None, value=None, key=None):
@@ -161,22 +167,80 @@ class TestOrchestratorPolicy:
         step = _step("set_value", target="Topic", value="Weekly Sync")
         assert orch._execute_step(step) is True
         orch.actor.execute.assert_called_once()
-
-    def test_set_value_skips_llm_reflection(self):
-        # set_value verifies itself by UIA read-back — reflection would only
-        # add a ~4 s LLM call per field.
-        orch = _orch()
-        orch.actor.execute = MagicMock(return_value=True)
-        step = _step("set_value", target="Topic", value="Weekly Sync")
-        orch.planner.plan_steps = MagicMock(side_effect=[[step], None])
-        ok = orch._execute_subtask(SubTask(id=1, description="fill the form", depends_on=[]))
-        assert ok is True
-        orch.reflector.verify.assert_not_called()
-
     def test_invoke_is_non_idempotent_and_dedup_limited(self):
         # Pressing a real button twice double-submits — same class as Enter.
         assert DEDUP_LIMIT_BY_ACTION_TYPE["invoke"] == 1
         assert DEDUP_LIMIT_BY_ACTION_TYPE["set_value"] == 1
+
+class TestTreeVerifiedSkipsReflection:
+    """The LLM verifier is skipped for set_value / select only when the
+    accessibility tree read the value back.
+
+    That read-back is the better evidence — it is the control's own reported
+    content, not a model's reading of OCR text — and it saves the ~2 s OCR pass
+    plus the ~5.6 s reflection call. Live 03:40 Teams run: four selects paid
+    that twice-over to re-derive what ValuePattern had already confirmed.
+
+    The paths that CANNOT read back (a provider that never exposes selection
+    state, the pixel click+type fallbacks) must still be verified, so this is
+    decided on what the actor reports, never on action_type alone. set_value
+    used to skip unconditionally, which silently skipped its blind fallback too.
+    """
+
+    def _orch_that_reaches_the_step(self):
+        """An orchestrator whose goal check says "not done", so planning and
+        step execution actually run. With a plain MagicMock reflector the goal
+        check reports satisfied and the subtask ends before any step — which is
+        why the old version of this test passed without proving anything.
+        """
+        orch = TaskOrchestrator(
+            router=MagicMock(),
+            planner=MagicMock(plan_next_step_visual=MagicMock(return_value=None)),
+            grounder=make_grounder(),
+            actor=MagicMock(),
+            reflector=make_reflector(
+                client=make_llm(goal_check_reply(satisfied=False, confidence=0.0))),
+            capturer=MagicMock(),
+            history=make_history(),
+            config=OrchestratorConfig(max_steps_per_subtask=2),
+            on_step_log=lambda _: None, ocr=MagicMock(),
+        )
+        orch.truth.wait_for_settle = MagicMock()
+        orch._get_screen_context = MagicMock(return_value='"Topic"')
+        return orch
+
+    def _run(self, action_type: str, verified: bool):
+        orch = self._orch_that_reaches_the_step()
+        orch.actor.execute = MagicMock(return_value=True)
+        orch.actor.verified_by_readback = verified
+        step = _step(action_type, target="Topic", value="Weekly Sync")
+        orch.planner.plan_steps = MagicMock(side_effect=[[step], None])
+        orch._execute_subtask(SubTask(id=1, description="fill the form", depends_on=[]))
+        return orch
+
+    @pytest.mark.parametrize("action_type", ["set_value", "select"])
+    def test_read_back_replaces_the_llm_call(self, action_type):
+        orch = self._run(action_type, verified=True)
+        orch.reflector.verify.assert_not_called()
+
+    @pytest.mark.parametrize("action_type", ["set_value", "select"])
+    def test_unreadable_result_still_gets_verified(self, action_type):
+        orch = self._run(action_type, verified=False)
+        assert orch.reflector.verify.called, (
+            f"a {action_type} whose result could not be read back has no "
+            f"ground truth — it must still reach the verifier"
+        )
+
+    def test_a_mock_actor_is_not_mistaken_for_verified(self):
+        """getattr(...) is True, not truthy: an un-set attribute on a test
+        double must never silently disable verification.
+        """
+        orch = self._orch_that_reaches_the_step()
+        orch.actor = MagicMock(execute=MagicMock(return_value=True))
+        step = _step("set_value", target="Topic", value="Weekly Sync")
+        orch.planner.plan_steps = MagicMock(side_effect=[[step], None])
+        orch._execute_subtask(SubTask(id=1, description="fill the form", depends_on=[]))
+        assert orch.reflector.verify.called
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -76,12 +76,18 @@ def check_gpus():
         return "cpu", []
 
     backend = gpus[0].backend
-    total = sum(g.vram_gb for g in gpus)
+    total = sum(g.usable_gb for g in gpus)
     for g in gpus:
-        vram = f"  {g.vram_gb}GB VRAM" if g.vram_mb else ""
-        print(_green(f"  [{backend.upper()}] GPU{g.index}: {g.name}{vram}"))
+        if g.shared_mb:
+            mem = (f"  {g.usable_gb}GB usable "
+                   f"({g.vram_gb}GB dedicated + {g.shared_gb}GB shared)")
+        elif g.vram_mb:
+            mem = f"  {g.vram_gb}GB VRAM"
+        else:
+            mem = ""
+        print(_green(f"  [{backend.upper()}] GPU{g.index}: {g.name}{mem}"))
     if total:
-        print(_green(f"  Total: {len(gpus)} {backend.upper()} GPU(s), {total:.1f}GB VRAM"))
+        print(_green(f"  Total: {len(gpus)} {backend.upper()} GPU(s), {total:.1f}GB usable"))
     return backend, gpus
 
 

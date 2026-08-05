@@ -800,6 +800,41 @@ def _norm_text(s: str) -> str:
     return " ".join((s or "").split()).strip().lower()
 
 
+# ── Did the last action prove its own effect? ──────────────────────────────────
+#
+# set_value and select mostly confirm themselves: they write through a pattern
+# and read the control back. That read-back is stronger evidence than an LLM
+# judging OCR text of a screenshot, and it costs milliseconds instead of the
+# ~7 s an OCR pass plus a reflection call takes.
+#
+# But not every path can read back. A selection can fire on a control whose
+# state the provider never exposes, and the pixel fallbacks (click + type) have
+# no tree to read at all. Those genuinely need the verifier.
+#
+# So this layer reports what it knows and takes no position on what to do about
+# it — core/ decides whether to skip verification. Same read-and-clear shape as
+# pop_select_miss() below.
+
+_last_verified: bool | None = None
+
+
+def _report_verification(ok: bool):
+    global _last_verified
+    _last_verified = bool(ok)
+
+
+def pop_verification() -> bool | None:
+    """How the last uia action ended, then forget it.
+
+    True   the action read its effect back and it matched.
+    False  the action fired but its result could not be read.
+    None   no uia action has run since the last call.
+    """
+    global _last_verified
+    verified, _last_verified = _last_verified, None
+    return verified
+
+
 def set_element_value(target: str, value: str, timeout_s: float = 3.0) -> bool:
     """Set a text control's content via ValuePattern and verify by read-back.
 
@@ -824,6 +859,7 @@ def set_element_value(target: str, value: str, timeout_s: float = 3.0) -> bool:
         vp.SetValue(value)
         readback = vp.Value or ""
         ok = _norm_text(readback) == _norm_text(value)
+        _report_verification(ok)
         if ok:
             logger.info(f"[UIA] set_value '{target}' = '{value[:60]}' (verified)")
         else:
@@ -911,6 +947,7 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
                     vp.SetValue(option)
                     readback = _norm_text(vp.Value or "")
                     if want and (want in readback or readback in want):
+                        _report_verification(True)
                         if expanded_here:
                             try:
                                 ctrl.GetExpandCollapsePattern().Collapse()
@@ -950,18 +987,21 @@ def select_option(target: str, option: str, timeout_s: float = 4.0) -> bool:
         # Verify selection against the tree — item state or container value.
         try:
             if item.GetSelectionItemPattern().IsSelected:
+                _report_verification(True)
                 logger.info(f"[UIA] select '{option}' in '{target}' (verified)")
                 return True
         except Exception:
             pass
         try:
             if want in _norm_text(ctrl.GetValuePattern().Value):
+                _report_verification(True)
                 logger.info(f"[UIA] select '{option}' in '{target}' (value verified)")
                 return True
         except Exception:
             pass
-        # Selection fired without a readable state — count the action as done;
-        # the orchestrator's reflection still verifies the visible outcome.
+        # Selection fired without a readable state — count the action as done,
+        # but say so: core/ keeps the LLM verifier for exactly this case.
+        _report_verification(False)
         logger.info(f"[UIA] select '{option}' in '{target}' (state unreadable)")
         return True
 

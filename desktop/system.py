@@ -285,12 +285,30 @@ def get_desktop_path() -> str:
 class GPUInfo:
     index: int
     name: str
-    vram_mb: int
-    backend: str   # "nvidia" | "intel"
+    vram_mb: int             # dedicated only — see shared_mb for integrated GPUs
+    backend: str             # "nvidia" | "intel"
+    shared_mb: int = 0       # system RAM an integrated GPU may borrow
 
     @property
     def vram_gb(self) -> float:
         return round(self.vram_mb / 1024, 1)
+
+    @property
+    def shared_gb(self) -> float:
+        return round(self.shared_mb / 1024, 1)
+
+    @property
+    def usable_gb(self) -> float:
+        """What the models can actually occupy.
+
+        Win32_VideoController.AdapterRAM reports only the DEDICATED carve-out,
+        which on an integrated GPU (Arc 140V and friends) is a couple of GB
+        while the real budget is system memory. The startup banner printed
+        that 2 GB figure next to a 16 GB part and read as a hard limit — a
+        model that fits fine looked impossible. Windows lets an iGPU address
+        roughly half of system RAM on top of its dedicated slice.
+        """
+        return round((self.vram_mb + self.shared_mb) / 1024, 1)
 
 
 def detect_gpus() -> list[GPUInfo]:
@@ -336,21 +354,36 @@ def _detect_intel_gpus() -> list[GPUInfo]:
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
+             # RAM= line first, then one line per Intel adapter. One
+             # PowerShell start instead of two keeps the banner snappy.
+             "\"RAM=$((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory)\"; "
              "Get-CimInstance Win32_VideoController | "
              "Where-Object { $_.Name -match 'Intel' } | "
              "ForEach-Object { \"$($_.Name)|$($_.AdapterRAM)\" }"],
             capture_output=True, text=True, timeout=8,
         )
         if r.returncode == 0:
-            for i, line in enumerate(ln.strip() for ln in r.stdout.splitlines() if ln.strip()):
+            shared_mb, i = 0, 0
+            for line in (ln.strip() for ln in r.stdout.splitlines() if ln.strip()):
+                if line.startswith("RAM="):
+                    try:
+                        # Windows lets an integrated GPU address about half of
+                        # system RAM as "shared GPU memory".
+                        shared_mb = int(line[4:]) // (1024 * 1024) // 2
+                    except ValueError:
+                        shared_mb = 0
+                    continue
                 name, _, ram = line.partition("|")
                 try:
-                    # AdapterRAM is bytes (and unreliable/0 for shared-memory iGPUs)
+                    # AdapterRAM is bytes, and on an iGPU it is the dedicated
+                    # carve-out only — not the budget a model has to fit in.
                     vram_mb = max(int(ram), 0) // (1024 * 1024)
                 except ValueError:
                     vram_mb = 0
                 gpus.append(GPUInfo(index=i, name=name.strip() or f"Intel GPU {i}",
-                                    vram_mb=vram_mb, backend="intel"))
+                                    vram_mb=vram_mb, backend="intel",
+                                    shared_mb=shared_mb))
+                i += 1
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     return gpus

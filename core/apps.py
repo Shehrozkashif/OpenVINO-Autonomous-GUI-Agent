@@ -145,3 +145,35 @@ def is_launch_description(description: str) -> bool:
     return body.startswith("launch") or (
         body.startswith("open") and any(k in body for k in PROCESS_MAP)
     )
+
+
+def launch_query(description: str) -> str | None:
+    """The words to type into Start to launch this subtask's app, or None.
+
+    "open Microsoft Teams" -> "Microsoft Teams". None whenever anything is
+    unclear, because the caller uses this to skip planning entirely and typing
+    the wrong words into the Start menu is worse than paying for the LLM.
+
+    Only descriptions that resolve to a KNOWN executable qualify, and the name
+    we extract must resolve to the same one — so a sentence this function
+    misreads can never become a launch we did not intend.
+    """
+    if not is_launch_description(description):
+        return None
+    body = re.sub(r"^\s*with\b[^,]*,\s*", "", (description or "").lower()).strip()
+    m = re.match(r"(?:launch|open)\s+(?:the\s+)?(.+)", body)
+    if not m:
+        return None
+    name = m.group(1)
+    # "open notepad and type hello" -> "notepad": the router normally splits
+    # these, but a trailing clause must never reach the Start menu.
+    name = re.split(r"\s+(?:and|then|to|so|using|via|,)\s+", name)[0]
+    name = re.sub(r"\s+(?:app|application|window|program)$", "", name.strip(" .,'\"’"))
+    if not name or len(name) > 40:
+        return None
+    # The extracted name must point at the same executable the full sentence
+    # does. "open the file explorer window" losing a word into a different app
+    # would send the agent somewhere else entirely.
+    if process_for(name) != process_for(description):
+        return None
+    return name

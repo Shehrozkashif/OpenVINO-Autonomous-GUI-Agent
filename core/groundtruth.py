@@ -393,9 +393,17 @@ class GroundTruth:
         return self._verify_by_ocr(signals) if signals else True
 
     def _verify_by_process(self, proc: str, baseline: int | None) -> bool:
+        """Poll for the launch, checking BEFORE each wait.
+
+        An app that is already up answers on the first look, so the common
+        case costs nothing. The waits are for apps still starting; sleeping
+        first paid the full 1.5 s even when the window was already there.
+        """
         label = proc.split(".")[0]
-        for attempt, wait_s in enumerate([1.5, 2.5]):
-            time.sleep(wait_s)
+        for wait_s in (0.0, 1.5, 2.5):
+            if wait_s:
+                self.log(f"  [CHECK] '{label}' not yet confirmed — retrying in {wait_s}s")
+                time.sleep(wait_s)
             if baseline is not None:
                 if system.count_process_windows(proc) > baseline:
                     self.log(f"  [CHECK] '{label}' NEW window confirmed")
@@ -403,8 +411,6 @@ class GroundTruth:
             elif launch_confirmed(proc):
                 self.log(f"  [CHECK] '{label}' process confirmed running")
                 return True
-            if attempt == 0:
-                self.log(f"  [CHECK] '{label}' not yet confirmed — retrying in 2.5s")
         self.log(f"  [CHECK] Launch of '{proc}' not confirmed")
         return False
 

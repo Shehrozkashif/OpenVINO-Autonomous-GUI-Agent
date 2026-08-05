@@ -983,6 +983,8 @@ class TaskOrchestrator:
                         f"  [PLAN-QUEUE] Executing queued step "
                         f"({len(run.step_queue)} remaining after this)"
                     )
+                elif (macro := self._start_menu_launch(subtask, run)) is not None:
+                    step, run.step_queue = macro[0], macro[1:]
                 else:
                     planned = self.planner.plan_steps(
                         subtask, run.screen_context, run.completed,
@@ -1069,6 +1071,42 @@ class TaskOrchestrator:
             return self._note_planning_failure(run), None
         return "step", step
 
+    def _start_menu_launch(
+        self, subtask: SubTask, run: "SubtaskRun"
+    ) -> list[ActionStep] | None:
+        """The Start-menu launch sequence for an "open <app>" subtask, or None.
+
+        Asking an 8B model how to open a named, installed app is a question
+        with one answer. It answered win → type the name → Enter in the live
+        Notepad run (14.4 s) and the live Teams run (14.5 s), because that is
+        the only answer, and it is the exact route the launch-retry hint tells
+        it to use after any other route fails. Emitting it directly buys back
+        ~14 s per launch with no loss: the same three actions, each still
+        verified, and the launch still has to satisfy groundtruth.verify_launch.
+
+        Returns None — falling back to the planner — unless this is a launch
+        goal, nothing has been tried yet, and apps.launch_query() is confident
+        about which app to type. An unknown or oddly-worded app still goes to
+        the model.
+        """
+        if not run.is_launch_goal or run.completed:
+            return None
+        query = apps.launch_query(subtask.description)
+        if not query:
+            return None
+        self.log(
+            f"  [LAUNCH] '{query}' is a known app — using the Start-menu "
+            f"sequence directly (no planning call)"
+        )
+        return [
+            ActionStep(id=1, subtask_id=subtask.id, action_type="key_press",
+                       key="winleft", description="Open Windows Start menu search"),
+            ActionStep(id=2, subtask_id=subtask.id, action_type="type",
+                       value=query, description=f"Type '{query}' into Start"),
+            ActionStep(id=3, subtask_id=subtask.id, action_type="key_press",
+                       key="enter", description=f"Launch {query}"),
+        ]
+
     def _run_step_attempts(
         self, run: "SubtaskRun", subtask: SubTask, step: ActionStep,
     ) -> str:
@@ -1089,10 +1127,12 @@ class TaskOrchestrator:
         # menu results, desktop icons) — the pre-click anchor gate must not
         # veto those. Read by _foreign_app_at_point for every attempt below.
         self.anchor.gate_off = run.is_launch_goal
-        # set_value verifies itself by reading the control back through the
-        # accessibility tree — LLM reflection would only add latency.
+        # "wait" and "extract" have no visible outcome to verify. set_value and
+        # select are decided AFTER they run, on whether the tree read the value
+        # back (see the [TREE-VERIFY] branch below) — set_value used to skip
+        # unconditionally, which also skipped its unverified click+type fallback.
         skip_reflection = (
-            step.action_type in ("wait", "extract", "set_value") or _cmd_type_step
+            step.action_type in ("wait", "extract") or _cmd_type_step
         )
         if _cmd_type_step:
             self.log(
@@ -1227,6 +1267,27 @@ class TaskOrchestrator:
                 continue
 
             if skip_reflection:
+                return "step_ok"
+
+            # Tree read-back beats LLM reflection, and costs ~7 s less.
+            # set_value and select write through a UIA pattern and read the
+            # control back; when that read-back matched, the value IS on the
+            # form and there is nothing an 8B model squinting at OCR text can
+            # add. Live 03:40 Teams run: four selects each paid a 2.0 s OCR
+            # pass plus a 5.6 s reflection call to re-derive what ValuePattern
+            # had already confirmed — ~30 s per meeting.
+            #
+            # Only when the actor could NOT read the result back (a provider
+            # that never exposes selection state, or the pixel click+type
+            # fallback) does this fall through to the verifier, exactly as
+            # before. `is True` is deliberate: a MagicMock actor in tests must
+            # not be mistaken for a verified action.
+            if (step.action_type in ("set_value", "select")
+                    and getattr(self.actor, "verified_by_readback", False) is True):
+                self.log(
+                    f"  [TREE-VERIFY] '{step.target}' read back from the "
+                    f"accessibility tree — verified without an LLM call"
+                )
                 return "step_ok"
 
             # Deterministic type verification: read the focused control's

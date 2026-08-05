@@ -62,6 +62,11 @@ class ActionExecutionAgent:
     def __init__(self, controller: DesktopController):
         self.controller = controller
         self._should_use_clipboard = _should_use_clipboard_for
+        # True when the step just executed proved its own effect by reading
+        # the control back through the accessibility tree. The orchestrator
+        # skips LLM verification when this is True — the read-back is the
+        # better evidence and costs ~7 s less. Reset on every execute().
+        self.verified_by_readback = False
 
     def execute(self, step: ActionStep, x: int = None, y: int = None) -> bool:
         """Execute one ActionStep. Returns True on success, False on failure.
@@ -70,6 +75,7 @@ class ActionExecutionAgent:
         keyboard steps). Dispatches to the _do_<action_type> method; every
         handler shares the (step, x, y) signature.
         """
+        self.verified_by_readback = False
         handler = getattr(self, f"_do_{step.action_type}", None)
         if handler is None:
             logger.error(f"[ACTION] Unknown action_type: '{step.action_type}'")
@@ -184,6 +190,7 @@ class ActionExecutionAgent:
         value, sensitive = self._substitute_credentials(step.value)
         from desktop import uia
         if uia.set_element_value(step.target, value):
+            self.verified_by_readback = True
             return True
         # Fields without a writable ValuePattern (date/time segments, custom
         # web widgets) still take keyboard input: focus via the tree, replace
@@ -222,6 +229,7 @@ class ActionExecutionAgent:
         typed = _alnum(value)
         seen = _alnum(str(info.get("value", "")))
         ok = bool(typed) and bool(seen) and (typed in seen or seen in typed)
+        self.verified_by_readback = ok
         if ok:
             logger.info(f"[ACTION] set_value via focus+type '{step.target}' (verified)")
         else:
@@ -238,6 +246,9 @@ class ActionExecutionAgent:
             return False
         from desktop import uia
         if uia.select_option(step.target, step.value):
+            # Most select paths read the control back; one fires on a control
+            # whose state the provider never exposes. uia says which happened.
+            self.verified_by_readback = uia.pop_verification() is True
             return True
         # Pixel fallback (mirrors set_value): click the combobox, replace its
         # text with the wanted option, commit with Enter. Editable comboboxes

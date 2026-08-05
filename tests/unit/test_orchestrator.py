@@ -20,9 +20,13 @@ import pytest
 
 from agents.grounding import GroundingResult
 from agents.reflection import ReflectionResult
-from core import groundtruth, subtasks
+from core import apps, groundtruth, subtasks
 from core.orchestrator import TaskOrchestrator
-from core.runstate import DEDUP_LIMIT_BY_ACTION_TYPE, OrchestratorConfig
+from core.runstate import (
+    DEDUP_LIMIT_BY_ACTION_TYPE,
+    OrchestratorConfig,
+    SubtaskRun,
+)
 from core.types import ActionStep, SubTask
 from tests.unit.conftest import (
     goal_check_reply,
@@ -741,15 +745,20 @@ def _make_orch_nwl():
 
 class TestPreExistingAppNote:
 
+    # The note is asserted on _setup_launch_goal's own output, not on a
+    # planner call: a known app now takes the Start-menu macro and never
+    # reaches the planner on the first cycle. The note still matters, because
+    # a macro that fails to launch falls through to the planner on the next
+    # cycle carrying this same task_context.
+
     def test_note_injected_when_app_already_running(self):
-        """Process pre-exists → planner's task_context gets the NEW-window NOTE."""
+        """Process pre-exists → the NEW-window NOTE goes into task_context."""
         orch = _make_orch_nwl()
         with patch("desktop.system.is_process_running", return_value=True), \
              patch("desktop.system.count_process_windows", return_value=1):
-            orch._execute_subtask(_sub_nwl("open windows terminal"))
+            _, _, _, ctx = orch._setup_launch_goal(_sub_nwl("open windows terminal"), None)
 
-        ctx = orch.planner.plan_steps.call_args.kwargs.get("task_context")
-        assert ctx, "task_context must be passed to the planner"
+        assert ctx, "task_context must carry the note"
         joined = " ".join(ctx)
         assert "ALREADY running" in joined
         assert "NEW" in joined
@@ -760,11 +769,21 @@ class TestPreExistingAppNote:
         orch = _make_orch_nwl()
         with patch("desktop.system.is_process_running", return_value=False), \
              patch("desktop.system.count_process_windows", return_value=0):
+            _, _, _, ctx = orch._setup_launch_goal(_sub_nwl("open windows terminal"), None)
+
+        assert not ctx or "ALREADY running" not in " ".join(ctx)
+        assert "WindowsTerminal.exe" not in orch._launch_window_baseline
+
+    def test_note_reaches_the_planner_when_the_macro_declines(self):
+        """An app the macro cannot name still goes to the planner, with the note."""
+        orch = _make_orch_nwl()
+        with patch("desktop.system.is_process_running", return_value=True), \
+             patch("desktop.system.count_process_windows", return_value=1), \
+             patch("core.apps.launch_query", return_value=None):
             orch._execute_subtask(_sub_nwl("open windows terminal"))
 
         ctx = orch.planner.plan_steps.call_args.kwargs.get("task_context")
-        assert not ctx or "ALREADY running" not in " ".join(ctx)
-        assert "WindowsTerminal.exe" not in orch._launch_window_baseline
+        assert ctx and "ALREADY running" in " ".join(ctx)
 
     def test_non_launch_subtask_records_no_baseline(self):
         orch = _make_orch_nwl()
@@ -882,8 +901,11 @@ class TestGoalCheckWithBaseline:
             found=True, confidence=0.9, x=1, y=2, latency_ms=1.0,
             target="Terminal", element_type="foreground_interactive"))
 
+        # launch_query off, so this exercises the planner path the test was
+        # written against rather than the Start-menu macro.
         with patch("desktop.system.is_process_running", return_value=True), \
-             patch("desktop.system.count_process_windows", return_value=1):
+             patch("desktop.system.count_process_windows", return_value=1), \
+             patch("core.apps.launch_query", return_value=None):
             result = orch._execute_subtask(_sub_nwl("open windows terminal"))
 
         # Subtask still completes (planner returned None), but it must have been
@@ -892,6 +914,24 @@ class TestGoalCheckWithBaseline:
         # must have been called a second time.
         assert result is True
         assert orch.planner.plan_steps.call_count == 2
+
+    def test_macro_steps_all_run_when_window_count_is_flat(self):
+        """Same rule for the macro path: a flat window count must not let the
+        GOAL-CHECK shortcut end the subtask after the first keypress.
+        """
+        ok = ReflectionResult(success=True, confidence=0.9, observation="ok",
+                              error_description="", should_retry=False,
+                              recovery_hint="", ocr_text="")
+        orch = _make_orch_nwl()
+        orch.reflector.verify = MagicMock(return_value=ok)
+        with patch("desktop.system.is_process_running", return_value=True), \
+             patch("desktop.system.count_process_windows", return_value=1):
+            orch._execute_subtask(_sub_nwl("open windows terminal"))
+
+        # win → type → enter: all three, not a shortcut after the first.
+        assert orch.actor.execute.call_count == 3
+        types = [c.args[0].action_type for c in orch.actor.execute.call_args_list]
+        assert types == ["key_press", "type", "key_press"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1190,7 +1230,6 @@ class TestSaveTargetDiskGate:
 # conservative everywhere else.
 # ═══════════════════════════════════════════════════════════════════════════
 
-from core.runstate import SubtaskRun
 
 
 def _goal_check_orch(llm_reply: str):
@@ -1839,3 +1878,118 @@ class TestBlockingOverlayInContext:
             run, SubTask(id=1, description="click Save", depends_on=[]), [],
         )
         assert "BLOCKING OVERLAY" not in run.screen_context
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Start-menu launch macro
+#
+# "open <known app>" is a question with one answer. The 8B planner spent
+# 14.4 s on it for Notepad and 14.5 s for Teams in the live runs, and both
+# times returned win → type the name → Enter — the same route the launch-retry
+# hint tells it to use anyway. The macro emits it directly.
+#
+# The guard that matters is the fallback: anything the extractor is not
+# confident about must still reach the planner, because typing the wrong words
+# into the Start menu opens the wrong app.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestLaunchQuery:
+
+    @pytest.mark.parametrize("description,expected", [
+        ("open Microsoft Teams", "microsoft teams"),
+        ("open Notepad", "notepad"),
+        ("launch Firefox browser", "firefox browser"),
+        # A trailing clause must never reach the Start menu.
+        ("open notepad and type hello", "notepad"),
+    ])
+    def test_extracts_the_app_name(self, description, expected):
+        assert apps.launch_query(description) == expected
+
+    @pytest.mark.parametrize("description", [
+        # Acts inside an app that is already up — launches nothing.
+        "with Microsoft Teams already open, click the Calendar button",
+        "with the Calendar open in Microsoft Teams, click the New meeting button",
+        # "open" as a menu word, no app.
+        "right click on the desktop to open the context menu",
+        # Unknown app: the planner knows more than we do.
+        "open the thing",
+        "open my custom internal tool",
+    ])
+    def test_declines_when_unsure(self, description):
+        assert apps.launch_query(description) is None
+
+
+class TestStartMenuLaunchMacro:
+
+    def _run(self, description: str):
+        orch = _make_orch_nwl()
+        ok = ReflectionResult(success=True, confidence=0.9, observation="ok",
+                              error_description="", should_retry=False,
+                              recovery_hint="", ocr_text="")
+        orch.reflector.verify = MagicMock(return_value=ok)
+        with patch("desktop.system.is_process_running", return_value=False), \
+             patch("desktop.system.count_process_windows", return_value=0):
+            orch._execute_subtask(_sub_nwl(description))
+        return orch
+
+    def test_known_app_never_reaches_the_planner(self):
+        orch = self._run("open notepad")
+        orch.planner.plan_steps.assert_not_called()
+
+    def test_macro_is_the_start_menu_sequence(self):
+        orch = self._run("open notepad")
+        steps = [c.args[0] for c in orch.actor.execute.call_args_list]
+        assert [s.action_type for s in steps] == ["key_press", "type", "key_press"]
+        assert steps[0].key == "winleft"
+        assert steps[1].value == "notepad"
+        assert steps[2].key == "enter"
+
+    def test_unknown_app_still_uses_the_planner(self):
+        orch = self._run("open my custom internal tool")
+        orch.planner.plan_steps.assert_called()
+
+    def test_macro_only_leads_the_subtask(self):
+        """Once steps have run, replanning goes back to the model — the macro
+        is a first guess, not a loop the subtask can never escape.
+        """
+        orch = _make_orch_nwl()
+        run = SubtaskRun(started_at=0.0)
+        run.is_launch_goal = True
+        run.completed = ["pressed win"]
+        assert orch._start_menu_launch(_sub_nwl("open notepad"), run) is None
+
+    def test_non_launch_subtask_is_not_macroed(self):
+        orch = _make_orch_nwl()
+        run = SubtaskRun(started_at=0.0)
+        run.is_launch_goal = False
+        assert orch._start_menu_launch(_sub_nwl("open notepad"), run) is None
+
+
+class TestLaunchCheckOrder:
+    """The launch check polls; it must look BEFORE it waits.
+
+    An app that is already up answers on the first look. Sleeping first paid
+    the full 1.5 s on every confirmed launch for nothing.
+    """
+
+    def test_already_running_app_confirms_without_sleeping(self):
+        orch = _make_orch_nwl()
+        with patch("core.groundtruth.launch_confirmed", return_value=True), \
+             patch("core.groundtruth.time.sleep") as slept:
+            assert orch.truth._verify_by_process("notepad.exe", None) is True
+        slept.assert_not_called()
+
+    def test_slow_app_is_still_waited_for(self):
+        orch = _make_orch_nwl()
+        with patch("core.groundtruth.launch_confirmed",
+                   side_effect=[False, True]), \
+             patch("core.groundtruth.time.sleep") as slept:
+            assert orch.truth._verify_by_process("notepad.exe", None) is True
+        assert slept.call_count == 1, "one wait between the two looks"
+
+    def test_gives_up_after_the_full_poll(self):
+        orch = _make_orch_nwl()
+        with patch("core.groundtruth.launch_confirmed", return_value=False), \
+             patch("core.groundtruth.time.sleep") as slept:
+            assert orch.truth._verify_by_process("notepad.exe", None) is False
+        assert slept.call_count == 2, "same two waits as before the reorder"
