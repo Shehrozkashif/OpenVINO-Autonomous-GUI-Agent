@@ -70,10 +70,21 @@ BASELINE_MODEL = "ui-tars-1.5-7b-int8-ov"
 # desktop/capture.py, so the numbers here transfer to the real pipeline.
 SEND_W, SEND_H = 1280, 720
 
-EXPORT_TOOL_URL = (
-    "https://raw.githubusercontent.com/openvinotoolkit/model_server/"
-    "main/demos/common/export_models/export_model.py"
-)
+# export_model.py writes graph.pbtxt, and graph.pbtxt is a contract with the
+# ovms.exe that will read it. Take the helper from `main` against an older
+# binary and the graph asks for calculator inputs that binary has never heard of
+# — it fails validation before the model architecture is ever looked at, so a
+# version mismatch masquerades as "the model is unsupported".
+#
+# start.py pins this same ref. Keep them in step, or override with --ovms-ref.
+DEFAULT_OVMS_REF = "releases/2025/3"
+
+
+def export_tool_url(ref: str) -> str:
+    return (
+        "https://raw.githubusercontent.com/openvinotoolkit/model_server/"
+        f"{ref}/demos/common/export_models/export_model.py"
+    )
 
 
 # ── Console ───────────────────────────────────────────────────────────────────
@@ -185,23 +196,30 @@ def already_exported(name: str) -> bool:
     return name in names
 
 
-def export_tool() -> str:
-    """Reuse the project's copy of export_model.py, else fetch one."""
+def export_tool(ref: str) -> str:
+    """Reuse the project's copy of export_model.py, else fetch the pinned one.
+
+    The cache filename carries the ref, so switching --ovms-ref fetches a fresh
+    helper instead of silently reusing the previous one.
+    """
     local = os.path.join(HERE, "ovms", "export_model.py")
     if os.path.isfile(local):
-        print(green(f"  [OK] Using {local}"))
+        print(green(f"  [OK] Using {local} (the copy start.py uses)"))
         return local
     os.makedirs(WORK, exist_ok=True)
-    dest = os.path.join(WORK, "export_model.py")
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", ref).strip("_")
+    dest = os.path.join(WORK, f"export_model_{slug}.py")
+    url = export_tool_url(ref)
     if os.path.isfile(dest):
+        print(green(f"  [OK] export_model.py @ {ref}"))
         return dest
-    print(yellow("  [..] Fetching export_model.py (one-time)..."))
+    print(yellow(f"  [..] Fetching export_model.py @ {ref} (one-time)..."))
     try:
-        urllib.request.urlretrieve(EXPORT_TOOL_URL, dest)
+        urllib.request.urlretrieve(url, dest)
     except Exception as e:
         die(f"Could not download export_model.py: {e}",
-            f"Download it manually to {dest} from {EXPORT_TOOL_URL}")
-    print(green("  [OK] export_model.py"))
+            f"Download it manually to {dest} from {url}")
+    print(green(f"  [OK] export_model.py @ {ref}"))
     return dest
 
 
@@ -346,14 +364,38 @@ def check_export_deps(tool: str) -> None:
         "Then run this script again — nothing was downloaded yet.")
 
 
-def prepare(source: str, name: str, weight_format: str, device: str, cache_gb: int) -> None:
+def drop_graph(name: str) -> None:
+    """Forget the generated graph, keep the multi-GB weights.
+
+    graph.pbtxt and the config.json entry are cheap text written by
+    export_model.py. When the helper's version was wrong they are the only
+    things wrong — re-downloading 5.4 GB of identical weights to regenerate two
+    text files would be absurd, and export_model.py skips a download whose
+    files are already on disk.
+    """
+    removed = []
+    graph = os.path.join(REPO, name, "graph.pbtxt")
+    if os.path.isfile(graph):
+        os.remove(graph)
+        removed.append("graph.pbtxt")
+    if os.path.isfile(CONFIG_JSON):
+        os.remove(CONFIG_JSON)
+        removed.append("config.json")
+    if removed:
+        print(yellow(f"  [..] Refresh: removed {', '.join(removed)} (weights kept)"))
+
+
+def prepare(source: str, name: str, weight_format: str, device: str,
+            cache_gb: int, ref: str, refresh: bool) -> None:
     step(2, f"Prepare {name}")
     os.makedirs(REPO, exist_ok=True)
+    if refresh:
+        drop_graph(name)
     if already_exported(name):
         print(green(f"  [OK] {name} already in {REPO} — skipping download"))
         return
 
-    tool = export_tool()
+    tool = export_tool(ref)
     check_export_deps(tool)
     ensure_cli_shims()
     print(yellow(f"  [..] Pulling {source} ({weight_format}, {device})"))
@@ -471,7 +513,27 @@ def _report_load_failure(log_path: str) -> None:
         pass
     tail = "\n".join(text.strip().splitlines()[-25:])
 
-    if re.search(r"[Uu]nsupported.*(qwen3_vl|VLM model type)", text):
+    # The log states the real build; ovms.exe --version often does not.
+    build = re.search(r"OpenVINO backend ([\d.]+\S*)", text)
+    if build:
+        print(bold(f"  OVMS reports OpenVINO backend {build.group(1)}"))
+
+    if re.search(r"GetContract failed to validate|ValidatedGraphConfig Initialization failed"
+                 r"|was not expected", text):
+        tag = re.search(r'Tag "([A-Z_]+)"', text)
+        print(red("  [FAIL] graph.pbtxt does not match this ovms.exe."))
+        print()
+        print(bold("  This is NOT an answer about qwen3_vl — the architecture was"))
+        print(bold("  never reached. The graph was rejected before that."))
+        print()
+        if tag:
+            print(yellow(f"  The graph declares {tag.group(1)}, which this binary"))
+            print(yellow("  does not accept. export_model.py is newer than ovms.exe."))
+        print(yellow("  Re-run pinned to the matching release, keeping the weights:"))
+        print(bold(f"    python {os.path.basename(__file__)} "
+                   f"--ovms-ref {DEFAULT_OVMS_REF} --refresh"))
+        print(yellow("  Nothing is re-downloaded; only graph.pbtxt is rewritten."))
+    elif re.search(r"[Uu]nsupported.*(qwen3_vl|VLM model type)", text):
         print(red("  [FAIL] This OVMS build does not support qwen3_vl."))
         print()
         print(bold("  This is the answer to the main question: NO, not on this version."))
@@ -821,6 +883,12 @@ def main() -> None:
     ap.add_argument("--weight-format", default="int4", choices=["int4", "int8", "fp16"])
     ap.add_argument("--device", default="GPU", choices=["GPU", "CPU", "NPU", "AUTO"])
     ap.add_argument("--cache-gb", type=int, default=2)
+    ap.add_argument("--ovms-ref", default=DEFAULT_OVMS_REF,
+                    help="model_server git ref for export_model.py; must match "
+                         "your ovms.exe (default: %(default)s)")
+    ap.add_argument("--refresh", action="store_true",
+                    help="rewrite graph.pbtxt and config.json, keeping the "
+                         "downloaded weights — use after changing --ovms-ref")
     ap.add_argument("--targets", type=int, default=6, help="how many controls to test")
     ap.add_argument("--wait", type=int, default=8, help="seconds to click your app")
     ap.add_argument("--baseline", action="store_true",
@@ -833,7 +901,8 @@ def main() -> None:
     os.makedirs(WORK, exist_ok=True)
 
     binary = preflight()
-    prepare(args.source, args.name, args.weight_format, args.device, args.cache_gb)
+    prepare(args.source, args.name, args.weight_format, args.device,
+            args.cache_gb, args.ovms_ref, args.refresh)
     proc = serve(binary, args.name)
 
     print()
