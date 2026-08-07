@@ -50,3 +50,6 @@ htmlcov/
 *~
 .DS_Store
 Thumbs.db
+
+# Scratch models + logs from tools/test_qwen3vl.py (gigabytes, throwaway)
+tools/qwen3vl_probe/
