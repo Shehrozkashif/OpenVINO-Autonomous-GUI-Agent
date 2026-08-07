@@ -207,14 +207,22 @@ def export_tool() -> str:
 
 # Module name -> pip name, where the two differ.
 _PIP_NAME = {
-    "jinja2": "jinja2",
-    "huggingface_hub": "huggingface_hub",
     "optimum": "optimum-intel[openvino]",
-    "nncf": "nncf",
-    "openvino": "openvino",
-    "transformers": "transformers",
+    "openvino_tokenizers": "openvino-tokenizers",
+    "openvino_genai": "openvino-genai",
     "yaml": "pyyaml",
     "PIL": "pillow",
+    "cv2": "opencv-python",
+}
+
+# Modules that requirements-export.txt already pulls in, directly or as
+# dependencies of optimum-intel[openvino]. If everything missing is on this
+# list, one documented command fixes it — no need to name packages one at a
+# time and have the user rediscover them on the next run.
+_EXPORT_TOOLCHAIN = {
+    "huggingface_hub", "jinja2", "nncf", "numpy", "openvino",
+    "openvino_genai", "openvino_tokenizers", "optimum", "torch",
+    "transformers",
 }
 
 
@@ -246,18 +254,36 @@ def check_export_deps(tool: str) -> None:
             continue
         try:
             if importlib.util.find_spec(mod) is None:
-                missing.append(_PIP_NAME.get(mod, mod))
+                missing.append(mod)
         except Exception:
-            missing.append(_PIP_NAME.get(mod, mod))
+            missing.append(mod)
 
-    if missing:
-        # Quote extras like optimum-intel[openvino] — bare brackets are glob
-        # syntax in some shells and get eaten before pip sees them.
-        args = " ".join(f'"{p}"' if "[" in p else p for p in missing)
-        die(f"export_model.py needs packages this venv lacks: {', '.join(missing)}",
-            f"pip install {args}\n"
+    if not missing:
+        print(green("  [OK] export_model.py dependencies present"))
+        return
+
+    names = ", ".join(missing)
+    reqs = os.path.join(os.path.dirname(HERE), "requirements-export.txt")
+    if " " in reqs:
+        reqs = f'"{reqs}"'
+    if os.path.isfile(reqs.strip('"')) and set(missing) <= _EXPORT_TOOLCHAIN:
+        # requirements.txt deliberately omits the ML stack — the agent talks to
+        # OVMS over HTTP and imports no framework. Conversion is the one job
+        # that needs it, and the repo already pins that set.
+        die(f"The model-conversion toolchain is not installed: {names}",
+            "Install CPU-only torch first — otherwise pip pulls ~3.4 GB of\n"
+            "CUDA wheels this Intel GPU will never use:\n"
+            "  pip install torch --index-url https://download.pytorch.org/whl/cpu\n"
+            f"  pip install -r {reqs}\n"
             "Then run this script again — nothing was downloaded yet.")
-    print(green("  [OK] export_model.py dependencies present"))
+
+    # Quote extras like optimum-intel[openvino] — bare brackets are glob syntax
+    # in some shells and get eaten before pip sees them.
+    pkgs = [_PIP_NAME.get(m, m) for m in missing]
+    args = " ".join(f'"{p}"' if "[" in p else p for p in pkgs)
+    die(f"export_model.py needs packages this venv lacks: {names}",
+        f"pip install {args}\n"
+        "Then run this script again — nothing was downloaded yet.")
 
 
 def prepare(source: str, name: str, weight_format: str, device: str, cache_gb: int) -> None:
