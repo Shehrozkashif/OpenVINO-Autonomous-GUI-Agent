@@ -205,6 +205,66 @@ def export_tool() -> str:
     return dest
 
 
+_CLI_SHIMS = (
+    ("huggingface-cli", "huggingface_hub", "hf"),
+    ("optimum-cli", "optimum", "optimum-cli"),
+)
+
+
+def _console_entrypoint(dist: str, name: str) -> str:
+    """Return a console_scripts entry point as "module:function", or "".
+
+    Read from package metadata rather than hardcoding module paths, so the
+    shims keep working when a package reorganises itself.
+    """
+    try:
+        import importlib.metadata as md
+        for ep in md.distribution(dist).entry_points:
+            if ep.group == "console_scripts" and ep.name == name:
+                return ep.value  # e.g. "huggingface_hub.cli.hf:main"
+    except Exception:
+        pass
+    return ""
+
+
+def ensure_cli_shims() -> None:
+    """Give export_model.py the CLIs it shells out to.
+
+    Intel's script runs `huggingface-cli download ...` in a subprocess. Recent
+    huggingface_hub renamed that command to `hf` and left the old name as a
+    stub that prints a deprecation notice and exits — so the download silently
+    produces nothing and the script reports "Failed to download llm model",
+    which looks like a network or model problem and is neither.
+
+    Same trick start.py uses: write a .bat per CLI that calls the real entry
+    point through THIS interpreter, and prepend it to PATH so it beats the
+    venv's own launcher.
+    """
+    shim_dir = os.path.join(WORK, "_shims")
+    os.makedirs(shim_dir, exist_ok=True)
+    active = []
+    for shim_name, dist, ep_name in _CLI_SHIMS:
+        entrypoint = _console_entrypoint(dist, ep_name)
+        if not entrypoint:
+            continue  # package absent — leave that CLI alone
+        module, _, func = entrypoint.partition(":")
+        runner = f"import sys; from {module} import {func}; sys.exit({func}())"
+        try:
+            # newline="" — otherwise Windows text mode turns the \r\n below into
+            # \r\r\n. cmd.exe tolerates that, but there is no reason to write it.
+            path = os.path.join(shim_dir, f"{shim_name}.bat")
+            with open(path, "w", newline="") as f:
+                f.write(f'@echo off\r\n"{sys.executable}" -c "{runner}" %*\r\n')
+            active.append(shim_name)
+        except Exception as e:
+            print(yellow(f"  [WARN] Could not create {shim_name} shim: {e}"))
+    if not active:
+        return
+    if shim_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = shim_dir + os.pathsep + os.environ.get("PATH", "")
+    print(green(f"  [OK] CLI shims active: {', '.join(active)}"))
+
+
 # Module name -> pip name, where the two differ.
 _PIP_NAME = {
     "optimum": "optimum-intel[openvino]",
@@ -295,6 +355,7 @@ def prepare(source: str, name: str, weight_format: str, device: str, cache_gb: i
 
     tool = export_tool()
     check_export_deps(tool)
+    ensure_cli_shims()
     print(yellow(f"  [..] Pulling {source} ({weight_format}, {device})"))
     print(yellow("       A prebuilt IR is a plain download; a raw checkpoint"))
     print(yellow("       (e.g. MAI-UI-8B, 17.6 GB) converts on CPU and is slow."))
@@ -311,10 +372,14 @@ def prepare(source: str, name: str, weight_format: str, device: str, cache_gb: i
     ret = subprocess.run(cmd, cwd=WORK).returncode
     if ret != 0 or not already_exported(name):
         die(f"Could not prepare {name}",
-            "If the error mentions 'qwen3_vl' or an unknown model type, the\n"
-            "conversion toolchain is too old:\n"
-            "  pip install -U 'optimum-intel[openvino]' nncf openvino\n"
-            "If it ran out of memory, a raw checkpoint conversion needs ~16 GB RAM.")
+            "Read the traceback above, not this list — it names the real cause.\n"
+            "  'Failed to download llm model'  -> huggingface-cli did not run.\n"
+            "     The shim should have fixed it; check the [OK] CLI shims line.\n"
+            "  'qwen3_vl' / unknown model type -> toolchain too old:\n"
+            "     pip install -U \"optimum-intel[openvino]\" nncf openvino\n"
+            "  Out of memory                   -> a raw checkpoint needs ~16 GB RAM.\n"
+            "'Precision change is not supported' is NOT an error — a prebuilt IR\n"
+            "is already quantised, so --weight-format has nothing to do.")
     print(green(f"  [OK] {name} ready"))
 
 
