@@ -31,7 +31,9 @@ Run it, then click the app you want to test (Teams is the interesting one) while
 the countdown runs.
 """
 import argparse
+import ast
 import base64
+import importlib.util
 import io
 import json
 import os
@@ -115,12 +117,29 @@ def find_ovms() -> str:
 
 
 def ovms_version(binary: str) -> str:
-    try:
-        out = subprocess.run([binary, "--version"], capture_output=True,
-                             text=True, timeout=30)
-        return (out.stdout or out.stderr).strip().splitlines()[0]
-    except Exception as e:
-        return f"(could not read version: {e})"
+    """Best-effort version string.
+
+    ovms.exe is not consistent here: some builds print to stdout, some to
+    stderr, some answer `--version` with nothing at all and only talk under
+    `--help`. Never let this stop the probe — the version is a hint printed for
+    the human, and step 3 is the real test of whether qwen3_vl loads.
+    """
+    for flag in ("--version", "--help"):
+        try:
+            out = subprocess.run([binary, flag], capture_output=True,
+                                 text=True, timeout=30)
+        except Exception as e:
+            return f"(could not read version: {e})"
+        blob = f"{out.stdout or ''}\n{out.stderr or ''}"
+        for line in blob.splitlines():
+            line = line.strip()
+            if line and re.search(r"\d{4}\.\d", line):
+                return line
+        if flag == "--version":
+            for line in blob.splitlines():
+                if line.strip():
+                    return line.strip()
+    return "(version not reported by this build)"
 
 
 def preflight() -> str:
@@ -186,6 +205,61 @@ def export_tool() -> str:
     return dest
 
 
+# Module name -> pip name, where the two differ.
+_PIP_NAME = {
+    "jinja2": "jinja2",
+    "huggingface_hub": "huggingface_hub",
+    "optimum": "optimum-intel[openvino]",
+    "nncf": "nncf",
+    "openvino": "openvino",
+    "transformers": "transformers",
+    "yaml": "pyyaml",
+    "PIL": "pillow",
+}
+
+
+def check_export_deps(tool: str) -> None:
+    """Fail before the download, not after.
+
+    export_model.py is Intel's script, not ours, and it imports things this
+    venv may not have (jinja2 is the usual one). Left alone it raises
+    ModuleNotFoundError partway through, which reads like the model is
+    unsupported when the real problem is one missing pip package. So read its
+    top-level imports and check them up front.
+    """
+    try:
+        with open(tool, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+    except Exception:
+        return  # Not worth failing the run over; the real import will speak.
+
+    mods = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            mods.add(node.module.split(".")[0])
+
+    missing = []
+    for mod in sorted(mods):
+        if mod in sys.builtin_module_names:
+            continue
+        try:
+            if importlib.util.find_spec(mod) is None:
+                missing.append(_PIP_NAME.get(mod, mod))
+        except Exception:
+            missing.append(_PIP_NAME.get(mod, mod))
+
+    if missing:
+        # Quote extras like optimum-intel[openvino] — bare brackets are glob
+        # syntax in some shells and get eaten before pip sees them.
+        args = " ".join(f'"{p}"' if "[" in p else p for p in missing)
+        die(f"export_model.py needs packages this venv lacks: {', '.join(missing)}",
+            f"pip install {args}\n"
+            "Then run this script again — nothing was downloaded yet.")
+    print(green("  [OK] export_model.py dependencies present"))
+
+
 def prepare(source: str, name: str, weight_format: str, device: str, cache_gb: int) -> None:
     step(2, f"Prepare {name}")
     os.makedirs(REPO, exist_ok=True)
@@ -194,6 +268,7 @@ def prepare(source: str, name: str, weight_format: str, device: str, cache_gb: i
         return
 
     tool = export_tool()
+    check_export_deps(tool)
     print(yellow(f"  [..] Pulling {source} ({weight_format}, {device})"))
     print(yellow("       A prebuilt IR is a plain download; a raw checkpoint"))
     print(yellow("       (e.g. MAI-UI-8B, 17.6 GB) converts on CPU and is slow."))
