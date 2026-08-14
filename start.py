@@ -164,17 +164,6 @@ def ensure_runtime_deps() -> bool:
     return False
 
 
-# Modules requirements-export.txt pulls in, directly or as dependencies of
-# optimum-intel[openvino]. If everything missing is on this list, one file
-# installs the lot — no need to name packages one at a time and have the user
-# rediscover the next one on the following run.
-_EXPORT_TOOLCHAIN = {
-    "huggingface_hub", "jinja2", "nncf", "numpy", "openvino",
-    "openvino_genai", "openvino_tokenizers", "optimum", "torch",
-    "transformers",
-}
-
-
 def _export_tool_imports(export_tool: str) -> list:
     """Top-level modules export_model.py imports.
 
@@ -200,35 +189,32 @@ def _export_tool_imports(export_tool: str) -> list:
 def ensure_export_deps(export_tool: str) -> bool:
     """Install the conversion toolchain BEFORE the multi-GB model download.
 
-    Without this, a missing package surfaces as a ModuleNotFoundError traceback
-    from Intel's script partway through, which reads like the model is
-    unsupported when the real problem is one absent pip package.
+    Runs pip whenever a model actually has to be built, instead of only when an
+    import is missing: the toolchain breaks just as easily when a package is
+    PRESENT at a version that cannot convert the models, and the version bounds
+    live in requirements-export.txt where pip can enforce them. Only export runs
+    pay for it — a repository that already holds both models never reaches here.
     """
-    missing = _missing_modules(_export_tool_imports(export_tool))
-    if not missing:
-        print(_green("  [OK] model-conversion toolchain"))
-        return True
-
-    print(_yellow(f"  [..] installing model-conversion toolchain "
-                  f"({', '.join(missing)})..."))
-    if set(missing) <= _EXPORT_TOOLCHAIN and os.path.isfile(_EXPORT_REQS):
+    if os.path.isfile(_EXPORT_REQS):
+        print(_yellow("  [..] checking the model-conversion toolchain..."))
         # requirements.txt deliberately omits the ML stack — the agent talks to
         # OVMS over HTTP and imports no framework. Conversion is the one job
-        # that needs it, and requirements-export.txt pins that whole set.
-        if "torch" in missing:
+        # that needs it.
+        if _missing_modules(["torch"]):
             print(_yellow("       (first time: ~2 GB of packages, CPU-only torch)"))
             if not _pip_install("torch", "--index-url", _TORCH_CPU_INDEX):
                 print(_red("  [FAIL] Could not install torch"))
                 return False
-        ok = _pip_install("-r", _EXPORT_REQS)
-    else:
-        ok = _pip_install(*missing)
+        _pip_install("-r", _EXPORT_REQS)
 
-    still = _missing_modules(_export_tool_imports(export_tool))
-    if ok and not still:
+    missing = _missing_modules(_export_tool_imports(export_tool))
+    if not missing:
+        print(_green("  [OK] model-conversion toolchain"))
+        return True
+    if _pip_install(*missing) and not _missing_modules(_export_tool_imports(export_tool)):
         print(_green("  [OK] model-conversion toolchain installed"))
         return True
-    print(_red(f"  [FAIL] Could not install: {', '.join(still or missing)}"))
+    print(_red(f"  [FAIL] Could not install: {', '.join(missing)}"))
     print(_yellow(f"        Run manually: pip install -r {_EXPORT_REQS}"))
     return False
 
@@ -568,6 +554,21 @@ def _sync_servable(model_name: str, cache_gb: int, device: str):
         print(_yellow(f"  [WARN] Could not update settings for {model_name}: {e}"))
 
 
+def _is_partial_export(model_name: str) -> bool:
+    """True if the model's folder exists but holds no OpenVINO IR.
+
+    That is the fingerprint of an export that died partway: the weights a
+    complete servable needs (openvino_model.xml, or openvino_language_model.xml
+    for a VLM) were never written. A folder that does hold IR is left alone —
+    it may have been copied in from a machine that did the conversion.
+    """
+    import glob
+    model_dir = os.path.join(_REPO, model_name)
+    if not os.path.isdir(model_dir):
+        return False
+    return not glob.glob(os.path.join(model_dir, "**", "openvino_*.xml"), recursive=True)
+
+
 def _export_model(export_tool: str, source_model: str, model_name: str,
                   device: str, cache_gb: int, weight_format: str) -> bool:
     """Run export_model.py to convert/pull a model into the OVMS repository.
@@ -600,6 +601,14 @@ def _export_model(export_tool: str, source_model: str, model_name: str,
         "--target_device", device,
         "--cache_size", str(cache_gb),
     ]
+    if _is_partial_export(model_name):
+        # export_model.py skips the conversion when the target folder merely
+        # EXISTS, so the wreckage of an interrupted run would be registered as
+        # a working servable and OVMS would fail to load it. Only ever set for
+        # a folder holding no IR — never for models copied in from elsewhere.
+        print(_yellow(f"       (leftover {model_name} folder from a failed run — "
+                      "rebuilding it)"))
+        cmd.append("--overwrite_models")
     ret = subprocess.run(cmd, cwd=_HERE).returncode
     if ret == 0 and _model_already_exported(model_name):
         print(_green(f"  [OK] {model_name} ready"))

@@ -19,3 +19,11 @@
 optimum-intel[openvino]>=1.18.0
 nncf>=2.11.0
 jinja2>=3.0.0                      # OVMS export tool: graph.pbtxt templates
+
+# Upper bound is real: optimum-intel's OpenVINO exporter caps qwen2_5_vl —
+# UI-TARS's architecture — at transformers 5.0 (MAX_TRANSFORMERS_VERSION),
+# while optimum-intel itself accepts <5.6. Unpinned, pip installs a version the
+# exporter rejects, and only says so after downloading and tracing the weights:
+#   ValueError: The current version of Transformers does not allow for the
+#   export of the model. Maximum required is 5.0, got: 5.5.4
+transformers>=4.51,<=5.0.0
