@@ -232,14 +232,20 @@ still fits alongside the INT8 VLM (~24.7 GB). Adjust `LLM_WEIGHT_FORMAT`,
 
 ## Installation
 
-You need **Python 3.10–3.12**, **Git**, and the
+You need **Python 3.10, 3.11 or 3.12**, **Git**, and the
 [Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+
+> **3.13 and newer do not work.** `rapidocr-onnxruntime`, the OCR engine behind
+> grounding, publishes no wheel for them. Check with `python --version`, and
+> `py -0` to list what you have. Build the venv with `py -3.12 -m venv venv` if
+> your default `python` is newer — `start.py` stops with this message if not.
+
 Then, in PowerShell:
 
 ```powershell
 git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
 cd intel-openvino-desktop-agent
-python -m venv venv
+py -3.12 -m venv venv
 venv\Scripts\activate
 python start.py
 ```
@@ -447,6 +453,7 @@ python tests/live/test_longhorizon.py
 
 | Problem | Solution |
 |---------|----------|
+| `[FAIL] Python 3.x is not supported`, or `No matching distribution found for rapidocr-onnxruntime` | The venv uses Python 3.13+. Rebuild it on 3.12: `deactivate`, `Remove-Item -Recurse -Force venv`, `py -3.12 -m venv venv`, `venv\Scripts\activate`, `python start.py` |
 | `[FAIL] Could not install …` for `jinja2` / `optimum` / `nncf` / `torch` | `start.py` tried to install the conversion toolchain and pip failed — scroll up for pip's error. Run it by hand: `pip install torch --index-url https://download.pytorch.org/whl/cpu` then `pip install -r requirements-export.txt` |
 | `ModuleNotFoundError` for a package you know you installed | Wrong venv. `python -c "import sys; print(sys.executable)"` must print a path inside this project's `venv\Scripts\`. If not, run `venv\Scripts\activate` and start again |
 | `Could not connect to OpenVINO Model Server` | Run `python start.py`; check `ovms.log` and `curl localhost:8000/v1/config` |

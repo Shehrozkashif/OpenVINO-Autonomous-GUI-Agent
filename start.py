@@ -83,7 +83,38 @@ def banner():
     print(_bold("╚══════════════════════════════════════════════╝\n"))
 
 
-# ── 0. Python dependencies ────────────────────────────────────────────────────
+# ── 0. Python version and dependencies ────────────────────────────────────────
+
+# rapidocr-onnxruntime — the OCR engine behind grounding Stage 1 — publishes no
+# wheel for 3.13+ (its newest release pins Requires-Python <3.13). pip's failure
+# for that is a wall of "Ignored the following versions" text that never names
+# the interpreter as the problem, so check it here instead.
+_PY_MIN = (3, 10)
+_PY_MAX_EXCLUSIVE = (3, 13)
+
+
+def check_python_version() -> bool:
+    """Refuse to continue on an interpreter the dependencies cannot install on."""
+    v = sys.version_info
+    if _PY_MIN <= (v.major, v.minor) < _PY_MAX_EXCLUSIVE:
+        print(_green(f"  [OK] Python {v.major}.{v.minor}.{v.micro}"))
+        return True
+
+    want = f"{_PY_MIN[0]}.{_PY_MIN[1]}–{_PY_MAX_EXCLUSIVE[0]}.{_PY_MAX_EXCLUSIVE[1] - 1}"
+    print(_red(f"  [FAIL] Python {v.major}.{v.minor} is not supported — "
+               f"this project needs {want}"))
+    if (v.major, v.minor) >= _PY_MAX_EXCLUSIVE:
+        print(_yellow("         rapidocr-onnxruntime (OCR grounding) has no wheel "
+                      "for 3.13 or newer."))
+    print(_yellow("         Install Python 3.12 from https://www.python.org/downloads/,"))
+    print(_yellow("         then rebuild the environment:"))
+    print(_yellow("           deactivate"))
+    print(_yellow("           Remove-Item -Recurse -Force venv"))
+    print(_yellow("           py -3.12 -m venv venv"))
+    print(_yellow("           venv\\Scripts\\activate"))
+    print(_yellow("           python start.py"))
+    print(_yellow("         (`py -0` lists the Python versions you have installed.)"))
+    return False
 
 def _missing_modules(mods) -> list:
     """Return the subset of `mods` this interpreter cannot import."""
@@ -649,6 +680,8 @@ def main():
         print(_red(f"  [FAIL] This agent supports Windows only (detected: {platform.system()})"))
         sys.exit(1)
     print(_green("  [OK] Windows"))
+    if not check_python_version():
+        sys.exit(1)
     if sys.prefix == sys.base_prefix:
         print(_yellow("  [WARN] Not running inside a virtual environment — "
                       "packages will install system-wide"))

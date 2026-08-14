@@ -3,7 +3,8 @@ name = "intel-openvino-desktop-agent"
 version = "0.1.0"
 description = "Local-first desktop GUI agent: See → Plan → Act → Verify loop driven by on-device LLM/VLM inference"
 readme = "README.md"
-requires-python = ">=3.10"
+# Upper bound is real: rapidocr-onnxruntime publishes no wheel for 3.13+.
+requires-python = ">=3.10,<3.13"
 license = { file = "LICENSE" }
 
 # Runtime dependencies are managed in requirements.txt (pip install -r requirements.txt).
