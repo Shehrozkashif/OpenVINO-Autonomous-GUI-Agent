@@ -1,7 +1,7 @@
-# Agent Command Center — UI Design System
+# Agent Command Center: UI Design System
 
 A ground-up redesign of the desktop GUI agent's interface: from a 3-tab utility
-window to an **AI operating console** — the surface through which a human
+window to an **AI operating console**, the surface through which a human
 supervises an autonomous agent operating their computer.
 
 ---
@@ -17,7 +17,7 @@ supervises an autonomous agent operating their computer.
 | Reliability | Per-step verification confidence shown everywhere, never hidden |
 | Speed | Timing metrics on every mission; 60fps micro-animations |
 | Trust | Firewall/guard events surfaced inline; Stop is always one click away |
-| Sophistication | Glass surfaces, layered depth, restrained motion — no noise |
+| Sophistication | Glass surfaces, layered depth, restrained motion, no noise |
 
 The interface never *pretends*. Every visualization is backed by a real signal
 from the pipeline (no fake bounding boxes, no decorative progress bars).
@@ -36,18 +36,18 @@ core/orchestrator.py ──log(str)──► WorkerSignals.log_update   (worker 
         MissionPage timeline  IntelligencePanel  StatusChip/orbs  ScreenPreview chip
 ```
 
-* `ui/theme.py` — design tokens (color/type/spacing) + the single global QSS.
-* `ui/icons.py` — QPainter vector icon set. No asset files, DPI-perfect, recolorable.
-* `ui/widgets.py` — component library (orb, cards, rail, timeline, dock…).
-* `ui/events.py` — **AgentEventBus**: turns the orchestrator's log stream into
+* `ui/theme.py`: design tokens (color/type/spacing) + the single global QSS.
+* `ui/icons.py`: QPainter vector icon set. No asset files, DPI-perfect, recolorable.
+* `ui/widgets.py`: component library (orb, cards, rail, timeline, dock…).
+* `ui/events.py`: **AgentEventBus**: turns the orchestrator's log stream into
   typed signals + an agent state machine. Core stays 100 % UI-agnostic.
-* `ui/panels.py` — right-hand Intelligence Panel.
-* `ui/pages.py` — the seven workspace pages.
-* `ui/main_window.py` — shell. Public contract for `main.py` unchanged
+* `ui/panels.py`: right-hand Intelligence Panel.
+* `ui/pages.py`: the seven workspace pages.
+* `ui/main_window.py`: shell. Public contract for `main.py` unchanged
   (`DesktopGUIAgent(orchestrator=)`, `.instruction_input`, `._run_task`).
 
-**Hard constraint:** the window title must contain `"Desktop GUI Agent"` —
-the orchestrator masks its own window out of screen captures by that substring.
+**Hard constraint:** the window title must contain `"Desktop GUI Agent"`.
+The orchestrator masks its own window out of screen captures by that substring.
 
 ---
 
@@ -76,14 +76,14 @@ Segoe UI Variable Display (native Win 11) → Segoe UI → Inter.
 Mono: Cascadia Code → Consolas.
 
 Scale: 26 display / 19 H1 / 15 H2 / 13 body / 12 small / 11 MICRO
-(micro = uppercase, +1px letter-spacing, faint — used for section captions).
+(micro = uppercase, +1px letter-spacing, faint, used for section captions).
 
 ## 5. Spacing & depth
 
 4 px grid (4/8/12/16/24). Radii 8/12/16. Depth is three layers:
 window gradient + color glows → glass panels → floating elements
 (one `QGraphicsDropShadowEffect` per floating card, never nested).
-Glassmorphism is **simulated** (translucent fill + hairline) — real blur is
+Glassmorphism is **simulated** (translucent fill + hairline). Real blur is
 CPU-rendered in Qt and would steal cycles from inference.
 
 ---
@@ -107,28 +107,28 @@ CPU-rendered in Qt and would steal cycles from inference.
 * **NavRail** (64 px ↔ 196 px): icon-only; expands 160 ms after hover-enter
   (220 ms OutCubic on min+max width), collapses on leave. Active item gets a
   cyan tint block. Tooltips cover the collapsed state.
-* **Command dock**: persistent operator bar — mini-orb, auto-growing input
-  (1–4 lines, Enter runs, Shift+Enter newline), Stop (visible only while
+* **Command dock**: persistent operator bar with mini-orb, auto-growing input
+  (1-4 lines, Enter runs, Shift+Enter newline), Stop (visible only while
   running), Run. Readonly while a mission runs.
 * **Intelligence panel** (312 px, collapsible): agent state header,
   current objective, animated confidence bar, reasoning/activity feed
   (border-color-coded by kind), collapsible raw console (the old log,
   preserved verbatim for debugging).
 
-### 6.2 Home — hero
+### 6.2 Home: hero
 
 Hierarchy: `PulseOrb(104)` + headline → **MissionComposer** (the primary
 NL prompt box with `Run Task`) → suggested-mission chips (2 from history +
 canned) → metric tiles (automations learned / successful runs / avg duration)
 → recent automations (clickable cards).
 
-UX rationale: the first five seconds must say *"an intelligent agent is ready —
+UX rationale: the first five seconds must say *"an intelligent agent is ready,
 tell it what to do."* The composer is the largest interactive element on
 screen; suggestion chips drop text **into the composer** (visible feedback at
 the point of click), never silently elsewhere. Empty state offers two runnable
 example missions.
 
-### 6.3 Mission Control — live execution
+### 6.3 Mission Control: live execution
 
 `ScreenPreview` (rounded live view, 1 fps frames, LIVE badge, current-action
 chip, cyan scan sweep only while active) → stats strip (objective / steps /
@@ -139,14 +139,14 @@ guard rows (FIREWALL red, VISION violet, SEARCH blue, CHECK amber).
 
 Honesty rule: the sweep means "agent active", the chip shows the *actual*
 current step. Bounding boxes are future work (requires the grounder exposing
-coordinates — see §9).
+coordinates, see §9).
 
 ### 6.4 Agent Sessions / 6.5 Workflows / 6.6 Task History
 
 Sessions: history cards (runs badge, subtask count, avg duration, last run,
-**Run again**). Workflows: the same records reframed as a *library* — 2-column
+**Run again**). Workflows: the same records reframed as a *library*: 2-column
 grid, primary **Run workflow** per card; turns a past run into a one-click
-rerun. Task History: transparency view — every task that completed cleanly,
+rerun. Task History: transparency view of every task that completed cleanly,
 with how many times it has been run.
 
 These three pages read `core/history.py` and nothing else. The agent does not
@@ -163,7 +163,7 @@ full-size. An audit trail of literally *what the agent saw*.
 
 Glass cards: Intelligence stack (models/endpoints from `config.py` +
 threaded **Check backend health**), Safety & control (firewall, kill switch,
-verification transparency, credential redaction — stated in plain language),
+verification transparency, credential redaction, stated in plain language),
 Credentials (keyring-backed manager).
 
 ---
@@ -183,7 +183,7 @@ Credentials (keyring-backed manager).
 | Skeleton shimmer | gradient offset | 40 ms tick, visible-only |
 | Console reveal | maximumHeight animation | 220 ms OutCubic |
 
-Performance budget: **zero continuous timers when idle and hidden** — every
+Performance budget: **zero continuous timers when idle and hidden**: every
 timer starts on `showEvent`/activity and stops on `hideEvent`/idle. Screen
 preview stays at 1 fps (PNG over signal, as before). Opacity effects are
 removed after each fade (stacked `QGraphicsOpacityEffect`s slow painting).
@@ -208,16 +208,16 @@ removed after each fade (stacked `QGraphicsOpacityEffect`s slow painting).
   preview once `UIGroundingAgent.ground()` results are surfaced as events.
 * **Floating mission HUD** (always-on-top pill during execution): valuable,
   but its text would appear in the agent's own screen captures and could
-  contaminate OCR/planning — needs the same masking treatment as the main
+  contaminate OCR/planning, so it needs the same masking treatment as the main
   window before shipping.
 * Per-session step-level history persistence (currently sessions persist via
   `TaskHistory`; step traces live only in the timeline).
 
 ## 10. Verification
 
-* `tests/unit/test_ui.py` — feeds verbatim orchestrator log lines
+* `tests/unit/test_ui.py`: feeds verbatim orchestrator log lines
   through the runtime signal path and asserts timeline/panel/stats state;
   checks the `main.py` contract and the window-title masking contract.
-* `tests/unit/test_ui_interactions.py` — click-through audit: every button is
+* `tests/unit/test_ui_interactions.py`: click-through audit: every button is
   fired programmatically and its effect asserted (this caught a real
   `isVisible()`-while-minimized toggle bug).

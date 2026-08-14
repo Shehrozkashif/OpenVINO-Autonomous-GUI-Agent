@@ -40,53 +40,53 @@ facts are swappable without touching policy.
 
 ## The pipeline, end to end
 
-1. **Elicit** (`RouterAgent.missing_parameters`) — missing details (meeting
+1. **Elicit** (`RouterAgent.missing_parameters`): missing details (meeting
    time, recipient…) are asked from the user *before* execution.
-2. **Decompose** (`agents/router.py`) — the LLM splits the instruction into
+2. **Decompose** (`agents/router.py`): the LLM splits the instruction into
    `SubTask`s. An installed-app hint (`Get-StartApps` × whole-word match)
    steers it toward apps that actually exist on the machine.
-3. **Per-subtask loop** (`core/orchestrator.py`) — plans ONE step at a time
+3. **Per-subtask loop** (`core/orchestrator.py`): plans ONE step at a time
    against the live screen:
    - **Screen context** = OCR text + `CLICKABLE CONTROLS` (exact names from
      the accessibility tree, disabled ones labeled) + `SYSTEM CLOCK` +
      goal-check evidence. The planner may only pick click targets that exist.
-   - **Goal check** — one focused LLM yes/no per cycle: *is this subtask's end
+   - **Goal check**: one focused LLM yes/no per cycle: *is this subtask's end
      state already on screen?* Stops "click X to open Y" from re-clicking
      after Y opened. Cached per screen state.
-   - **Plan** (`agents/planning.py`) — text path (OCR context → LLM steps);
+   - **Plan** (`agents/planning.py`): text path (OCR context → LLM steps);
      escalates to the visual path (screenshot → UI-TARS) when stuck.
-   - **Ground** (`agents/grounding.py`) — 3 stages, first hit wins:
+   - **Ground** (`agents/grounding.py`): 3 stages, first hit wins:
      S0 accessibility tree → S1 OCR fuzzy text → S2 VLM coordinates; then
      LLM rephrasings and a scroll-to-find hunt.
-   - **Act** (`agents/action.py` → `desktop/input.py`) — clicks are delivered
+   - **Act** (`agents/action.py` → `desktop/input.py`): clicks are delivered
      with the real, gliding mouse at UIA-exact coordinates (`config.FORCE_MOUSE`);
      set `FORCE_MOUSE=False` to prefer the UIA pattern invoke instead. `set_value`
      uses ValuePattern with read-back, else focus-and-type. Typed text passes the
      **action firewall** (`core/firewall.py`) first.
-   - **Verify** (`agents/reflection.py`) — perceptual-hash delta (delta=0 ⇒
+   - **Verify** (`agents/reflection.py`): perceptual-hash delta (delta=0 ⇒
      the click provably did nothing) → LLM over OCR text plus the *focused
      control* read from the accessibility tree → VLM screenshot check only
      when uncertain.
-4. **Recovery** — failures feed blacklists and a replanner whose prompt pins
+4. **Recovery**: failures feed blacklists and a replanner whose prompt pins
    the original objective ("navigate away from dead ends, never reinterpret
    the goal").
-5. **Report** (`Router.summarize_completion`) — on failure the last
+5. **Report** (`Router.summarize_completion`): on failure the last
    goal-check evidence is logged as `[BLOCKER] …` and put in the summary, so
    the user learns *why* ("Teams is at a sign-in screen"), not just "failed".
 
 ## Ground-truth mechanisms (the heart of the design)
 
-Every recovery decision is anchored to something the OS can prove — never to
+Every recovery decision is anchored to something the OS can prove, never to
 a model's opinion alone:
 
 | Mechanism | Keyed by | Protects against |
 |---|---|---|
-| Dead-point blacklist (`grounding.mark_dead`) | (target, screen phash) | re-clicking a coordinate a phash delta=0 proved inert (pixel attempts only — a failed pattern invoke never dead-marks the pixel it didn't touch) |
+| Dead-point blacklist (`grounding.mark_dead`) | (target, screen phash) | re-clicking a coordinate a phash delta=0 proved inert (pixel attempts only; a failed pattern invoke never dead-marks the pixel it didn't touch) |
 | Invoke-dead blacklist (`orchestrator._invoke_dead`) | target, per task | WebView2 providers that accept Invoke/Toggle but do nothing |
-| Occlusion hit-test (`desktop.uia.covering_element`) | ElementFromPoint ancestor chain | clicking/invoking a control a dialog covers — the blocker's name is handed to the planner so it dismisses the overlay |
+| Occlusion hit-test (`desktop.uia.covering_element`) | ElementFromPoint ancestor chain | clicking/invoking a control a dialog covers, so the blocker's name is handed to the planner so it dismisses the overlay |
 | App anchor (`core/anchor.py`) | (hwnd, pid, exe) | operating on the wrong window; clicks that would escape to another process are rejected *before* they fire, by `WindowFromPoint` |
 | Field-value read-back (controls list `= '…'` suffix) | ValuePattern on Edit/ComboBox | planner/goal-check blindness to form state (premature Save, re-filling already-set fields) |
-| Commit guard (`groundtruth.unfilled_form_values`) | required values vs. live controls | a Save firing on a half-filled form — it "verifies" as a good click while the calendar stays empty |
+| Commit guard (`groundtruth.unfilled_form_values`) | required values vs. live controls | a Save firing on a half-filled form that "verifies" as a good click while the calendar stays empty |
 | Controls-diff verification (`reflection._controls_delta_note`) | appeared/disappeared control labels | verifier misjudging actions whose only effect lives in the tree (an added attendee pill on an OCR-invisible WebView2 screen) |
 | Negative grounding cache (`grounding._no_find`) | (target, screen phash) | re-running the 15-20 s find cascade for a known miss on an unchanged screen |
 | Goal-check cache (`run.goal_check_cache`) | screen context hash | re-paying an LLM call to re-judge identical pixels |
@@ -99,7 +99,7 @@ a model's opinion alone:
 
 ## File map
 
-**`core/` — the loop and its policy**
+**`core/`: the loop and its policy**
 
 | Path | Role |
 |---|---|
@@ -111,10 +111,10 @@ a model's opinion alone:
 | `core/anchor.py` | Which window the task owns, and keeping every click inside it |
 | `core/firewall.py` | Deterministic destructive-command guard for typed text |
 | `core/inference.py` | `InferenceClient` protocol + the OVMS client implementing it |
-| `core/history.py` | A record of tasks that completed cleanly — written for the UI, never read back by the loop |
-| `core/types.py` | `SubTask` and `ActionStep` — the two models every layer passes around |
+| `core/history.py` | A record of tasks that completed cleanly, written for the UI and never read back by the loop |
+| `core/types.py` | `SubTask` and `ActionStep`: the two models every layer passes around |
 
-**`agents/` — one job each, all behind `InferenceClient`**
+**`agents/`: one job each, all behind `InferenceClient`**
 
 | Path | Role |
 |---|---|
@@ -126,7 +126,7 @@ a model's opinion alone:
 | `agents/reflection.py` | Step verification (phash → LLM → VLM) |
 | `agents/prompts.py` | Every instruction sent to a model, in one file |
 
-**`desktop/` — Windows facts and effects**
+**`desktop/`: Windows facts and effects**
 
 | Path | Role |
 |---|---|

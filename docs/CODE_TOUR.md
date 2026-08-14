@@ -1,4 +1,4 @@
-# Code Tour — how to read this codebase
+# Code Tour: how to read this codebase
 
 A guided path through the project for someone seeing it for the first time.
 Read this top to bottom once; afterwards you should know where any behaviour
@@ -12,7 +12,7 @@ The agent runs a **See → Plan → Act → Verify** loop against a real Windows
 desktop. A user instruction ("schedule a Teams meeting tomorrow at 3pm") is
 decomposed by the **Router** into subtasks; each subtask is executed by
 planning **one step at a time** against the live screen; every step is
-**verified** before the next one is planned — preferably by ground truth
+**verified** before the next one is planned, preferably by ground truth
 (a file on disk, a process in the task list, a control's value read back
 through the accessibility tree) and only by LLM judgment when no ground
 truth exists. Both models (an LLM for reasoning, a VLM for vision) run
@@ -67,32 +67,32 @@ tests. Keeping them apart is why the suite runs on Linux with no GPU.
 | `desktop/capture.py` | Screenshots (GDI), frame hashing, and the mask hiding the agent's own window |
 | `desktop/ocr.py` | RapidOCR engine and fuzzy text search |
 | `desktop/system.py` | DPI, foreground window, process/window queries, installed apps, GPUs |
-| `core/history.py` | SQLite record of tasks that completed cleanly — read by the UI, never by the loop |
+| `core/history.py` | SQLite record of tasks that completed cleanly, read by the UI and never by the loop |
 | `ui/` | PyQt6 Mission Control. `events.py` parses orchestrator log lines into typed signals |
 | `tests/unit/` | 491 tests, run anywhere: `pytest tests/unit` |
 | `tests/live/` | Real-desktop suites (Windows + OVMS required); verified by disk/process ground truth |
 
 ## 4. Reading order
 
-1. **`core/types.py`** — the two dataclasses everything passes around.
-2. **`agents/prompts.py`** — read `ROUTER_SYSTEM_PROMPT` first; it defines what
+1. **`core/types.py`**: the two dataclasses everything passes around.
+2. **`agents/prompts.py`**: read `ROUTER_SYSTEM_PROMPT` first; it defines what
    a "good decomposition" means, then `PLANNING_SYSTEM_PROMPT`'s ACTION
    REFERENCE for what a step may be.
-3. **`core/runstate.py`** — every budget and limit in the system, on one page.
-4. **`core/orchestrator.py`** — in this order:
-   - `execute()` — the task-level story: elicit missing details → decompose →
+3. **`core/runstate.py`**: every budget and limit in the system, on one page.
+4. **`core/orchestrator.py`**, in this order:
+   - `execute()`: the task-level story: elicit missing details → decompose →
      run subtasks → replan on failure → summarize.
-   - `_execute_subtask()` — the step-level skeleton. Each phase is a named
+   - `_execute_subtask()`: the step-level skeleton. Each phase is a named
      method: `_plan_next_step` (queue / text / visual escalation),
      `_run_step_attempts` (retry policy), `_judge_reflection` (verification
      verdicts), `_record_step_success` / `_record_step_failure` (bookkeeping,
      early exits, loop guard).
-   - `_execute_step()` — grounding, gates and dispatch for a single action.
-5. **`core/groundtruth.py`** — read alongside the loop: every "is it really
+   - `_execute_step()`: grounding, gates and dispatch for a single action.
+5. **`core/groundtruth.py`**: read alongside the loop, every "is it really
    done?" question the loop asks resolves here.
-6. **`agents/grounding.py`** — the 3-stage fallback that turns element names
+6. **`agents/grounding.py`**: the 3-stage fallback that turns element names
    into coordinates.
-7. **`ui/events.py`** — how log lines become UI state (regex → signals).
+7. **`ui/events.py`**: how log lines become UI state (regex → signals).
 
 ## 5. Design principles (the "why" behind recurring patterns)
 
@@ -109,7 +109,7 @@ mean. That split is what makes the policy unit-testable off Windows.
 
 **Idempotency decides retry policy.** Repeating a click is harmless;
 repeating a `type`, `Enter`, `invoke`, or paste double-executes. Non-idempotent
-actions are never blind-retried after they physically fire — on an uncertain
+actions are never blind-retried after they physically fire. On an uncertain
 verdict the loop accepts and lets the *next* planning step read the live
 screen and correct course. See `_run_step_attempts` / `_judge_reflection`.
 
@@ -126,19 +126,19 @@ as a clean success.
 
 **The agent decides from the live screen, not from its own past.** Nothing in
 the loop reads `core/history.py` back. Earlier versions fed past runs into
-planning — a "similar task" hint to the router and "this target failed before"
-hints to the planner — and both changed behaviour based on state the user
+planning (a "similar task" hint to the router and "this target failed before"
+hints to the planner), and both changed behaviour based on state the user
 could not see. The router hint was observed replacing a correct decomposition
 with a stale plan. History is now write-only: a record for the operator.
 
 **Deterministic security boundaries.** The action firewall
-(`core/firewall.py`) is a regex over typed/shell text, not an LLM — it cannot
+(`core/firewall.py`) is a regex over typed/shell text, not an LLM, so it cannot
 be prompt-injected. Destructive commands require human confirmation, and the
 confirmation dialog times out to *deny*.
 
 **The prompt is part of the code.** Router and planner behaviour is largely
 defined in `agents/prompts.py`. If the agent decomposes or plans badly, fix
-the prompt — but keep it next to the parsing code that enforces it.
+the prompt, but keep it next to the parsing code that enforces it.
 
 **Log lines are an interface.** `ui/events.py` parses the orchestrator's log
 stream to drive the mission timeline. Changing a log string changes the UI, so
@@ -146,7 +146,7 @@ treat those formats as API.
 
 ## 6. How a Teams meeting actually happens (end to end)
 
-This is the flagship flow — trace it once and the whole pipeline clicks.
+This is the flagship flow. Trace it once and the whole pipeline clicks.
 
 ```
 "schedule a teams meeting with the team tomorrow at 3pm"
@@ -159,7 +159,7 @@ This is the flagship flow — trace it once and the whole pipeline clicks.
           navigate  → ctrl+4, confirmed by the window title ("Calendar | Microsoft Teams")
           form fill → planner emits set_value/select/invoke;
                       desktop/uia sets each control and reads it back
-                      (Teams is a WebView2 app — the accessibility tree, not OCR,
+                      (Teams is a WebView2 app, so the accessibility tree, not OCR,
                        is what proves the title/attendees/time actually landed)
           save      → the commit guard checks every required value is really on the
                       form, then the Save click completes the subtask
@@ -173,11 +173,11 @@ Unit tests (`tests/unit/`, no display needed) pin the *policies*: dispatch
 routing, retry/idempotency rules, budget math, replanning ID renumbering,
 firewall coverage, prompt-output parsing. Live tests
 (`tests/live/`, Windows + OVMS) prove the loop against real apps and verify
-outcomes by **ground truth only** — files on disk, processes running, UIA
-reads — never by trusting the model's own success claim.
+outcomes by **ground truth only**: files on disk, processes running, UIA
+reads, never by trusting the model's own success claim.
 
 Test doubles come from `tests/unit/conftest.py` (`make_grounder`,
 `make_reflector`, `make_llm`, …). Build fakes from those helpers rather than
 raw `MagicMock`s: a bare mock returns a mock from `min_confidence`, and
-comparing that to a float raises inside the orchestrator — a crash that reads
+comparing that to a float raises inside the orchestrator, a crash that reads
 like a real bug but is only a bad double.
