@@ -228,6 +228,9 @@ still fits alongside the INT8 VLM (~24.7 GB). Adjust `LLM_WEIGHT_FORMAT`,
 | GPU VRAM | 16 GB Intel Arc / iGPU (8B LLM + INT4 VLM, smaller KV-cache) | 27 GB (default config: 8B LLM + INT8 VLM) |
 | Disk | 20 GB free | 30 GB free |
 
+> **No Intel GPU?** It still runs. `start.py` detects that and uses the CPU
+> instead — same setup, same commands, slower steps.
+
 ---
 
 ## Installation
@@ -258,6 +261,7 @@ That is the whole setup. `start.py` does the rest itself:
 | OpenVINO™ Model Server | downloads and unpacks `ovms.exe` into `.\ovms\` |
 | Model-conversion toolchain (`requirements-export.txt`) | installs it, CPU-only torch first — only when a model actually has to be built |
 | The two models | pulls the LLM, converts UI-TARS, registers both with OVMS |
+| An Intel GPU | falls back to the CPU, and re-points models exported elsewhere at this machine's device |
 
 Nothing to unzip by hand, no `OVMS_DIR` to set. Every later run is the same
 three lines — `cd`, `venv\Scripts\activate`, `python start.py` — and skips
@@ -455,13 +459,14 @@ python tests/live/test_longhorizon.py
 |---------|----------|
 | `[FAIL] Python 3.x is not supported`, or `No matching distribution found for rapidocr-onnxruntime` | The venv uses Python 3.13+. Rebuild it on 3.12: `deactivate`, `Remove-Item -Recurse -Force venv`, `py -3.12 -m venv venv`, `venv\Scripts\activate`, `python start.py` |
 | `[FAIL] Could not install …` for `jinja2` / `optimum` / `nncf` / `torch` | `start.py` tried to install the conversion toolchain and pip failed — scroll up for pip's error. Run it by hand: `pip install torch --index-url https://download.pytorch.org/whl/cpu` then `pip install -r requirements-export.txt` |
+| `Failed to download llm model` / `optimum-cli: error: unrecognized arguments` | The export tool does not quote paths, so a space used to break it. `start.py` now passes the repository as a relative path and works from any folder — if you still see this, delete the half-written folders under `models\` and re-run |
 | `ModuleNotFoundError` for a package you know you installed | Wrong venv. `python -c "import sys; print(sys.executable)"` must print a path inside this project's `venv\Scripts\`. If not, run `venv\Scripts\activate` and start again |
 | `Could not connect to OpenVINO Model Server` | Run `python start.py`; check `ovms.log` and `curl localhost:8000/v1/config` |
 | OVMS download fails or is blocked | Download the zip manually, extract it so `ovms.exe` lands in `.\ovms\`, or set `OVMS_DIR` to an existing install. `start.py` picks up either |
 | `ModuleNotFoundError: No module named 'config'` | You ran OVMS's `setupvars` in your agent shell — it hijacks the venv's Python. Open a fresh terminal, activate the venv, and run `python start.py` |
 | `Requested KV-cache size is larger than available memory` | Lower `LLM_KV_CACHE_GB` / `VLM_KV_CACHE_GB` in `config.py` (defaults: 4 / 2 GB). Total must satisfy: caches + ~15 GB model weights < your GPU's VRAM |
 | Model files have `Access is denied` | Delete the model folder from an **elevated** terminal: `rd /s /q models\ui-tars-1.5-7b-int8-ov`, then re-run `python start.py` to re-export |
-| Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers |
+| Model loads on CPU instead of GPU | `start.py` only uses `TARGET_DEVICE="GPU"` when it finds an Intel GPU — check the GPU Detection lines it prints, and install/update the Intel GPU drivers if your GPU is missing there |
 | Agent clicks wrong place | Lower screen scaling in Windows display settings |
 | Clicks happen with no visible mouse movement | `config.FORCE_MOUSE = True` (default) drives the real cursor; `False` uses the faster UIA pattern invoke |
 | First run takes very long | Expected — UI-TARS conversion (INT8 quantization of a 7B model) takes 30–60 minutes. The LLM (Qwen3) is pre-converted and downloads in minutes. Subsequent runs skip this step |

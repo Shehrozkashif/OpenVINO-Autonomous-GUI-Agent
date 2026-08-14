@@ -242,7 +242,7 @@ def check_gpus():
     print(_bold("\nGPU Detection:"))
     gpus = detect_gpus()
     if not gpus:
-        print(_yellow("  No GPU detected — OVMS will fall back to CPU (slow)"))
+        print(_yellow("  No GPU detected"))
         return "cpu", []
 
     backend = gpus[0].backend
@@ -259,6 +259,23 @@ def check_gpus():
     if total:
         print(_green(f"  Total: {len(gpus)} {backend.upper()} GPU(s), {total:.1f}GB usable"))
     return backend, gpus
+
+
+def resolve_device(gpu_backend: str) -> str:
+    """Pick the OVMS device for THIS machine.
+
+    config.TARGET_DEVICE is the intent, but OpenVINO's "GPU" plugin only ever
+    means an Intel GPU. On a machine without one — no GPU at all, or an NVIDIA
+    card — exporting with "GPU" bakes an unloadable device into every servable
+    and OVMS fails an hour later. Fall back to CPU: slower, but it runs
+    anywhere. An explicit CPU/NPU/AUTO choice is passed through untouched.
+    """
+    if TARGET_DEVICE != "GPU" or gpu_backend == "intel":
+        return TARGET_DEVICE
+    print(_yellow('  [WARN] No Intel GPU here — using CPU instead of '
+                  'TARGET_DEVICE="GPU" from config.py'))
+    print(_yellow("         Inference will be slower, but nothing else changes."))
+    return "CPU"
 
 
 # ── 2. Locate OVMS (native binary) ────────────────────────────────────────────
@@ -364,6 +381,28 @@ def ensure_ovms_binary() -> str:
 
 
 # ── 3. Model preparation (export into the OVMS repository) ────────────────────
+
+def _export_repo_path() -> str:
+    """Return the model repository as export_model.py should be given it.
+
+    export_model.py is Intel's script, and it builds its huggingface-cli /
+    optimum-cli calls by formatting paths into a string it hands to
+    `os.system()` — never quoted. Handed an absolute path, a project under
+    "C:\\Users\\me\\final evaluation\\..." breaks at the space: huggingface-cli
+    reads the tail as a filename to fetch from the model repo, and optimum-cli
+    rejects it as an unrecognized argument.
+
+    So pass the path relative to the project directory, which is where the
+    script already runs (`cwd=_HERE`) and what its own default assumes. It
+    comes out as plain "models" no matter where the project lives — no
+    machine-specific behaviour, nothing for the user to configure.
+    """
+    try:
+        rel = os.path.relpath(_REPO, _HERE)
+    except ValueError:
+        return _REPO  # different drive on Windows: no relative form exists
+    return _REPO if rel.startswith(os.pardir) else rel
+
 
 def _ensure_export_tool() -> str:
     """Return a path to export_model.py, downloading it once if necessary."""
@@ -492,13 +531,16 @@ def _prune_stale_servables():
         print(_yellow(f"  [WARN] Could not prune stale servables: {e}"))
 
 
-def _ensure_cache_size(model_name: str, cache_gb: int):
-    """Sync an already-exported servable's KV-cache budget with config.py.
+def _sync_servable(model_name: str, cache_gb: int, device: str):
+    """Sync an already-exported servable with this machine and config.py.
 
-    export_model.py bakes `cache_size: N` into the servable's graph.pbtxt at
-    export time, and exports are skipped once the model is in the repository —
-    so a later config change would silently never apply. Patch the text
-    protobuf in place instead of forcing a multi-GB re-export.
+    export_model.py bakes both `cache_size: N` and the target device into the
+    servable's graph.pbtxt at export time, and exports are skipped once the
+    model is in the repository — so a later config change would silently never
+    apply. The device matters twice over: a models/ folder exported on an Intel
+    GPU box still says GPU when it is copied to a machine that has none, and
+    OVMS would refuse to load it. The IR itself is device-independent, so
+    patching the text protobuf is enough; no multi-GB re-export.
     """
     import re
     graph = os.path.join(_REPO, model_name, "graph.pbtxt")
@@ -506,14 +548,24 @@ def _ensure_cache_size(model_name: str, cache_gb: int):
         return
     try:
         with open(graph) as f:
-            text = f.read()
-        patched, n = re.subn(r"cache_size:\s*\d+", f"cache_size: {cache_gb}", text)
-        if n and patched != text:
+            original = f.read()
+        text, n = re.subn(r"cache_size:\s*\d+", f"cache_size: {cache_gb}", original)
+        cache_changed = n and text != original
+        # Rendered two ways by the graph template: `device: "GPU"` in the node
+        # options, `"target_device": "GPU"` inside the embedded plugin config.
+        before = text
+        text = re.sub(r'(\bdevice:\s*")[^"]*(")', rf"\g<1>{device}\g<2>", text)
+        text = re.sub(r'("target_device":\s*")[^"]*(")', rf"\g<1>{device}\g<2>", text)
+        device_changed = text != before
+        if text != original:
             with open(graph, "w") as f:
-                f.write(patched)
-            print(_green(f"  [OK] {model_name:<24} KV cache updated to {cache_gb} GB"))
+                f.write(text)
+            if cache_changed:
+                print(_green(f"  [OK] {model_name:<24} KV cache updated to {cache_gb} GB"))
+            if device_changed:
+                print(_green(f"  [OK] {model_name:<24} device updated to {device}"))
     except Exception as e:
-        print(_yellow(f"  [WARN] Could not update KV cache for {model_name}: {e}"))
+        print(_yellow(f"  [WARN] Could not update settings for {model_name}: {e}"))
 
 
 def _export_model(export_tool: str, source_model: str, model_name: str,
@@ -530,18 +582,21 @@ def _export_model(export_tool: str, source_model: str, model_name: str,
     """
     if _model_already_exported(model_name):
         print(_green(f"  [OK] {model_name:<24} already in repository"))
-        _ensure_cache_size(model_name, cache_gb)
+        _sync_servable(model_name, cache_gb, device)
         return True
 
     print(_yellow(f"  [..] {model_name:<24} preparing from {source_model} "
                   f"({weight_format}, first run is slow)..."))
+    # Same root for both paths: export_model.py writes the servable's base_path
+    # as config → model relpath, which is only clean if they share a prefix.
+    repo = _export_repo_path()
     cmd = [
         sys.executable, export_tool, "text_generation",
         "--source_model", source_model,
         "--model_name", model_name,
         "--weight-format", weight_format,
-        "--config_file_path", _CONFIG_JSON,
-        "--model_repository_path", _REPO,
+        "--config_file_path", os.path.join(repo, os.path.basename(_CONFIG_JSON)),
+        "--model_repository_path", repo,
         "--target_device", device,
         "--cache_size", str(cache_gb),
     ]
@@ -562,8 +617,20 @@ def ensure_models(device: str) -> bool:
         # entirely. A machine that received converted models never needs them.
         for name, cache in ((LLM_MODEL, LLM_KV_CACHE_GB), (VLM_MODEL, VLM_KV_CACHE_GB)):
             print(_green(f"  [OK] {name:<24} already in repository"))
-            _ensure_cache_size(name, cache)
+            _sync_servable(name, cache, device)
         return True
+
+    # Only reachable with MODEL_REPOSITORY_PATH pointed outside the project at a
+    # path containing a space — the export tool would silently mangle it.
+    if " " in _export_repo_path():
+        print(_red(f"  [FAIL] The model repository path contains a space: {_REPO}"))
+        print(_yellow("         The model export tool does not quote paths, so it cannot "
+                      "write there."))
+        print(_yellow("         Point MODEL_REPOSITORY_PATH in config.py at a path without "
+                      "spaces (the"))
+        print(_yellow("         default, \"models\" inside the project, always works), then "
+                      "run start.py again."))
+        return False
 
     export_tool = _ensure_export_tool()
     if not export_tool:
@@ -640,7 +707,9 @@ def start_ovms_native(binary: str, device: str) -> bool:
     launcher = os.path.join(_HERE, "_run_ovms.bat")
     with open(launcher, "w") as f:
         f.write("\r\n".join(lines) + "\r\n")
-    cmd = ["cmd", "/c", launcher]
+    # By basename with cwd=_HERE: `cmd /c` re-parses its own quoting, and a
+    # project path with spaces is exactly what trips it.
+    cmd = ["cmd", "/c", os.path.basename(launcher)]
     log_path = os.path.join(_HERE, "ovms.log")
     log_file = open(log_path, "w")
     print(_yellow(f"  Log: {log_path}"))
@@ -694,8 +763,8 @@ def main():
         sys.exit(1)
 
     # ── GPU detection ─────────────────────────────────────────────
-    check_gpus()
-    device = TARGET_DEVICE
+    backend, _ = check_gpus()
+    device = resolve_device(backend)
     print(_cyan(f"  OVMS target device: {device}"))
 
     # ── OVMS already running? ─────────────────────────────────────
