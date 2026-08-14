@@ -143,7 +143,7 @@ a model's opinion alone:
 | Path | Role |
 |---|---|
 | `main.py` | Wires everything, DPI awareness, warmups, starts the Qt app |
-| `start.py` | Environment check, model download/export, OVMS launch |
+| `start.py` | Setup in one command: installs packages, fetches the OVMS binary, downloads/exports models, launches OVMS |
 | `config.py` | Model ids, device, KV-cache sizes, interaction flags |
 | `ui/` | PyQt6 command center: pages, HUD, event bus parsing the log stream, on-screen click pulse |
 
@@ -167,7 +167,7 @@ OpenAI-compatible endpoint (`core/inference.py`).
 
 ```bash
 python start.py          # environment check, models, OVMS, then the app
-pytest tests/unit        # 453 tests, no Windows or GPU needed (UIA is mocked)
+pytest tests/unit        # 491 tests, no Windows or GPU needed (UIA is mocked)
 ruff check .             # style baseline
 ```
 

@@ -24,23 +24,26 @@ venv\Scripts\activate
 ### 3. Install dependencies
 
 ```bash
-pip install -r requirements.txt       # runtime
-pip install -r requirements-dev.txt   # pytest + ruff (to run the test suite)
+pip install -r requirements-dev.txt   # pytest + ruff — enough to run the suite
 ```
+
+The unit tests need nothing else: they run on Linux or Windows with no GPU, no
+OVMS, and no models. `start.py` installs the runtime and conversion packages
+itself when you get to step 4.
 
 ### 4. Prepare the models (only needed for live testing and real runs)
 
-Model ids live in `config.py` — the single source of truth. `start.py` pulls the
-LLM and converts UI-TARS into the OpenVINO Model Server repository, then launches
-OVMS serving both on port 8000:
+Model ids live in `config.py` — the single source of truth.
 
 ```bash
-# The one-time conversion toolchain lives in requirements-export.txt:
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-#   pip install -r requirements-export.txt
-# Install the native ovms/ovms.exe binary and set OVMS_DIR (see README.md).
-python start.py                              # prepares models + starts OVMS + UI
+python start.py    # installs deps, fetches OVMS, prepares models, starts the UI
 ```
+
+`start.py` is self-contained: it installs `requirements.txt`, downloads the
+`ovms.exe` binary into `./ovms/`, installs the conversion toolchain
+(`requirements-export.txt`, CPU-only torch first) only when a model actually
+has to be built, pulls the LLM, converts UI-TARS, and serves both on port 8000.
+Set `OVMS_DIR` if you would rather it used an OVMS you already have.
 
 > **First run takes 30–60 minutes** for the UI-TARS INT8 conversion. Subsequent
 > runs skip this step. If conversion produces files with broken permissions on
@@ -49,7 +52,7 @@ python start.py                              # prepares models + starts OVMS + U
 ### 5. Run tests
 
 ```bash
-pytest                                 # 453 unit tests — no backend or desktop needed
+pytest                                 # 491 unit tests — no backend or desktop needed
 python tests/live/test_usecases.py     # real desktop — requires OVMS + Windows
 ```
 

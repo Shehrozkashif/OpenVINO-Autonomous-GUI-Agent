@@ -17,9 +17,11 @@ env/
 models/*
 !models/.gitkeep
 
-# ── OVMS binary (downloaded by user, not part of source) ────────────────────
+# ── OVMS binary (downloaded by start.py on first run, not part of source) ───
 ovms/
 ovms.zip
+ovms_windows_*.zip
+ovms_windows_*.zip.part
 
 # ── OVMS export tool (downloaded by start.py on first run) ──────────────────
 tools/ovms/

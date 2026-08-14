@@ -44,7 +44,7 @@ tests. Keeping them apart is why the suite runs on Linux with no GPU.
 | Path | What it is |
 |------|------------|
 | `config.py` | Single source of truth: model names, endpoint, device, KV-cache sizes, `FORCE_MOUSE` |
-| `start.py` | One-command bootstrap: GPU check → export models → launch OVMS → launch UI |
+| `start.py` | One-command bootstrap: install deps → GPU check → fetch OVMS → export models → launch OVMS → launch UI |
 | `main.py` | Wires all agents together (`build_orchestrator()`) and starts the Qt app |
 | `core/orchestrator.py` | **The heart.** Task loop, verification policy, budgets, replanning |
 | `core/runstate.py` | `OrchestratorConfig` (every budget) and `SubtaskRun` (per-subtask state) |
@@ -69,7 +69,7 @@ tests. Keeping them apart is why the suite runs on Linux with no GPU.
 | `desktop/system.py` | DPI, foreground window, process/window queries, installed apps, GPUs |
 | `core/history.py` | SQLite record of tasks that completed cleanly — read by the UI, never by the loop |
 | `ui/` | PyQt6 Mission Control. `events.py` parses orchestrator log lines into typed signals |
-| `tests/unit/` | 453 tests, run anywhere: `pytest tests/unit` |
+| `tests/unit/` | 491 tests, run anywhere: `pytest tests/unit` |
 | `tests/live/` | Real-desktop suites (Windows + OVMS required); verified by disk/process ground truth |
 
 ## 4. Reading order

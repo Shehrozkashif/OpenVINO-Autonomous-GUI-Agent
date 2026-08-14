@@ -14,7 +14,7 @@ OpenVINO™ Model Server. No cloud. No API keys. No data ever leaves your desk.
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![Backend](https://img.shields.io/badge/inference-OpenVINO%E2%84%A2%20Model%20Server-0068b5)](https://github.com/openvinotoolkit/model_server)
 [![GUI](https://img.shields.io/badge/GUI-PyQt6-41cd52)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Tests](https://img.shields.io/badge/tests-453%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-491%20passing-brightgreen)](#running-tests)
 
 [How It Works](#how-it-works) •
 [Architecture](#architecture) •
@@ -232,63 +232,49 @@ still fits alongside the INT8 VLM (~24.7 GB). Adjust `LLM_WEIGHT_FORMAT`,
 
 ## Installation
 
-Needs Python 3.10–3.12, Git, and the
+You need **Python 3.10–3.12**, **Git**, and the
 [Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe).
-Run it all in one PowerShell window.
+Then, in PowerShell:
 
 ```powershell
-# 1. Get the code
 git clone https://github.com/Shehrozkashif/intel-openvino-desktop-agent.git
 cd intel-openvino-desktop-agent
-
-# 2. Virtual environment (your prompt should now start with "(venv)")
 python -m venv venv
-venv\Scripts\activate
-
-# 3. Python packages — a first-time machine needs BOTH files
-pip install -r requirements.txt                                    # runtime
-pip install torch --index-url https://download.pytorch.org/whl/cpu # CPU torch first
-pip install -r requirements-export.txt                             # model conversion
-
-# 4. Check the install before going further
-python -c "import PyQt6, httpx, jinja2, optimum, nncf, torch; print('deps OK')"
-
-# 5. OpenVINO Model Server (a native .exe, not a pip package)
-#    PowerShell aliases `curl` to Invoke-WebRequest — use curl.exe / tar.exe
-curl.exe -L https://github.com/openvinotoolkit/model_server/releases/download/v2026.2/ovms_windows_2026.2.0_python_on.zip -o ovms.zip
-tar.exe -xf ovms.zip
-setx OVMS_DIR "$PWD\ovms"     # permanent, but only takes effect in a NEW terminal
-
-# 6. Reopen the terminal, then run
-cd intel-openvino-desktop-agent
 venv\Scripts\activate
 python start.py
 ```
 
-**Step 4 must print `deps OK`.** If it raises `ModuleNotFoundError`, a `pip`
-command failed or you are in the wrong venv — fix it now. Otherwise it comes
-back much later as a confusing `export_model.py` traceback during step 6.
+That is the whole setup. `start.py` does the rest itself:
 
-Why two requirements files: `requirements.txt` is the runtime (GUI + HTTP to
-OVMS, no ML framework). `requirements-export.txt` is the one-time toolchain
-that converts UI-TARS to OpenVINO IR — skip it only if `models/` already holds
-converted models from another machine. CPU-only torch goes first because this
-is an Intel-GPU target; the default build drags in ~3.4 GB of unused NVIDIA
-wheels.
+| It checks | And if it is missing |
+|-----------|----------------------|
+| Python packages (`requirements.txt`) | installs them |
+| OpenVINO™ Model Server | downloads and unpacks `ovms.exe` into `.\ovms\` |
+| Model-conversion toolchain (`requirements-export.txt`) | installs it, CPU-only torch first — only when a model actually has to be built |
+| The two models | pulls the LLM, converts UI-TARS, registers both with OVMS |
 
-**The first run takes 30–60 minutes** and downloads ~15 GB — UI-TARS is
-converted and quantized locally. This happens once; later runs start in under
-a minute.
+Nothing to unzip by hand, no `OVMS_DIR` to set. Every later run is the same
+three lines — `cd`, `venv\Scripts\activate`, `python start.py` — and skips
+whatever is already done.
+
+**The first run takes 30–60 minutes** and downloads ~15 GB, because UI-TARS is
+converted and quantized on your machine. This happens once.
+
+A few things worth knowing:
+
+- **Use the venv.** Activate it before running `start.py`, or the packages land
+  system-wide. `start.py` warns you if you forgot.
+- **Already have OVMS?** Set `OVMS_DIR` to the folder holding `ovms.exe` and
+  `start.py` uses that instead of downloading its own.
+- **Deploying to a machine that already has converted models in `models/`?**
+  Only `requirements.txt` is ever installed there — the agent talks to OVMS
+  over HTTP and imports no ML framework.
 
 > **Do NOT run `setupvars.bat` in your agent terminal.** It sets
 > `PYTHONHOME`/`PYTHONPATH` to OVMS's bundled Python, which hijacks your venv
 > (`ModuleNotFoundError: No module named 'config'`). `start.py` sources it
 > **inside the `ovms.exe` subprocess only** — just run `python start.py` from
 > a clean shell.
-
-Every later run is the same three lines as step 6: `cd`, `venv\Scripts\activate`,
-`python start.py`. It detects the GPU, skips models already in the repository,
-starts OVMS, and opens the GUI.
 
 ```powershell
 # Pre-fill the instruction box
@@ -312,10 +298,22 @@ recorded during missions), and **Settings**.
 <details>
 <summary><b>Manual setup, without start.py</b></summary>
 
+Everything `start.py` automates, done by hand — useful for debugging one stage
+in isolation.
+
 ```powershell
-pip install -r requirements.txt              # runtime
+# Packages: runtime, then the one-time conversion toolchain (CPU torch first)
+pip install -r requirements.txt
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements-export.txt       # one-time conversion (optimum-intel, nncf)
+pip install -r requirements-export.txt
+
+# OpenVINO Model Server — a native binary, not a pip package.
+# PowerShell aliases `curl` to Invoke-WebRequest, so call curl.exe / tar.exe:
+curl.exe -L https://github.com/openvinotoolkit/model_server/releases/download/v2026.2/ovms_windows_2026.2.0_python_on.zip -o ovms.zip
+tar.exe -xf ovms.zip          # extracts .\ovms\ containing ovms.exe + setupvars.bat
+
+# Intel's converter, which start.py otherwise fetches into tools/ovms/ on first run:
+curl.exe -L https://raw.githubusercontent.com/openvinotoolkit/model_server/releases/2025/3/demos/common/export_models/export_model.py -o tools\ovms\export_model.py
 
 # 1. Pull / convert both models into the OVMS repository (writes models/config.json)
 python tools/ovms/export_model.py text_generation `
@@ -350,7 +348,8 @@ curl http://localhost:8000/v1/config        # servable states (AVAILABLE?)
 
 ```
 intel-openvino-desktop-agent/
-├── start.py                  ← single entry point (run this)
+├── start.py                  ← single entry point (run this) — installs deps,
+│                               fetches OVMS, prepares models, starts everything
 ├── main.py                   ← Qt app + orchestrator wiring
 ├── config.py                 ← model ids & server settings (single source of truth)
 │
@@ -387,11 +386,18 @@ intel-openvino-desktop-agent/
 │
 ├── ui/                        # PyQt6 command-center GUI
 ├── tests/
-│   ├── unit/                  # 453 tests — fast, no backend or desktop required
+│   ├── unit/                  # 491 tests — fast, no backend or desktop required
 │   └── live/                  # real-desktop suites (require OVMS + display)
 ├── requirements.txt           # runtime deps (no ML framework — HTTP to OVMS)
 ├── requirements-export.txt    # one-time model-conversion toolchain
-└── requirements-dev.txt       # pytest + ruff
+├── requirements-dev.txt       # pytest + ruff
+├── ARCHITECTURE.md            # pipeline, ground-truth table, file map
+└── docs/CODE_TOUR.md          # guided reading order through the modules
+
+  created on first run, not in git:
+    ovms/                      # the downloaded OpenVINO Model Server
+    models/                    # exported servables + OVMS config.json
+    tools/ovms/export_model.py # Intel's converter, fetched once
 ```
 
 ---
@@ -424,7 +430,7 @@ intel-openvino-desktop-agent/
 ```powershell
 venv\Scripts\activate
 
-# Unit tests — 453 tests, fast, no backend or desktop required
+# Unit tests — 491 tests, fast, no backend or desktop required
 pytest
 
 # Lint
@@ -441,17 +447,17 @@ python tests/live/test_longhorizon.py
 
 | Problem | Solution |
 |---------|----------|
-| `[FAIL] Could not export …` with `ModuleNotFoundError: No module named 'jinja2'` (or `optimum`, `nncf`, `torch`) | The conversion toolchain is missing from the active venv. Activate it, then `pip install torch --index-url https://download.pytorch.org/whl/cpu` and `pip install -r requirements-export.txt`. Re-run install step 4 until it prints `deps OK` |
-| Installed the packages but still `ModuleNotFoundError` | Wrong venv. `python -c "import sys; print(sys.executable)"` must print a path inside this project's `venv\Scripts\`. If not, run `venv\Scripts\activate` and install again |
+| `[FAIL] Could not install …` for `jinja2` / `optimum` / `nncf` / `torch` | `start.py` tried to install the conversion toolchain and pip failed — scroll up for pip's error. Run it by hand: `pip install torch --index-url https://download.pytorch.org/whl/cpu` then `pip install -r requirements-export.txt` |
+| `ModuleNotFoundError` for a package you know you installed | Wrong venv. `python -c "import sys; print(sys.executable)"` must print a path inside this project's `venv\Scripts\`. If not, run `venv\Scripts\activate` and start again |
 | `Could not connect to OpenVINO Model Server` | Run `python start.py`; check `ovms.log` and `curl localhost:8000/v1/config` |
-| Native `ovms.exe` not found | Set `OVMS_DIR` to the folder containing `ovms.exe` |
+| OVMS download fails or is blocked | Download the zip manually, extract it so `ovms.exe` lands in `.\ovms\`, or set `OVMS_DIR` to an existing install. `start.py` picks up either |
 | `ModuleNotFoundError: No module named 'config'` | You ran OVMS's `setupvars` in your agent shell — it hijacks the venv's Python. Open a fresh terminal, activate the venv, and run `python start.py` |
 | `Requested KV-cache size is larger than available memory` | Lower `LLM_KV_CACHE_GB` / `VLM_KV_CACHE_GB` in `config.py` (defaults: 4 / 2 GB). Total must satisfy: caches + ~15 GB model weights < your GPU's VRAM |
 | Model files have `Access is denied` | Delete the model folder from an **elevated** terminal: `rd /s /q models\ui-tars-1.5-7b-int8-ov`, then re-run `python start.py` to re-export |
 | Model loads on CPU instead of GPU | Set `TARGET_DEVICE="GPU"` in `config.py`; install Intel GPU drivers |
 | Agent clicks wrong place | Lower screen scaling in Windows display settings |
 | Clicks happen with no visible mouse movement | `config.FORCE_MOUSE = True` (default) drives the real cursor; `False` uses the faster UIA pattern invoke |
-| First run takes very long | Expected — UI-TARS conversion (INT4 quantization of a 7B model) takes 30–60 minutes. The LLM (Qwen3) is pre-converted and downloads in minutes. Subsequent runs skip this step |
+| First run takes very long | Expected — UI-TARS conversion (INT8 quantization of a 7B model) takes 30–60 minutes. The LLM (Qwen3) is pre-converted and downloads in minutes. Subsequent runs skip this step |
 
 ---
 

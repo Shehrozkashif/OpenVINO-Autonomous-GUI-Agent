@@ -3,16 +3,20 @@
 
     python start.py
 
-Does everything automatically:
-  1. Check for Windows UIA (Stage 0 grounding)
+This is the whole setup — a fresh clone in an activated venv needs nothing else.
+Every step is skipped if it is already done, so it is also the normal way to
+start the agent day to day:
+
+  1. Install the runtime packages (requirements.txt) if any are missing
   2. Detect GPU (Intel / AMD / NVIDIA)
-  3. Prepare both models in the OpenVINO Model Server (OVMS) repository:
+  3. Download the native OVMS server into ./ovms/ if the machine has none
+  4. Prepare both models in the OpenVINO Model Server (OVMS) repository:
        • LLM  config.LLM_MODEL  (pulled pre-converted from Hugging Face)
        • VLM  config.VLM_MODEL  (converted from UI-TARS on first run)
-  4. Start OVMS serving both models on one OpenAI-compatible endpoint (port 8000)
-       using the native ovms.exe binary
-  5. Wait for the server to be ready
-  6. Launch the agent UI
+     Installing the conversion toolchain (requirements-export.txt) first, and
+     only when something actually has to be converted.
+  5. Start OVMS serving both models on one OpenAI-compatible endpoint (port 8000)
+  6. Wait for the server to be ready, then launch the agent UI
 """
 import json
 import os
@@ -48,6 +52,22 @@ _EXPORT_TOOL_URL = (
     f"{_OVMS_REF}/demos/common/export_models/export_model.py"
 )
 
+# The OVMS server itself: a native binary, not a pip package. Downloaded into
+# ./ovms/ when the machine has none, so setup needs no manual unzip and no
+# OVMS_DIR environment variable.
+_OVMS_VERSION = "2026.2"
+_OVMS_ZIP_URL = (
+    f"https://github.com/openvinotoolkit/model_server/releases/download/"
+    f"v{_OVMS_VERSION}/ovms_windows_{_OVMS_VERSION}.0_python_on.zip"
+)
+_OVMS_LOCAL_DIR = os.path.join(_HERE, "ovms")
+
+_REQS = os.path.join(_HERE, "requirements.txt")
+_EXPORT_REQS = os.path.join(_HERE, "requirements-export.txt")
+# CPU-only torch index. This is an Intel-GPU target and conversion runs on CPU,
+# so the default CUDA build would add ~3.4 GB of NVIDIA wheels for nothing.
+_TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 def _green(s):  return f"\033[92m{s}\033[0m"
@@ -61,6 +81,125 @@ def banner():
     print(_bold("\n╔══════════════════════════════════════════════╗"))
     print(_bold("║       Desktop GUI Agent — Startup Check      ║"))
     print(_bold("╚══════════════════════════════════════════════╝\n"))
+
+
+# ── 0. Python dependencies ────────────────────────────────────────────────────
+
+def _missing_modules(mods) -> list:
+    """Return the subset of `mods` this interpreter cannot import."""
+    import importlib.util
+    missing = []
+    for mod in mods:
+        try:
+            if importlib.util.find_spec(mod) is None:
+                missing.append(mod)
+        except Exception:
+            missing.append(mod)  # namespace clash / half-removed package
+    return missing
+
+
+def _pip_install(*args) -> bool:
+    """Run pip in THIS interpreter, so packages always land in the venv in use."""
+    print(_yellow(f"  [..] pip install {' '.join(args)}"))
+    cmd = [sys.executable, "-m", "pip", "install", *args]
+    if subprocess.run(cmd).returncode != 0:
+        return False
+    import importlib
+    importlib.invalidate_caches()  # let find_spec see what pip just wrote
+    return True
+
+
+# Import names of the runtime packages, which is what requirements.txt installs.
+# Checked by import name because that is what actually fails at run time.
+_RUNTIME_IMPORTS = (
+    "PyQt6", "PIL", "imagehash", "rapidocr_onnxruntime", "uiautomation",
+    "httpx", "pydantic", "numpy", "loguru", "pyperclip", "keyring",
+)
+
+
+def ensure_runtime_deps() -> bool:
+    """Install requirements.txt if anything the agent imports is missing."""
+    missing = _missing_modules(_RUNTIME_IMPORTS)
+    if not missing:
+        print(_green("  [OK] runtime packages"))
+        return True
+    print(_yellow(f"  [..] installing runtime packages ({', '.join(missing)})..."))
+    if _pip_install("-r", _REQS) and not _missing_modules(_RUNTIME_IMPORTS):
+        print(_green("  [OK] runtime packages installed"))
+        return True
+    still = _missing_modules(_RUNTIME_IMPORTS)
+    print(_red(f"  [FAIL] Still missing: {', '.join(still)}"))
+    print(_yellow(f"        Run manually: pip install -r {_REQS}"))
+    return False
+
+
+# Modules requirements-export.txt pulls in, directly or as dependencies of
+# optimum-intel[openvino]. If everything missing is on this list, one file
+# installs the lot — no need to name packages one at a time and have the user
+# rediscover the next one on the following run.
+_EXPORT_TOOLCHAIN = {
+    "huggingface_hub", "jinja2", "nncf", "numpy", "openvino",
+    "openvino_genai", "openvino_tokenizers", "optimum", "torch",
+    "transformers",
+}
+
+
+def _export_tool_imports(export_tool: str) -> list:
+    """Top-level modules export_model.py imports.
+
+    export_model.py is Intel's script, not ours, and it imports things a
+    runtime-only venv does not have (jinja2 is the usual one). Read its imports
+    rather than hardcoding a list that drifts when Intel edits the script.
+    """
+    import ast
+    try:
+        with open(export_tool, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+    except Exception:
+        return []  # Not worth failing over; the real import will speak up.
+    mods = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            mods.add(node.module.split(".")[0])
+    return sorted(m for m in mods if m not in sys.builtin_module_names)
+
+
+def ensure_export_deps(export_tool: str) -> bool:
+    """Install the conversion toolchain BEFORE the multi-GB model download.
+
+    Without this, a missing package surfaces as a ModuleNotFoundError traceback
+    from Intel's script partway through, which reads like the model is
+    unsupported when the real problem is one absent pip package.
+    """
+    missing = _missing_modules(_export_tool_imports(export_tool))
+    if not missing:
+        print(_green("  [OK] model-conversion toolchain"))
+        return True
+
+    print(_yellow(f"  [..] installing model-conversion toolchain "
+                  f"({', '.join(missing)})..."))
+    if set(missing) <= _EXPORT_TOOLCHAIN and os.path.isfile(_EXPORT_REQS):
+        # requirements.txt deliberately omits the ML stack — the agent talks to
+        # OVMS over HTTP and imports no framework. Conversion is the one job
+        # that needs it, and requirements-export.txt pins that whole set.
+        if "torch" in missing:
+            print(_yellow("       (first time: ~2 GB of packages, CPU-only torch)"))
+            if not _pip_install("torch", "--index-url", _TORCH_CPU_INDEX):
+                print(_red("  [FAIL] Could not install torch"))
+                return False
+        ok = _pip_install("-r", _EXPORT_REQS)
+    else:
+        ok = _pip_install(*missing)
+
+    still = _missing_modules(_export_tool_imports(export_tool))
+    if ok and not still:
+        print(_green("  [OK] model-conversion toolchain installed"))
+        return True
+    print(_red(f"  [FAIL] Could not install: {', '.join(still or missing)}"))
+    print(_yellow(f"        Run manually: pip install -r {_EXPORT_REQS}"))
+    return False
 
 
 # ── 1. GPU detection ──────────────────────────────────────────────────────────
@@ -97,7 +236,9 @@ def find_ovms_binary() -> str:
     """Return the path to a native ovms executable, or '' if none is found.
 
     Honours the OVMS_DIR / OVMS_PATH env vars (the OVMS Windows package extracts
-    to a folder containing ovms.exe), then falls back to PATH.
+    to a folder containing ovms.exe), then PATH, then this project's own ./ovms/
+    — the last one is what ensure_ovms_binary() populates, and is why setup does
+    not need an environment variable at all.
     """
     exe = "ovms.exe"
     for env in ("OVMS_PATH", "OVMS_DIR"):
@@ -110,7 +251,85 @@ def find_ovms_binary() -> str:
             if os.path.isfile(cand):
                 return cand
     found = shutil.which("ovms") or shutil.which(exe)
-    return found or ""
+    if found:
+        return found
+    # Where ensure_ovms_binary() puts it — checked last so an existing install
+    # always wins, and found without any environment variable being set.
+    for cand in (os.path.join(_OVMS_LOCAL_DIR, exe),
+                 os.path.join(_OVMS_LOCAL_DIR, "ovms", exe)):
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _download(url: str, dest: str, label: str) -> bool:
+    """Download with a one-line progress readout."""
+    import urllib.request
+    tmp = dest + ".part"
+
+    def progress(block, block_size, total):
+        done = block * block_size
+        if total > 0:
+            pct = min(100, done * 100 // total)
+            sys.stdout.write(f"\r  [..] {label}: {pct}% "
+                             f"({done // 1048576} / {total // 1048576} MB)")
+        else:
+            sys.stdout.write(f"\r  [..] {label}: {done // 1048576} MB")
+        sys.stdout.flush()
+
+    try:
+        urllib.request.urlretrieve(url, tmp, reporthook=progress)
+        print()
+        os.replace(tmp, dest)
+        return True
+    except Exception as e:
+        print()
+        print(_red(f"  [FAIL] Download failed: {e}"))
+        if os.path.isfile(tmp):
+            os.remove(tmp)  # never leave a truncated file to be reused
+        return False
+
+
+def ensure_ovms_binary() -> str:
+    """Return a path to ovms.exe, downloading the server once if needed.
+
+    OVMS ships as a native binary, not a pip package, so nothing in
+    requirements.txt can bring it in. Fetching it here is what removes the
+    manual download / unzip / `setx OVMS_DIR` steps from setup.
+    """
+    binary = find_ovms_binary()
+    if binary:
+        print(_green(f"  [OK] ovms.exe found ({binary})"))
+        return binary
+
+    zip_path = os.path.join(_HERE, f"ovms_windows_{_OVMS_VERSION}.zip")
+    print(_yellow(f"  [SETUP] OpenVINO Model Server {_OVMS_VERSION} not found "
+                  f"— downloading (one-time)..."))
+    if not os.path.isfile(zip_path) and not _download(_OVMS_ZIP_URL, zip_path,
+                                                      "ovms.zip"):
+        print(_yellow(f"        Download it manually from {_OVMS_ZIP_URL},"))
+        print(_yellow(f"        extract it so ovms.exe sits in {_OVMS_LOCAL_DIR}"))
+        return ""
+
+    print(_yellow("  [..] extracting..."))
+    try:
+        import zipfile
+        # The archive already contains a top-level ovms/ directory, so extract
+        # into the project root rather than into _OVMS_LOCAL_DIR itself.
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(_HERE)
+    except Exception as e:
+        print(_red(f"  [FAIL] Could not extract {zip_path}: {e}"))
+        return ""
+
+    binary = find_ovms_binary()
+    if binary:
+        print(_green(f"  [OK] OpenVINO Model Server ready ({binary})"))
+        os.remove(zip_path)  # ~2 GB of archive no longer needed
+    else:
+        print(_red(f"  [FAIL] ovms.exe not found under {_OVMS_LOCAL_DIR} "
+                   "after extracting"))
+    return binary
 
 
 # ── 3. Model preparation (export into the OVMS repository) ────────────────────
@@ -307,10 +526,23 @@ def ensure_models(device: str) -> bool:
     """Make sure both servables exist in the OVMS repository / config.json."""
     os.makedirs(_REPO, exist_ok=True)
     _prune_stale_servables()
-    _ensure_cli_shims()
+    if _model_already_exported(LLM_MODEL) and _model_already_exported(VLM_MODEL):
+        # Nothing to convert — skip the export tool and its heavy toolchain
+        # entirely. A machine that received converted models never needs them.
+        for name, cache in ((LLM_MODEL, LLM_KV_CACHE_GB), (VLM_MODEL, VLM_KV_CACHE_GB)):
+            print(_green(f"  [OK] {name:<24} already in repository"))
+            _ensure_cache_size(name, cache)
+        return True
+
     export_tool = _ensure_export_tool()
     if not export_tool:
         return False
+    # Both before the first byte of a multi-GB model is fetched: the toolchain
+    # export_model.py imports, then the CLIs it shells out to (which only exist
+    # once that toolchain is installed).
+    if not ensure_export_deps(export_tool):
+        return False
+    _ensure_cli_shims()
 
     ok = _export_model(export_tool, LLM_SOURCE, LLM_MODEL, device,
                        LLM_KV_CACHE_GB, LLM_WEIGHT_FORMAT)
@@ -320,7 +552,7 @@ def ensure_models(device: str) -> bool:
         print(_yellow("  Model export failed. Check the output above for the specific error."))
         print(_yellow("  Common causes:"))
         print(_yellow("    - First-run UI-TARS conversion needs ~16 GB RAM and internet access"))
-        print(_yellow("    - Missing toolchain: pip install -r requirements-export.txt"))
+        print(_yellow("    - Not enough free disk for the converted weights (~15 GB)"))
         print(_yellow("  On Windows: if model files have 'Access denied', delete the model folder"))
         print(_yellow("  from an elevated terminal and re-run this script."))
     return ok
@@ -417,18 +649,16 @@ def main():
         print(_red(f"  [FAIL] This agent supports Windows only (detected: {platform.system()})"))
         sys.exit(1)
     print(_green("  [OK] Windows"))
-    try:
-        import uiautomation  # noqa: F401
-        print(_green("  [OK] uiautomation — Stage 0 UIA grounding active"))
-    except ImportError:
-        print(_yellow("  [..] uiautomation not installed — installing for Stage 0 grounding..."))
-        ret = subprocess.run([sys.executable, "-m", "pip", "install", "uiautomation"],
-                             capture_output=True)
-        if ret.returncode == 0:
-            print(_green("  [OK] uiautomation installed"))
-        else:
-            print(_yellow("  [WARN] Could not install uiautomation — Stage 0 disabled"))
-            print(_yellow("         Run manually: pip install uiautomation"))
+    if sys.prefix == sys.base_prefix:
+        print(_yellow("  [WARN] Not running inside a virtual environment — "
+                      "packages will install system-wide"))
+
+    # ── Python packages ───────────────────────────────────────────
+    # Installed here rather than left to the README: the agent's own imports
+    # first, and the conversion toolchain later, only if a model must be built.
+    print(_bold("\nDependencies:"))
+    if not ensure_runtime_deps():
+        sys.exit(1)
 
     # ── GPU detection ─────────────────────────────────────────────
     check_gpus()
@@ -448,6 +678,14 @@ def main():
             subprocess.run(["taskkill", "/F", "/IM", "ovms.exe"],
                            capture_output=True, timeout=10)
             time.sleep(2.0)
+
+        # ── Fetch the server BEFORE the models ────────────────────
+        # Model preparation can take an hour on first run. Failing to get the
+        # server after that wait would be a miserable way to find out.
+        binary = ensure_ovms_binary()
+        if not binary:
+            sys.exit(1)
+
         # ── Prepare models ────────────────────────────────────────
         print(_bold("\nModels:"))
         if not ensure_models(device):
@@ -456,17 +694,7 @@ def main():
 
         # ── Launch OVMS (native binary) ────────────────────────────
         print(_bold("\nStarting server:"))
-        binary = find_ovms_binary()
-        started = False
-        if binary:
-            started = start_ovms_native(binary, device)
-        else:
-            print(_red("  [FAIL] No native OVMS binary found."))
-            print(_yellow("  Install OVMS — https://docs.openvino.ai/latest/model-server/ovms_docs_deploying_server.html"))
-            print(_yellow("  then set OVMS_DIR to its folder (containing ovms.exe), or add it to PATH"))
-            sys.exit(1)
-
-        if not started:
+        if not start_ovms_native(binary, device):
             sys.exit(1)
 
     # ── Summary ───────────────────────────────────────────────────
