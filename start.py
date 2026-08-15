@@ -517,6 +517,23 @@ def _prune_stale_servables():
         print(_yellow(f"  [WARN] Could not prune stale servables: {e}"))
 
 
+def _with_prompt_lookup(match) -> str:
+    """Add "prompt_lookup": true to a graph.pbtxt plugin_config JSON string.
+
+    plugin_config holds JSON inside a single-quoted text-protobuf field, so this
+    parses it rather than pattern-matching keys — the field already carries other
+    settings on some exports, and they must survive untouched.
+    """
+    try:
+        cfg = json.loads(match.group(1) or "{}")
+    except ValueError:
+        return match.group(0)   # unparseable: leave it exactly as it is
+    if cfg.get("prompt_lookup") is True:
+        return match.group(0)
+    cfg["prompt_lookup"] = True
+    return "plugin_config: '" + json.dumps(cfg) + "'"
+
+
 def _sync_servable(model_name: str, cache_gb: int, device: str) -> bool:
     """Sync an already-exported servable with this machine and config.py.
 
@@ -564,6 +581,22 @@ def _sync_servable(model_name: str, cache_gb: int, device: str) -> bool:
                           r"\g<0>\n\g<1>enable_prefix_caching: true",
                           text, count=1, flags=re.M)
         prefix_changed = text != before
+        before = text
+        if model_name == LLM_MODEL:
+            # Prompt lookup decoding — text model only. The planner's answer is
+            # largely strings copied straight out of its own prompt: control
+            # names, the meeting title, the date. Prompt lookup spots those runs
+            # in the prompt and checks a whole run in one pass instead of writing
+            # it a token at a time. Guesses that do not match are thrown away, so
+            # the text produced is identical; only the speed changes.
+            # OVMS reads the flag from plugin_config, not from its own node
+            # options (2026.2 src/llm/servable.cpp, determineDecodingMethod).
+            # The two request-side knobs, num_assistant_tokens and max_ngram_size,
+            # are optional and default to 5 and 3, so the client sends nothing new.
+            # Left off the VLM: it answers with a coordinate pair, which is far
+            # too short for guessing ahead to pay for itself.
+            text = re.sub(r"plugin_config:\s*'([^']*)'", _with_prompt_lookup, text)
+        lookup_changed = text != before
         if text != original:
             with open(graph, "w") as f:
                 f.write(text)
@@ -573,6 +606,8 @@ def _sync_servable(model_name: str, cache_gb: int, device: str) -> bool:
                 print(_green(f"  [OK] {model_name:<24} device updated to {device}"))
             if prefix_changed:
                 print(_green(f"  [OK] {model_name:<24} prefix caching enabled"))
+            if lookup_changed:
+                print(_green(f"  [OK] {model_name:<24} prompt lookup decoding enabled"))
             return True
     except Exception as e:
         print(_yellow(f"  [WARN] Could not update settings for {model_name}: {e}"))
@@ -648,6 +683,9 @@ def _export_model(export_tool: str, source_model: str, model_name: str,
         # output, only how much of it has to be recomputed.
         "--enable_prefix_caching",
     ]
+    if model_name == LLM_MODEL:
+        # See _sync_servable: lossless, and it only pays off for the text model.
+        cmd.append("--prompt_lookup_decoding")
     if _is_partial_export(model_name):
         # export_model.py skips the conversion when the target folder merely
         # EXISTS, so the wreckage of an interrupted run would be registered as
