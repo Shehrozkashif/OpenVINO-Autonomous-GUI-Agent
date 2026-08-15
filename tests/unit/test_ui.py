@@ -454,3 +454,45 @@ def test_empty_state_quick_action_runs_through_composer(win, app):
     win.page_home._pick("Open Calculator")
     assert win.page_home.composer.input.toPlainText() == "Open Calculator"
     assert win.instruction_input.toPlainText() == "Open Calculator"
+
+
+# ── Window geometry ───────────────────────────────────────────────────────────
+# The window used to open at a hard-coded setGeometry(80, 60, 1480, 920): 980 px
+# of height once the offset is counted, against roughly 1032 usable on a 1080p
+# laptop, and less at any display scaling above 100%. The instruction box and the
+# Run button sat under the taskbar, so a new user's first move was to resize the
+# window to find the controls. These pin the rule that replaced it.
+
+@pytest.mark.parametrize("avail_w,avail_h", [
+    (1024, 768),    # oldest display still worth supporting
+    (1280, 800),
+    (1366, 728),    # the common budget laptop, after its taskbar
+    (1852, 963),    # the machine this agent was developed on
+    (1920, 1032),   # 1080p after the taskbar
+    (2560, 1400),
+    (3840, 2120),   # 4K
+    (800, 600),     # smaller than the minimum — must still fit
+])
+def test_window_never_opens_larger_than_the_screen(avail_w, avail_h):
+    from ui.main_window import DesktopGUIAgent
+    w, h = DesktopGUIAgent.fit_to_screen(avail_w, avail_h)
+    assert w <= avail_w, f"{w}px wide on a {avail_w}px screen"
+    assert h <= avail_h, f"{h}px tall on a {avail_h}px screen"
+    assert w > 0 and h > 0
+
+
+def test_window_uses_the_room_it_has_on_a_normal_laptop():
+    """A 1080p laptop should get the full preferred size, not a shrunken one."""
+    from ui.main_window import DesktopGUIAgent
+    w, h = DesktopGUIAgent.fit_to_screen(1920, 1032)
+    assert (w, h) == (DesktopGUIAgent._WANT_W, DesktopGUIAgent._WANT_H)
+
+
+def test_window_opens_inside_the_available_area(win, app):
+    """End to end: the real window, on the real screen Qt reports."""
+    from PyQt6.QtGui import QGuiApplication
+    screen = win.screen() or QGuiApplication.primaryScreen()
+    avail = screen.availableGeometry()
+    g = win.frameGeometry()
+    assert g.width() <= avail.width(), f"{g.width()} > {avail.width()}"
+    assert g.height() <= avail.height(), f"{g.height()} > {avail.height()}"

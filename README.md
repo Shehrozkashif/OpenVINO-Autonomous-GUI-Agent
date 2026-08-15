@@ -450,7 +450,8 @@ intel-openvino-desktop-agent/
 ```powershell
 venv\Scripts\activate
 
-# Unit tests: 491 tests, fast, no backend or desktop required
+# Unit tests: 491 without PyQt6, 518 with it (the GUI suite). Fast, no backend
+# or desktop required.
 pytest
 
 # Lint

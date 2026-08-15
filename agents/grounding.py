@@ -205,9 +205,18 @@ class UIGroundingAgent:
         # Live: the VLM re-emitted the exact same Edge-window coordinate for
         # 'New meeting' across three screen changes, opening Edge each time.
         self._dead_foreign: list[tuple[int, int]] = []
+        # Deliberately NOT self.ocr.is_available() here: that call builds the
+        # RapidOCR ONNX session, ~2.5 s, and this constructor runs before the
+        # GUI window is created — so the whole app sat blank while a model that
+        # is not needed until the first screen read loaded. find_spec answers
+        # the only question this log line asks (is the package installed?)
+        # without loading anything. main.py warms the engine on its background
+        # thread, so the first real OCR call is still not the one that pays.
+        import importlib.util
+        _ocr_installed = importlib.util.find_spec("rapidocr_onnxruntime") is not None
         logger.info(
             f"[GROUNDING] Ready. Screen: {self.screen_w}×{self.screen_h}. "
-            f"OCR: {'on' if self.ocr.is_available() else 'off (pip install rapidocr-onnxruntime)'}"
+            f"OCR: {'on' if _ocr_installed else 'off (pip install rapidocr-onnxruntime)'}"
         )
 
     # ── public API ────────────────────────────────────────────────────────────

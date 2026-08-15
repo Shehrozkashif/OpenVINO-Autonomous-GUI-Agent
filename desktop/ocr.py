@@ -9,6 +9,7 @@ share ONE engine instance so they also share its cache.
 """
 import difflib
 import re
+import threading
 import time
 from dataclasses import dataclass
 
@@ -51,17 +52,26 @@ class OCREngine:
         self._ocr = None
         self._available: bool | None = None
         self._cache: dict[str, tuple] = {}   # phash_str → (words, timestamp)
+        # Startup warms the engine on a background thread so the window can
+        # appear immediately (main.py, _warmup_models), which means two threads
+        # can reach the lazy init below: the warmer, and a task that starts
+        # before the warmer finished. Without this they would each build their
+        # own ONNX session.
+        self._init_lock = threading.Lock()
 
     def is_available(self) -> bool:
-        if self._available is None:
-            try:
-                from rapidocr_onnxruntime import RapidOCR
-                self._ocr = RapidOCR()
-                self._available = True
-                logger.info("[OCR] RapidOCR initialised")
-            except Exception as e:
-                self._available = False
-                logger.warning(f"[OCR] RapidOCR not available: {e}")
+        if self._available is not None:
+            return self._available
+        with self._init_lock:
+            if self._available is None:   # lost the race — the winner built it
+                try:
+                    from rapidocr_onnxruntime import RapidOCR
+                    self._ocr = RapidOCR()
+                    self._available = True
+                    logger.info("[OCR] RapidOCR initialised")
+                except Exception as e:
+                    self._available = False
+                    logger.warning(f"[OCR] RapidOCR not available: {e}")
         return self._available
 
     def extract(self, image: Image.Image) -> list[OCRWord]:

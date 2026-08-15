@@ -16,7 +16,16 @@ import time
 from collections import deque
 
 from PyQt6.QtCore import QObject, QSettings, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QIcon, QLinearGradient, QPainter, QPixmap, QRadialGradient
+from PyQt6.QtGui import (
+    QBrush,
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPixmap,
+    QRadialGradient,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -100,6 +109,73 @@ _PAGES = [
 
 
 class DesktopGUIAgent(QMainWindow):
+    # Preferred opening size on a roomy display. Not a promise — the window is
+    # shrunk to whatever the screen actually offers, see _apply_startup_geometry.
+    _WANT_W, _WANT_H = 1480, 920
+    # Floor. The nav rail (196 expanded) and the activity panel (312 fixed)
+    # together take 508, so below ~1040 the middle column stops being usable.
+    # The height floor is kept under 720 so a 1366x768 laptop still fits after
+    # its taskbar.
+    _MIN_W, _MIN_H = 1040, 640
+    # resize() sizes the CLIENT area; the border and title bar sit outside it.
+    # Clamping to exactly the screen width therefore still hangs the frame off
+    # the edge, which is visible on a 1024x768 display. Reserve room for it.
+    _FRAME_W, _FRAME_H = 16, 48
+
+    def _apply_startup_geometry(self):
+        """Open at a size that FITS, centred on the current screen.
+
+        This used to be setGeometry(80, 60, 1480, 920) — a fixed rectangle
+        needing 980 px of height once the 60 px offset is counted. A 1080p
+        laptop has about 1032 px left after the taskbar, and less at any
+        display scaling above 100%, so the bottom of the window — the
+        instruction box and the Run button — sat under the taskbar or off the
+        screen entirely. The first thing a new user had to do was drag the
+        window bigger to find the controls.
+
+        availableGeometry() is the taskbar-aware rectangle of the screen, so
+        sizing against it is what keeps every control reachable on a small
+        laptop and a 4K monitor alike.
+        """
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:      # no display at all — nothing to fit to
+            self.setMinimumSize(self._MIN_W, self._MIN_H)
+            self.resize(self._WANT_W, self._WANT_H)
+            return
+
+        avail = screen.availableGeometry()
+        # The floor is capped by the screen. A minimum wider than the display
+        # cannot be honoured by shrinking — Qt just hands back a window bigger
+        # than the screen, which is the very bug this method exists to fix.
+        # Dropping our own floor here does not let the layout collapse: Qt still
+        # enforces the minimum its child widgets need.
+        # Same frame allowance as fit_to_screen: a minimum of exactly the screen
+        # width would override the fitted size and put the border back off-edge.
+        self.setMinimumSize(min(self._MIN_W, avail.width() - self._FRAME_W),
+                            min(self._MIN_H, avail.height() - self._FRAME_H))
+
+        w, h = self.fit_to_screen(avail.width(), avail.height())
+        self.resize(w, h)
+        self.move(avail.x() + (avail.width() - w) // 2,
+                  avail.y() + (avail.height() - h) // 2)
+
+    @classmethod
+    def fit_to_screen(cls, avail_w: int, avail_h: int) -> tuple[int, int]:
+        """Opening size for a screen whose usable area is avail_w x avail_h.
+
+        Split out from _apply_startup_geometry so the rule can be checked
+        against real display sizes without a display — see test_ui.py. The one
+        invariant that matters: the result never exceeds what it was given.
+        """
+        # A margin keeps it reading as a window rather than a kiosk, but must
+        # never shrink it past the floor.
+        w = max(cls._MIN_W, min(cls._WANT_W, avail_w - 80))
+        h = max(cls._MIN_H, min(cls._WANT_H, avail_h - 80))
+        # On a display smaller than the floor, fitting wins over the floor.
+        # The frame allowance only bites here — on any normal screen the 80 px
+        # margin above is already the binding constraint.
+        return min(w, avail_w - cls._FRAME_W), min(h, avail_h - cls._FRAME_H)
+
     def __init__(self, orchestrator=None):
         super().__init__()
         self.orchestrator = orchestrator
@@ -114,7 +190,7 @@ class DesktopGUIAgent(QMainWindow):
         self._frame_counter = 0
 
         self.setWindowTitle("Desktop GUI Agent")
-        self.setGeometry(80, 60, 1480, 920)
+        self._apply_startup_geometry()
         self.setWindowIcon(QIcon(icon_pixmap("sparkle", QColor(C.ACCENT), 32)))
         self.setStyleSheet(build_stylesheet())
 

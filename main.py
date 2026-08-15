@@ -25,7 +25,7 @@ from desktop.ocr import OCREngine
 from ui.main_window import DesktopGUIAgent
 
 
-def _warmup_models(client: OVMSClient) -> None:
+def _warmup_models(client: OVMSClient, ocr: OCREngine) -> None:
     """Fire cheap dummy requests to the LLM and VLM in a background thread.
     The first real user request would otherwise pay a cold-start penalty of
     several seconds (model loading into device memory). Failures are silently
@@ -34,6 +34,15 @@ def _warmup_models(client: OVMSClient) -> None:
     import threading
 
     def _do_warmup():
+        # Building the RapidOCR ONNX session takes ~2.5 s. It used to happen on
+        # the main thread inside UIGroundingAgent.__init__, before the window
+        # was even constructed, so the app took several seconds to appear.
+        # Loading it here keeps the window instant AND keeps the first screen
+        # read fast — the work happens either way, just not in front of the user.
+        try:
+            ocr.is_available()
+        except Exception as e:
+            logger.debug(f"[STARTUP] OCR warmup skipped: {e}")
         # Prewarm the installed-app catalogue (Get-StartApps, ~1-3 s but can
         # be slow on locked-down machines) so the router's app hint is ready
         # before the first decompose instead of timing out inside it.
@@ -86,7 +95,7 @@ def build_orchestrator() -> TaskOrchestrator:
     ocr = OCREngine()
     history = TaskHistory()
 
-    _warmup_models(client)
+    _warmup_models(client, ocr)
 
     return TaskOrchestrator(
         router=RouterAgent(client),
