@@ -21,7 +21,6 @@ from elsewhere, which is what keeps it readable:
     core/subtasks.py    what a subtask's own words say it wants
     core/apps.py        which executable an app name means
     core/anchor.py      which window this task owns, and staying inside it
-    core/stepexec.py    performing one step safely (grounding gates, invoke)
 
 Log lines here are a public interface: ui/events.py parses them into the live
 mission timeline, so their format must not drift.

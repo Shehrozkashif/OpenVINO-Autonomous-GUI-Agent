@@ -45,11 +45,19 @@ from ui.widgets import (
 # test all three grounding stages (UIA / OCR / VLM) with the exact same task —
 # it names every navigation step so the agent works even without the UIA
 # control list (OCR/VLM modes).
+#
+# The date is computed, not written in. A literal date silently becomes a past
+# date the moment it passes, and the demo then books a meeting in the past for
+# everyone who clicks it. Two weeks out is far enough to stay clear of the
+# current week in any timezone.
+# The attendee is example.com on purpose: whoever clicks this chip is sending a
+# real calendar invite, so it must never carry a live address.
+_DEMO_DATE = (datetime.date.today() + datetime.timedelta(days=14)).strftime("%m/%d/%Y")
 DEMO_PROMPT = (
     "open Microsoft Teams, click the Calendar button in the left sidebar, "
     "click the New meeting button, set the title to 'PROJECT DISCUSSION', "
-    "set the date to 07/29/2026, set the start time to 3:00 PM, set the end "
-    "time to 3:30 PM, add attendee shehrozbaloch005@gmail.com, then click "
+    f"set the date to {_DEMO_DATE}, set the start time to 3:00 PM, set the end "
+    "time to 3:30 PM, add attendee alex@example.com, then click "
     "Save to create the meeting"
 )
 

@@ -326,15 +326,25 @@ tar.exe -xf ovms.zip          # extracts .\ovms\ containing ovms.exe + setupvars
 curl.exe -L https://raw.githubusercontent.com/openvinotoolkit/model_server/releases/2025/3/demos/common/export_models/export_model.py -o tools\ovms\export_model.py
 
 # 1. Pull / convert both models into the OVMS repository (writes models/config.json)
+#    --enable_prefix_caching: reuse the KV cache of a prompt prefix already seen.
+#      Every planning call re-sends the same ~5.8k-token system prompt, so without
+#      this the GPU re-reads it from scratch on every step.
+#    --prompt_lookup_decoding: the planner's answer is largely strings copied out
+#      of its own prompt (control names, dates), so let the server guess those runs
+#      instead of writing them a token at a time. Text model only — the VLM answers
+#      with a coordinate pair, too short for guessing ahead to pay off.
+#    Both are lossless. Omitting them roughly doubles the time per task.
 python tools/ovms/export_model.py text_generation `
   --source_model OpenVINO/Qwen3-8B-int4-ov  --model_name qwen3-8b-int4-ov `
   --weight-format int4 --config_file_path models/config.json `
-  --model_repository_path models --target_device GPU --cache_size 4
+  --model_repository_path models --target_device GPU --cache_size 4 `
+  --enable_prefix_caching --prompt_lookup_decoding
 
 python tools/ovms/export_model.py text_generation `
   --source_model ByteDance-Seed/UI-TARS-1.5-7B --model_name ui-tars-1.5-7b-int8-ov `
   --weight-format int8 --config_file_path models/config.json `
-  --model_repository_path models --target_device GPU --cache_size 2
+  --model_repository_path models --target_device GPU --cache_size 2 `
+  --enable_prefix_caching
 
 # 2. Serve both from one OVMS instance. The device is baked into each servable
 #    at export time (step 1's --target_device), so do NOT pass --target_device

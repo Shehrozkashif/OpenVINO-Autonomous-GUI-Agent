@@ -122,7 +122,7 @@ class TestParseTruncatedJSON:
         raw = (
             '[{"id":1,"description":"open Thunderbird","depends_on":[]},'
             '{"id":2,"description":"click the Write new message button","depends_on":[1]},'
-            '{"id":3,"description":"set To to sharooz57@gmail.com, and type the message'
+            '{"id":3,"description":"set To to alex@example.com, and type the message'
         )
         subs = self._router()._parse_subtasks(raw)
         assert [s.id for s in subs] == [1, 2]
@@ -197,7 +197,7 @@ class TestAppHintWholeWordMatching:
 
     def test_no_app_named_means_no_hint(self):
         assert self._hint(
-            "schedule a meeting with shehroz sharooz57@gmail.com 3pm 6 july"
+            "schedule a meeting with shehroz alex@example.com 3pm 6 july"
         ) == ""
 
     def test_substring_of_app_word_does_not_match(self):
