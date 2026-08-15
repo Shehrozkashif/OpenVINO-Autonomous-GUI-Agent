@@ -24,7 +24,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeyEvent
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QMessageBox, QScrollArea
 
 from ui.events import AgentEventBus, AgentState
 
@@ -496,3 +496,99 @@ def test_window_opens_inside_the_available_area(win, app):
     g = win.frameGeometry()
     assert g.width() <= avail.width(), f"{g.width()} > {avail.width()}"
     assert g.height() <= avail.height(), f"{g.height()} > {avail.height()}"
+
+
+# ── Home page width ───────────────────────────────────────────────────────────
+# Fitting the WINDOW to the screen was only half the problem. Inside it, the Home
+# page held two widgets with no width ceiling: a QLabel carrying a whole task
+# instruction (~250 characters) per recent-automation row, and four suggestion
+# chips side by side. A QLabel refuses to be narrower than its text, so the row
+# set a minimum on the page, the page set one on its scroll area, and the scroll
+# area grew to 1992 px inside a 972 px column. Everything to the right of that
+# column was unreachable — including the Run Task button, which sits at the far
+# right of the composer. The window looked fine; its main button was simply gone.
+
+def _home_with_history(instruction: str, width: int, rows: int = 3):
+    """A Home page holding real-length instructions, like a returning user's.
+
+    Laid out for real at `width`. show() and activate() are not ceremony: an
+    unshown page reports a placeholder minimumSizeHint, so a test that skips
+    them passes just as happily on the broken layout as on the fixed one.
+    """
+    import time as _time
+
+    from ui.events import AgentEventBus
+    from ui.pages import HomePage
+
+    class _History:
+        def get_recent_tasks(self, limit=30):
+            return [{"instruction": instruction, "success_count": 3,
+                     "avg_duration_s": 92.0, "last_used": _time.time() - 3600 * (i + 1)}
+                    for i in range(rows)]
+
+    page = HomePage(lambda: _History(), AgentEventBus())
+    page.resize(width, 860)
+    page.show()
+    page.refresh()
+    QApplication.processEvents()
+    page.findChild(QScrollArea).widget().layout().activate()
+    QApplication.processEvents()
+    return page
+
+
+def _centre_column(avail_w: int, avail_h: int) -> int:
+    """Width the middle column gets on a given screen, panels open."""
+    from ui.main_window import DesktopGUIAgent
+    from ui.panels import IntelligencePanel
+    from ui.widgets import NavRail
+    win_w, _ = DesktopGUIAgent.fit_to_screen(avail_w, avail_h)
+    return win_w - NavRail.EXPANDED - IntelligencePanel.WIDTH
+
+
+@pytest.mark.parametrize("avail_w,avail_h", [
+    (1366, 728),    # budget laptop — the tightest case with both panels open
+    (1852, 963),    # the machine this agent was developed on
+    (1920, 1032),   # 1080p after the taskbar
+])
+def test_home_page_fits_its_column_without_scrolling_sideways(avail_w, avail_h, app):
+    from ui.pages import DEMO_PROMPT
+    column = _centre_column(avail_w, avail_h)
+    page = _home_with_history(DEMO_PROMPT, width=column)
+    scroll = page.findChild(QScrollArea)
+    assert scroll.widget().width() <= scroll.viewport().width(), (
+        f"Home lays out {scroll.widget().width()}px wide in a {column}px column on a "
+        f"{avail_w}x{avail_h} screen — everything past the edge is unreachable")
+    assert not scroll.horizontalScrollBar().isVisible()
+
+
+@pytest.mark.parametrize("avail_w,avail_h", [(1366, 728), (1852, 963), (1920, 1032)])
+def test_run_button_is_inside_the_window(avail_w, avail_h, app):
+    """The symptom the user reported: the Run button had left the screen."""
+    from ui.pages import DEMO_PROMPT
+    column = _centre_column(avail_w, avail_h)
+    page = _home_with_history(DEMO_PROMPT, width=column)
+    btn = page.composer.run_btn
+    right = btn.mapTo(page, btn.rect().topRight()).x()
+    assert right <= column, (
+        f"Run Task ends at {right}px in a {column}px column — off the window")
+    assert btn.isVisible()
+
+
+def test_recent_automation_row_shrinks_below_its_text(app):
+    """The row that caused it: the label must not pin a width to its string."""
+    from ui.widgets import ElidedLabel
+    page = _home_with_history("x" * 400, width=900, rows=1)
+    row = page.recent_box.itemAt(0).widget()
+    assert row.findChild(ElidedLabel) is not None, "instruction label must elide"
+    assert row.minimumSizeHint().width() < 400, (
+        f"row demands {row.minimumSizeHint().width()}px for one long instruction")
+
+
+def test_elided_label_keeps_the_full_text_for_the_tooltip(app):
+    """Eliding is presentation only — nothing may read the truncated string."""
+    from ui.widgets import ElidedLabel
+    full = "open Microsoft Teams and do a great many other things besides"
+    lbl = ElidedLabel(full)
+    lbl.resize(60, 20)
+    assert lbl.text() == full
+    assert lbl.toolTip() == full

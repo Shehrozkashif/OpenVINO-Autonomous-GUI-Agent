@@ -992,6 +992,49 @@ class CommandDock(GlassCard):
 
 # ── Misc helpers ──────────────────────────────────────────────────────────────
 
+class ElidedLabel(QLabel):
+    """A one-line label that is allowed to be narrower than its own text.
+
+    A plain QLabel refuses to shrink below the width of the string it holds, and
+    that refusal travels: the label sets a minimum on its row, the row sets one
+    on the page, and the page sets one on the scroll area. A single task
+    instruction is ~250 characters, so one of these in a list demanded ~1950 px
+    of width — which on a 1480 px window pushed the Run button clean off the
+    right-hand edge of the Home page.
+
+    So this reports a minimum width of zero and paints an ellipsis when the room
+    it actually gets runs out. The untruncated text stays on the tooltip.
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full = text
+        self.setToolTip(text)
+        super().setText(text)
+
+    def setText(self, text: str):
+        self._full = text
+        self.setToolTip(text)
+        self._elide()
+
+    def text(self) -> str:
+        """The full string, not the elided one — callers want what it means."""
+        return self._full
+
+    def minimumSizeHint(self) -> QSize:
+        # Width 0 is the whole point. The height still has to come from the
+        # font, or the row collapses.
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self):
+        super().setText(self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, max(0, self.width())))
+
+
 class SectionHeader(QWidget):
     def __init__(self, title: str, subtitle: str = "", parent=None):
         super().__init__(parent)

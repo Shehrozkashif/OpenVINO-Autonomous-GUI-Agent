@@ -31,6 +31,7 @@ from ui.icons import icon_pixmap
 from ui.theme import STATE_STYLE, C, S
 from ui.widgets import (
     CommandInput,
+    ElidedLabel,
     EmptyState,
     GlassCard,
     MetricTile,
@@ -60,6 +61,14 @@ DEMO_PROMPT = (
     "time to 3:30 PM, add attendee alex@example.com, then click "
     "Save to create the meeting"
 )
+
+# Widest a suggestion chip may get. A row of them plus the page margins has to
+# fit the centre column, which is ~970 px once the nav rail and the activity
+# panel take their share of a 1480 px window — and only ~530 px at the smallest
+# window size we allow.
+_CHIP_MAX_W = 200
+_CHIP_PADDING = 28   # the chip's own left/right padding, from the stylesheet
+_CHIP_COLS = 2
 
 _SUGGESTIONS = [
     "Open Notepad and write a haiku about automation",
@@ -186,9 +195,13 @@ class HomePage(QWidget):
         sug_cap = QLabel("SUGGESTED MISSIONS")
         sug_cap.setProperty("role", "micro")
         root.addWidget(sug_cap)
-        self.sug_row = QHBoxLayout()
+        # A grid, not a row: four chips side by side ask for ~800 px, which is
+        # more than the centre column has on a 1366-wide laptop with the
+        # activity panel open. Two columns fit at every window size we allow.
+        self.sug_row = QGridLayout()
         self.sug_row.setSpacing(8)
-        self.sug_row.addStretch()
+        self.sug_row.setContentsMargins(0, 0, 0, 0)
+        self.sug_row.setColumnStretch(_CHIP_COLS, 1)   # keep chips left-packed
         root.addLayout(self.sug_row)
 
         # ── Metrics ────────────────────────────────────────────
@@ -246,21 +259,29 @@ class HomePage(QWidget):
         self.m_avg.set_value(f"{sum(durs) / len(durs):.0f}s" if durs else "-")
 
         # suggestion chips: 2 from task history + canned examples
-        while self.sug_row.count() > 1:
+        while self.sug_row.count():
             it = self.sug_row.takeAt(0)
             if it.widget():
                 it.widget().deleteLater()
         chips = [DEMO_PROMPT]
         chips += [t["instruction"] for t in tasks[:2] if t["instruction"] != DEMO_PROMPT]
         chips += [s for s in _SUGGESTIONS if s not in chips]
-        for text in chips[:4]:
+        for slot, text in enumerate(chips[:4]):
             label = "Demo: schedule Teams meeting" if text == DEMO_PROMPT else text
-            b = QPushButton(label if len(label) <= 52 else label[:50] + "...")
+            b = QPushButton()
+            # Capped in pixels, not characters. Four chips sit in one row, so a
+            # 52-character cap let the row ask for ~1150 px — more than the
+            # centre column gets on a 1480 px window, which is half of why this
+            # page used to overflow sideways. Eliding against the real font is
+            # also honest about width in a way a character count is not.
+            b.setMaximumWidth(_CHIP_MAX_W)
+            b.setText(b.fontMetrics().elidedText(
+                label, Qt.TextElideMode.ElideRight, _CHIP_MAX_W - _CHIP_PADDING))
             b.setProperty("kind", "chip")
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(text)
             b.clicked.connect(lambda _, t=text: self._pick(t))
-            self.sug_row.insertWidget(self.sug_row.count() - 1, b)
+            self.sug_row.addWidget(b, slot // _CHIP_COLS, slot % _CHIP_COLS)
 
         # recent list
         while self.recent_box.count():
@@ -283,7 +304,7 @@ class HomePage(QWidget):
             ic = QLabel()
             ic.setPixmap(icon_pixmap("bolt", QColor(C.ACCENT), 16))
             cl.addWidget(ic)
-            name = QLabel(t["instruction"])
+            name = ElidedLabel(t["instruction"])
             name.setStyleSheet("font-size: 13px;")
             cl.addWidget(name, stretch=1)
             meta = QLabel(
@@ -662,7 +683,7 @@ class TaskHistoryPage(QWidget):
             lay = QHBoxLayout(row)
             lay.setContentsMargins(S.LG, S.SM, S.LG, S.SM)
             lay.addWidget(_dot(C.ACCENT2))
-            name = QLabel(t["instruction"])
+            name = ElidedLabel(t["instruction"])
             name.setStyleSheet("font-size: 12px;")
             lay.addWidget(name, stretch=1)
             meta = QLabel(f"completed {t['success_count']}x")
