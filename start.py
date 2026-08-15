@@ -469,8 +469,22 @@ def _ensure_cli_shims():
     print(_green(f"  [OK] CLI shims active: {', '.join(active)}"))
 
 
+def _model_weights_on_disk(model_name: str) -> bool:
+    """True if the model's folder actually holds OpenVINO IR."""
+    import glob
+    model_dir = os.path.join(_REPO, model_name)
+    return bool(glob.glob(os.path.join(model_dir, "**", "openvino_*.xml"),
+                          recursive=True))
+
+
 def _model_already_exported(model_name: str) -> bool:
-    """True if model_name is present in the OVMS repo config.json."""
+    """True if model_name is registered in config.json AND its weights are there.
+
+    Registration alone is not enough. config.json records that a servable was
+    exported once; it is never rewritten when the folder is moved, renamed, or
+    copied in half. Trusting it on its own means setup reports the model ready,
+    starts the server, and lets OVMS discover the truth minutes later.
+    """
     if not os.path.isfile(_CONFIG_JSON):
         return False
     try:
@@ -480,7 +494,7 @@ def _model_already_exported(model_name: str) -> bool:
         return False
     names = [e.get("name") for e in cfg.get("mediapipe_config_list", [])]
     names += [e.get("config", {}).get("name") for e in cfg.get("model_config_list", [])]
-    return model_name in names
+    return model_name in names and _model_weights_on_disk(model_name)
 
 
 def _prune_stale_servables():
@@ -815,14 +829,56 @@ def start_ovms_native(binary: str, device: str) -> bool:
     return _wait_for_ovms(log_path)
 
 
+# Terminal states in the OVMS log. A servable that reaches one of these is not
+# coming back — OVMS keeps serving whatever else loaded and never retries it.
+_OVMS_FATAL = (
+    "LOADING_PRECONDITION_FAILED",
+    "LOADING_FAILED",
+    "Failed to process mediapipe graph config",
+)
+
+
+def _ovms_load_failure(log_path: str) -> str:
+    """The reason OVMS gave up on a servable, or '' while nothing has failed.
+
+    Returned with the lines that follow it: OVMS logs the state change first and
+    the actual cause (a missing file, a bad config) on the next line or two.
+    """
+    if not log_path or not os.path.isfile(log_path):
+        return ""
+    try:
+        with open(log_path, errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return ""
+    for i, line in enumerate(lines):
+        if any(marker in line for marker in _OVMS_FATAL):
+            return "".join(lines[i:i + 4]).strip()
+    return ""
+
+
 def _wait_for_ovms(log_path: str = "") -> bool:
-    """Poll until both servables report ready (model load can take minutes)."""
+    """Poll until both servables report ready (model load can take minutes).
+
+    The log is watched alongside the readiness probe. A model that fails to load
+    never appears in /v1/config, so polling alone cannot tell "still loading"
+    apart from "already dead" — and the difference is ten minutes of a progress
+    counter followed by a message that says nothing about what went wrong.
+    """
     max_wait, poll = 600, 5
     for elapsed in range(poll, max_wait + poll, poll):
         time.sleep(poll)
         if _both_servables_ready():
             print(_green(f"\n  [OK] OVMS ready — both models loaded ({elapsed}s)"))
             return True
+        failure = _ovms_load_failure(log_path)
+        if failure:
+            print()
+            print(_red("  [FAIL] OVMS could not load a model, and will not recover:"))
+            for line in failure.splitlines():
+                print(_yellow(f"    {line.strip()}"))
+            print(_yellow(f"\n  Full log: {log_path}"))
+            return False
         sys.stdout.write(f"\r  Waiting for OVMS... {elapsed}s / {max_wait}s "
                          "(first run loads models into device memory)")
         sys.stdout.flush()
