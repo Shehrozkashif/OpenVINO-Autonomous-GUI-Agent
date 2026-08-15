@@ -181,6 +181,11 @@ class TaskOrchestrator:
         # Ask the user for required details the instruction omits (a meeting
         # time, a recipient) BEFORE any planning — guessing them wastes the
         # whole run. No-op when no question handler is wired.
+        # What they typed is kept: the enriched string carries this run's answers
+        # ("...(details provided by the user: time zone -> PST)"), and history is
+        # keyed on the instruction text, so storing it would file every run under
+        # its own answers instead of merging them onto one reusable task.
+        user_instruction = instruction
         instruction = self._elicit_missing_parameters(instruction)
 
         screen_context = self._get_screen_context()
@@ -325,7 +330,7 @@ class TaskOrchestrator:
         # replan they are the plan that actually worked.
         if not failed and not self._degraded:
             self.history.store_successful_task(
-                instruction, executed_subtasks or plan, elapsed
+                user_instruction, executed_subtasks or plan, elapsed
             )
         elif not failed and self._degraded:
             self.log("[MEMORY] Task completed via a degraded path — not recorded as a clean success")

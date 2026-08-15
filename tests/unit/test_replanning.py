@@ -225,6 +225,30 @@ class TestElicitation:
         assert "details provided by the user" in routed_instruction
         assert "tomorrow at 3pm" in routed_instruction
 
+    def test_history_stores_what_the_user_typed_not_the_answers(self):
+        """The agent runs on the enriched text; history keeps the original.
+
+        Instruction is the primary key of the task table, so filing a run under
+        its own answers gives every run its own row — the same task appears
+        several times in Recent Automations, and replaying one from a chip feeds
+        last time's answers ("time zone -> PST") back into the router.
+        """
+        orch = _make_orch()
+        orch.on_ask = MagicMock(return_value="PST")
+        orch.router.missing_parameters = MagicMock(return_value=["Time zone?"])
+        orch.router.decompose = MagicMock(
+            return_value=("t1", [SubTask(id=1, description="a", depends_on=[])])
+        )
+        orch._execute_subtask = MagicMock(return_value=True)
+        with _no_burst():
+            orch.execute("schedule a zoom meeting")
+
+        # the agent still acted on the enriched instruction
+        assert "PST" in orch.router.decompose.call_args[0][0]
+        # but what got remembered is what the user actually asked for
+        stored = orch.history.store_successful_task.call_args[0][0]
+        assert stored == "schedule a zoom meeting"
+
     def test_no_handler_means_no_llm_check_and_no_change(self):
         orch = _make_orch()
         assert orch.on_ask is None
