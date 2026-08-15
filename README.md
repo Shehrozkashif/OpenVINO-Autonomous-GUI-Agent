@@ -14,7 +14,7 @@ OpenVINO™ Model Server. No cloud. No API keys. No data ever leaves your desk.
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![Backend](https://img.shields.io/badge/inference-OpenVINO%E2%84%A2%20Model%20Server-0068b5)](https://github.com/openvinotoolkit/model_server)
 [![GUI](https://img.shields.io/badge/GUI-PyQt6-41cd52)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Tests](https://img.shields.io/badge/tests-492%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-508%20passing-brightgreen)](#running-tests)
 
 [How It Works](#how-it-works) •
 [Architecture](#architecture) •
@@ -406,7 +406,7 @@ intel-openvino-desktop-agent/
 │
 ├── ui/                        # PyQt6 command-center GUI
 ├── tests/
-│   ├── unit/                  # 492 tests: fast, no backend or desktop required
+│   ├── unit/                  # 508 tests: fast, no backend or desktop required
 │   └── live/                  # real-desktop suites (require OVMS + display)
 ├── requirements.txt           # runtime deps (no ML framework, HTTP to OVMS)
 ├── requirements-export.txt    # one-time model-conversion toolchain
@@ -450,7 +450,7 @@ intel-openvino-desktop-agent/
 ```powershell
 venv\Scripts\activate
 
-# Unit tests: 492 without PyQt6, 527 with it (the GUI suite). Fast, no backend
+# Unit tests: 508 without PyQt6, 543 with it (the GUI suite). Fast, no backend
 # or desktop required.
 pytest
 
