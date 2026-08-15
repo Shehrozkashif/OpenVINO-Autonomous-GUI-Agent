@@ -628,6 +628,56 @@ def _sync_servable(model_name: str, cache_gb: int, device: str) -> bool:
     return False
 
 
+def _ensure_generation_config(model_name: str) -> bool:
+    """Write generation_config.json for a servable that has none.
+
+    OVMS will not load a model without this file. It fails the servable with
+    LOADING_PRECONDITION_FAILED and the only clue is a failed open on a path
+    that does not exist, which reads like a corrupted download rather than a
+    file that was never written.
+
+    And it often is never written: not every source checkpoint ships one —
+    ByteDance-Seed/UI-TARS-1.5-7B does not — so whether the export produces it
+    depends on what optimum could infer from the weights. The two ids OVMS needs
+    are read back out of the model's own config.json instead of being hard-coded,
+    so swapping the model in config.py does not silently write the wrong ones.
+
+    Returns False only when the file is missing AND cannot be rebuilt.
+    """
+    model_dir = os.path.join(_REPO, model_name)
+    target = os.path.join(model_dir, "generation_config.json")
+    if os.path.isfile(target):
+        return True
+    source = os.path.join(model_dir, "config.json")
+    if not os.path.isfile(source):
+        return False
+    try:
+        with open(source) as f:
+            cfg = json.load(f)
+    except Exception:
+        return False
+    # A vision-language config keeps the language model's ids one level down.
+    text_cfg = cfg.get("text_config") or {}
+    eos = cfg.get("eos_token_id", text_cfg.get("eos_token_id"))
+    bos = cfg.get("bos_token_id", text_cfg.get("bos_token_id"))
+    if eos is None:
+        return False
+    generation = {"eos_token_id": eos}
+    if bos is not None:
+        generation["bos_token_id"] = bos
+        # No pad token in these configs; the id the tokenizer pads with is the
+        # same one used for beginning-of-sequence.
+        generation["pad_token_id"] = bos
+    try:
+        with open(target, "w") as f:
+            json.dump(generation, f, indent=2)
+    except OSError:
+        return False
+    print(_green(f"  [OK] {model_name:<24} generation_config.json rebuilt "
+                 f"(the export did not write one)"))
+    return True
+
+
 def _sync_all_servables(device: str) -> bool:
     """Apply config.py to every exported servable. True if any file changed.
 
@@ -639,6 +689,9 @@ def _sync_all_servables(device: str) -> bool:
     """
     changed = False
     for name, cache in ((LLM_MODEL, LLM_KV_CACHE_GB), (VLM_MODEL, VLM_KV_CACHE_GB)):
+        if not _ensure_generation_config(name):
+            print(_yellow(f"  [WARN] {name:<24} has no generation_config.json and "
+                          "one could not be built — OVMS will refuse it"))
         changed = _sync_servable(name, cache, device) or changed
     return changed
 

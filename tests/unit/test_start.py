@@ -152,3 +152,66 @@ class TestWaitForOvms:
 def test_repo_path_is_relative_to_start_py_not_the_shell(monkeypatch):
     """Running from another directory must not silently retarget the repo."""
     assert start._REPO.startswith(os.path.dirname(os.path.abspath(start.__file__)))
+
+
+# ── generation_config.json ────────────────────────────────────────────────────
+# OVMS refuses any servable without this file, and UI-TARS-1.5-7B does not ship
+# one upstream — so whether the export produced it came down to what optimum
+# could infer. When it did not, setup declared the model ready and OVMS failed
+# on a path that does not exist, which reads like a broken download.
+
+# The real values from ByteDance-Seed/UI-TARS-1.5-7B's config.json.
+_UITARS_IDS = {"bos_token_id": 151643, "eos_token_id": 151645}
+
+
+class TestEnsureGenerationConfig:
+
+    def _model(self, repo, name, config: dict | None):
+        d = repo / name
+        d.mkdir(parents=True, exist_ok=True)
+        if config is not None:
+            (d / "config.json").write_text(json.dumps(config))
+        return d
+
+    def test_builds_it_from_the_models_own_config(self, repo):
+        d = self._model(repo, "ui-tars", _UITARS_IDS)
+        assert start._ensure_generation_config("ui-tars")
+        written = json.loads((d / "generation_config.json").read_text())
+        assert written["eos_token_id"] == 151645
+        assert written["bos_token_id"] == 151643
+        assert written["pad_token_id"] == 151643
+
+    def test_existing_file_is_left_alone(self, repo):
+        d = self._model(repo, "ui-tars", _UITARS_IDS)
+        (d / "generation_config.json").write_text('{"eos_token_id": 42}')
+        assert start._ensure_generation_config("ui-tars")
+        assert json.loads((d / "generation_config.json").read_text()) == {"eos_token_id": 42}
+
+    def test_reads_ids_from_a_nested_text_config(self, repo):
+        """A vision-language config keeps them under text_config."""
+        d = self._model(repo, "vlm", {"text_config": _UITARS_IDS})
+        assert start._ensure_generation_config("vlm")
+        written = json.loads((d / "generation_config.json").read_text())
+        assert written["eos_token_id"] == 151645
+
+    def test_eos_may_be_a_list(self, repo):
+        d = self._model(repo, "vlm", {"eos_token_id": [151645, 151643]})
+        assert start._ensure_generation_config("vlm")
+        written = json.loads((d / "generation_config.json").read_text())
+        assert written["eos_token_id"] == [151645, 151643]
+
+    def test_gives_up_when_there_is_no_config_to_read(self, repo):
+        self._model(repo, "vlm", None)
+        assert not start._ensure_generation_config("vlm")
+
+    def test_gives_up_when_the_config_has_no_eos(self, repo):
+        self._model(repo, "vlm", {"vocab_size": 152064})
+        assert not start._ensure_generation_config("vlm")
+
+    def test_missing_folder_is_not_a_crash(self, repo):
+        assert not start._ensure_generation_config("never-exported")
+
+    def test_unreadable_config_is_not_a_crash(self, repo):
+        d = self._model(repo, "vlm", None)
+        (d / "config.json").write_text("{ this is not json")
+        assert not start._ensure_generation_config("vlm")
