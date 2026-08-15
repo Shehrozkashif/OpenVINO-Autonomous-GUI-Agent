@@ -2,7 +2,7 @@
 """Desktop GUI Agent — application entry point."""
 import sys
 
-from utils.platform_utils import enable_dpi_awareness
+from desktop.system import enable_dpi_awareness
 
 # Must run before Qt and before the first screen capture so screenshots, UIA
 # rectangles, and mouse input all share one physical-pixel coordinate space.
@@ -12,29 +12,46 @@ from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from agents.action import ActionExecutionAgent
-from agents.grounding import OCREngine, UIGroundingAgent
+from agents.grounding import UIGroundingAgent
 from agents.planning import PlanningAgent
 from agents.reflection import ReflectionAgent
 from agents.router import RouterAgent
-from core.capture.screenshot import ScreenCapture
-from core.controller import DesktopController
+from core.history import TaskHistory
+from core.inference import OVMSClient
 from core.orchestrator import OrchestratorConfig, TaskOrchestrator
-from core.ovms_client import OVMSClient
-from memory.task_memory import TaskMemory
+from desktop.capture import ScreenCapture
+from desktop.input import DesktopController
+from desktop.ocr import OCREngine
 from ui.main_window import DesktopGUIAgent
 
 
-def _warmup_models(client: OVMSClient, task_memory: TaskMemory | None = None) -> None:
-    """Fire cheap dummy requests to the LLM and VLM, and pre-load the
-    sentence-transformer embedder, in a background thread. The first real user
-    request would otherwise pay a cold-start penalty of several seconds (model
-    loading into device memory) or, for the embedder, a one-time ~80s
-    download/load mid-task. Failures are silently ignored — warmup is best-effort
-    and must not block or crash the UI.
+def _warmup_models(client: OVMSClient, ocr: OCREngine) -> None:
+    """Fire cheap dummy requests to the LLM and VLM in a background thread.
+    The first real user request would otherwise pay a cold-start penalty of
+    several seconds (model loading into device memory). Failures are silently
+    ignored — warmup is best-effort and must not block or crash the UI.
     """
     import threading
 
     def _do_warmup():
+        # Building the RapidOCR ONNX session takes ~2.5 s. It used to happen on
+        # the main thread inside UIGroundingAgent.__init__, before the window
+        # was even constructed, so the app took several seconds to appear.
+        # Loading it here keeps the window instant AND keeps the first screen
+        # read fast — the work happens either way, just not in front of the user.
+        try:
+            ocr.is_available()
+        except Exception as e:
+            logger.debug(f"[STARTUP] OCR warmup skipped: {e}")
+        # Prewarm the installed-app catalogue (Get-StartApps, ~1-3 s but can
+        # be slow on locked-down machines) so the router's app hint is ready
+        # before the first decompose instead of timing out inside it.
+        try:
+            from desktop.system import installed_apps
+            apps = installed_apps()
+            logger.info(f"[STARTUP] Installed-app catalogue: {len(apps)} apps")
+        except Exception as e:
+            logger.debug(f"[STARTUP] App catalogue skipped: {e}")
         try:
             client.query_llm(
                 [{"role": "user", "content": "ping"}],
@@ -61,12 +78,6 @@ def _warmup_models(client: OVMSClient, task_memory: TaskMemory | None = None) ->
             logger.info("[STARTUP] VLM warmup done")
         except Exception as e:
             logger.debug(f"[STARTUP] VLM warmup skipped: {e}")
-        if task_memory is not None:
-            try:
-                _ = task_memory.embedder  # triggers SentenceTransformer download/load
-                logger.info("[STARTUP] Embedder warmup done")
-            except Exception as e:
-                logger.debug(f"[STARTUP] Embedder warmup skipped: {e}")
 
     threading.Thread(target=_do_warmup, daemon=True).start()
 
@@ -82,9 +93,9 @@ def build_orchestrator() -> TaskOrchestrator:
     capturer = ScreenCapture()
     controller = DesktopController()
     ocr = OCREngine()
-    task_memory = TaskMemory()
+    history = TaskHistory()
 
-    _warmup_models(client, task_memory)
+    _warmup_models(client, ocr)
 
     return TaskOrchestrator(
         router=RouterAgent(client),
@@ -93,7 +104,7 @@ def build_orchestrator() -> TaskOrchestrator:
         actor=ActionExecutionAgent(controller),
         reflector=ReflectionAgent(client, capturer, ocr=ocr),
         capturer=capturer,
-        task_memory=task_memory,
+        history=history,
         config=OrchestratorConfig(max_retries_per_step=3, reflection_wait_s=1.0),
         ocr=ocr,
     )

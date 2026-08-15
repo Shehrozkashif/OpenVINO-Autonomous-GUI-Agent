@@ -3,54 +3,60 @@
 
 Organised by concern (each section was originally its own file):
 
-  1. UIGroundingAgent._parse_coords — UI-TARS coordinate string formats
+  1. agents/coords.parse_coords — UI-TARS coordinate string formats
   2. OCR element_type semantics in the grounding pipeline
 """
 import unittest
 from unittest.mock import MagicMock
 
-from agents.grounding import ElementCache, GroundingResult, OCREngine, OCRWord, UIGroundingAgent
-from core.protocols import ActionStep
+from agents.coords import _qwen_resize_dim, parse_coords
+from agents.grounding import ElementCache, GroundingResult, UIGroundingAgent
+from core.anchor import AppAnchor
+from core.groundtruth import GroundTruth
+from core.types import ActionStep
+from desktop.capture import OwnWindowMask
+from desktop.ocr import OCREngine, OCRWord
+from tests.unit.conftest import make_history
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. UIGroundingAgent._parse_coords — formats UI-TARS emits in practice,
+# 1. agents/coords.parse_coords — formats UI-TARS emits in practice,
 #    including malformed bracket counts seen in live runs.
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _agent():
-    """Bare agent instance — _parse_coords needs no collaborators."""
-    return UIGroundingAgent.__new__(UIGroundingAgent)
-
-
-_W, _H = 1000, 1000   # identity scaling for 0-1000 coords
+# UI-TARS emits absolute pixels in the SMART-RESIZED image space (each side
+# rounded to a multiple of 28), and _CoordSpace divides by that rounded
+# dimension. Sizing the screen to the rounded dimension makes the transform an
+# identity, so these tests measure PARSING only — the pixel transform itself is
+# calibrated against UIA ground truth in tests/live/test_vlm_coordinates.py.
+_W = _H = _qwen_resize_dim(1000)   # 1008
 
 
 class TestParseCoordsBracketTolerance:
 
     def test_standard_four_value_bbox(self):
-        r = _agent()._parse_coords("click(start_box='[[100, 200, 300, 400]]')", _W, _H)
+        r = parse_coords("click(start_box='[[100, 200, 300, 400]]')", _W, _H)
         assert r is not None
         x, y, _ = r
         assert (x, y) == (200, 300)
 
     def test_triple_bracket_two_value_form(self):
         """Regression: live UI-TARS output 'click(start_box='[[[287, 569]')'."""
-        r = _agent()._parse_coords("click(start_box='[[[287, 569]')", _W, _H)
+        r = parse_coords("click(start_box='[[[287, 569]')", _W, _H)
         assert r is not None
         x, y, _ = r
         assert (x, y) == (287, 569)
 
     def test_triple_bracket_four_value_form(self):
-        r = _agent()._parse_coords("click(start_box='[[[10, 20, 30, 40]]]')", _W, _H)
+        r = parse_coords("click(start_box='[[[10, 20, 30, 40]]]')", _W, _H)
         assert r is not None
         x, y, _ = r
         assert (x, y) == (20, 30)
 
     def test_not_found_returns_none(self):
-        assert _agent()._parse_coords("not_found()", _W, _H) is None
+        assert parse_coords("not_found()", _W, _H) is None
 
     def test_garbage_returns_none(self):
-        assert _agent()._parse_coords("the element is near the top", _W, _H) is None
+        assert parse_coords("the element is near the top", _W, _H) is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -156,7 +162,8 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
     """
 
     def _make_orchestrator(self, ground_result: GroundingResult):
-        from core.orchestrator import OrchestratorConfig, TaskOrchestrator
+        from core.orchestrator import TaskOrchestrator
+        from core.runstate import OrchestratorConfig
 
         grounder = MagicMock()
         grounder.min_confidence = 0.5
@@ -167,9 +174,6 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
 
         capturer = MagicMock()
         reflector = MagicMock()
-        task_memory = MagicMock()
-        task_memory.find_similar.return_value = None
-
         ocr = MagicMock()
         ocr.is_available.return_value = False
         ocr.extract.return_value = []
@@ -180,7 +184,7 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
         orch.actor = actor
         orch.capturer = capturer
         orch.reflector = reflector
-        orch.memory = task_memory
+        orch.history = make_history()
         orch.config = OrchestratorConfig()
         orch.log = lambda msg: None
         orch._stop_event = MagicMock()
@@ -189,9 +193,11 @@ class TestExecuteStepRejectsNonInteractive(unittest.TestCase):
         orch._extracted_data = {}
         orch._screen_w = 1920
         orch._screen_h = 1080
-        # Burst executor (needed by _execute_subtask but not _execute_step)
-        from core.burst_executor import BurstExecutor
-        orch.burst_executor = MagicMock(spec=BurstExecutor)
+        # Collaborators normally built in __init__ (bypassed here by __new__).
+        orch.mask = OwnWindowMask(capturer)
+        orch.mask.hwnd = None                       # no GUI window to mask
+        orch.anchor = AppAnchor()                   # unanchored: every click allowed
+        orch.truth = GroundTruth(capturer, ocr)
 
         return orch, grounder, actor
 
@@ -371,3 +377,190 @@ class TestElementCachePreservesElementType(unittest.TestCase):
     def test_cache_miss_returns_none(self):
         cache = ElementCache()
         self.assertIsNone(cache.get("missing", "hash"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3. ground_fast() respects the dead-point blacklist
+#
+# Regression (live AI-PC log 2026-07-05 05:55:49): (11,19) was marked DEAD for
+# 'New' after a delta=0 click, yet the scroll-to-find path — which uses
+# ground_fast() — re-found the same UIA element and invoked it again, reopening
+# the wrong app. ground_fast() must apply the same origin-screen blacklist as
+# ground().
+# ═══════════════════════════════════════════════════════════════════════════
+
+from unittest.mock import patch
+
+from PIL import Image as _PILImage
+
+
+def _fast_agent():
+    agent = UIGroundingAgent.__new__(UIGroundingAgent)
+    agent.screen_w, agent.screen_h = 1852, 963
+    agent.capturer = MagicMock()
+    agent.capturer.capture.return_value = _PILImage.new("RGB", (1852, 963), "white")
+    agent.ocr = MagicMock()
+    agent.ocr.is_available.return_value = False
+    agent.cache = MagicMock()
+    agent._dead = {}
+    agent._ground_hash = {}
+    agent._no_find = {}
+    return agent
+
+
+class TestGroundFastDeadPoints(unittest.TestCase):
+
+    def test_uia_hit_skipped_after_mark_dead(self):
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            first = agent.ground_fast("New")
+            self.assertTrue(first.found)
+            self.assertEqual((first.x, first.y), (11, 19))
+
+            agent.mark_dead("New", 11, 19)
+
+            second = agent.ground_fast("New")
+            self.assertFalse(second.found)
+
+    def test_ocr_hit_skipped_after_mark_dead(self):
+        agent = _fast_agent()
+        agent.ocr.is_available.return_value = True
+        agent.ocr.extract.return_value = [_word("New", x=50, y=88)]
+        match = MagicMock()
+        match.cx, match.cy = 55, 93   # thumbnail coords → scaled ≈ (79, 134)
+        match.element_type = "foreground_interactive"
+        agent.ocr.find_text.return_value = match
+        with patch("agents.grounding._uia_ok", return_value=False):
+            first = agent.ground_fast("New")
+            self.assertTrue(first.found)
+
+            agent.mark_dead("New", first.x, first.y)
+
+            second = agent.ground_fast("New")
+            self.assertFalse(second.found)
+            self.assertEqual(second.method, "fast_dead")
+
+    def test_different_screen_keeps_point_alive(self):
+        """Blacklist is keyed to the screen state — a new screen frees the point."""
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19)
+            agent.capturer.capture.return_value = _PILImage.effect_noise((1852, 963), 64).convert("RGB")
+            again = agent.ground_fast("New")
+            self.assertTrue(again.found)
+
+
+class TestForeignDeadPoints(unittest.TestCase):
+    """Points proven to belong to ANOTHER APP's window (mark_dead foreign=True)
+    stay blacklisted for every target on every screen until the next task.
+
+    Regression (live VLM-only run 2026-07-19): grounding kept resolving
+    'New meeting' to text inside a background Edge window; the per-screen
+    blacklist freed the point after every screen change and the deterministic
+    VLM re-emitted the identical coordinate, opening Edge three times.
+    """
+
+    def test_foreign_point_blocked_across_screen_change(self):
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19, foreign=True)
+            # New screen state — the per-screen blacklist would free the point.
+            agent.capturer.capture.return_value = \
+                _PILImage.effect_noise((1852, 963), 64).convert("RGB")
+            again = agent.ground_fast("New")
+            self.assertFalse(again.found)
+
+    def test_foreign_point_blocks_every_target(self):
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19, foreign=True)
+            other = agent.ground_fast("Save")
+            self.assertFalse(other.found)
+
+    def test_plain_dead_point_stays_screen_scoped(self):
+        """foreign=False keeps the original per-screen semantics."""
+        agent = _fast_agent()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19)
+            agent.capturer.capture.return_value = \
+                _PILImage.effect_noise((1852, 963), 64).convert("RGB")
+            again = agent.ground_fast("New")
+            self.assertTrue(again.found)
+
+    def test_is_dead_point_sees_foreign_marks(self):
+        agent = _fast_agent()
+        agent.mark_dead("[visual]", 500, 300, foreign=True)
+        self.assertTrue(agent.is_dead_point(503, 297))
+        self.assertFalse(agent.is_dead_point(700, 300))
+
+    def test_clear_dead_points_frees_everything(self):
+        agent = _fast_agent()
+        agent.cache = ElementCache()
+        with patch("agents.grounding._uia_ok", return_value=True), \
+             patch("agents.grounding._uia_find", return_value=(11, 19, 0.84)):
+            agent.ground_fast("New")
+            agent.mark_dead("New", 11, 19, foreign=True)
+            agent.clear_dead_points()
+            again = agent.ground_fast("New")
+            self.assertTrue(again.found)
+
+
+class TestNegativeGroundingCache:
+    """Latency regression (live 19:12-19:19): the full grounding cascade
+    (VLM + rephrase LLM + tree searches + scroll hunt, 15-20 s) re-ran ~15×
+    for the same absent target on the same screen. A miss on an unchanged
+    screen is deterministic — cache it; invalidate on screen change or when
+    a new dead point could change the outcome.
+    """
+
+    def _agent(self):
+        agent = _fast_agent()
+        agent.ocr.is_available.return_value = False
+        agent.min_confidence = 0.5
+        agent.client = MagicMock()   # rephrase LLM
+        resp = MagicMock()
+        resp.content = '["A", "B", "C"]'
+        agent.client.query_llm.return_value = resp
+        agent.cache = ElementCache()
+        agent.vlm = None
+        return agent
+
+    def test_second_miss_on_same_screen_skips_cascade(self):
+        agent = self._agent()
+        with patch("agents.grounding._uia_ok", return_value=False), \
+             patch.object(agent, "_vlm_coords", return_value=None):
+            first = agent.ground("Save")
+            assert first.found is False
+            calls_after_first = agent.client.query_llm.call_count
+            second = agent.ground("Save")
+        assert second.found is False
+        assert second.method == "cached_miss"
+        assert agent.client.query_llm.call_count == calls_after_first
+
+    def test_mark_dead_invalidates_negative_cache(self):
+        agent = self._agent()
+        with patch("agents.grounding._uia_ok", return_value=False), \
+             patch.object(agent, "_vlm_coords", return_value=None):
+            agent.ground("Save")
+            assert agent._no_find
+            agent.mark_dead("Save", 100, 100)
+            assert not agent._no_find
+
+    def test_new_screen_misses_negative_cache(self):
+        agent = self._agent()
+        with patch("agents.grounding._uia_ok", return_value=False), \
+             patch.object(agent, "_vlm_coords", return_value=None):
+            agent.ground("Save")
+            agent.capturer.capture.return_value = \
+                _PILImage.effect_noise((1852, 963), 64).convert("RGB")
+            again = agent.ground("Save")
+        assert again.method != "cached_miss"

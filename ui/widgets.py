@@ -924,9 +924,24 @@ class CommandInput(QPlainTextEdit):
         self._adjust_height()
 
     def _adjust_height(self, *_):
+        # Size by the number of REAL laid-out visual lines, not blockCount().
+        # Shift+Enter (the only way to add a line here — plain Enter submits)
+        # inserts a *soft* line break that stays inside one block, so counting
+        # blocks left the box stuck at one line: everything the user typed
+        # below line 1 was invisible AND unscrollable (scrollbar was off).
+        # Line-layout counting also handles a long line that word-wraps.
         line_h = self.fontMetrics().lineSpacing()
-        lines = max(1, min(4, self.document().blockCount()))
-        self.setFixedHeight(int(line_h * lines + 18))
+        lines = 0
+        block = self.document().begin()
+        while block.isValid():
+            lines += max(1, block.layout().lineCount())
+            block = block.next()
+        capped = lines > 4
+        self.setFixedHeight(int(line_h * max(1, min(4, lines)) + 18))
+        # Once past the 4-line cap, let the user scroll to what's hidden.
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if capped
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def keyPressEvent(self, e):
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and \
@@ -976,6 +991,49 @@ class CommandDock(GlassCard):
 
 
 # ── Misc helpers ──────────────────────────────────────────────────────────────
+
+class ElidedLabel(QLabel):
+    """A one-line label that is allowed to be narrower than its own text.
+
+    A plain QLabel refuses to shrink below the width of the string it holds, and
+    that refusal travels: the label sets a minimum on its row, the row sets one
+    on the page, and the page sets one on the scroll area. A single task
+    instruction is ~250 characters, so one of these in a list demanded ~1950 px
+    of width — which on a 1480 px window pushed the Run button clean off the
+    right-hand edge of the Home page.
+
+    So this reports a minimum width of zero and paints an ellipsis when the room
+    it actually gets runs out. The untruncated text stays on the tooltip.
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full = text
+        self.setToolTip(text)
+        super().setText(text)
+
+    def setText(self, text: str):
+        self._full = text
+        self.setToolTip(text)
+        self._elide()
+
+    def text(self) -> str:
+        """The full string, not the elided one — callers want what it means."""
+        return self._full
+
+    def minimumSizeHint(self) -> QSize:
+        # Width 0 is the whole point. The height still has to come from the
+        # font, or the row collapses.
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self):
+        super().setText(self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, max(0, self.width())))
+
 
 class SectionHeader(QWidget):
     def __init__(self, title: str, subtitle: str = "", parent=None):

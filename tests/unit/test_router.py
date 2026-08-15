@@ -14,7 +14,7 @@ import json
 from unittest.mock import MagicMock
 
 from agents.router import RouterAgent
-from core.protocols import SubTask
+from core.types import SubTask
 
 
 def _subs(*descriptions) -> list[SubTask]:
@@ -38,9 +38,9 @@ class TestMissingActionDetection:
             "Open Notepad and write a haiku and save the file", subs) == []
 
     def test_no_finalizing_verb_means_nothing_missing(self):
-        subs = _subs("open Firefox", "navigate to github.com")
+        subs = _subs("open Microsoft Teams", "open the calendar")
         assert RouterAgent._missing_actions(
-            "open firefox and go to github", subs) == []
+            "open teams and go to the calendar", subs) == []
 
     def test_close_requested_but_dropped(self):
         subs = _subs("open Notepad", "type text")
@@ -103,3 +103,148 @@ class TestEnsureComplete:
             "Open Notepad and write and save the file", "Instruction: ...", original)
         assert out is original
         router.client.query_llm.assert_not_called()
+
+
+class TestParseTruncatedJSON:
+    """Salvage of truncated decompose output (hit max_tokens mid-object).
+
+    Live failure: an 8-subtask decomposition was cut mid-string, parse failed,
+    and the schema-only retry produced conversational to-do items the planner
+    could not act on. The complete prefix of a truncated array is real work —
+    it must be recovered, not thrown away.
+    """
+
+    def _router(self):
+        return RouterAgent(client=MagicMock())
+
+    def test_truncated_mid_string_salvages_prefix(self):
+        # Shape taken from the live log: cut off inside subtask 3's description.
+        raw = (
+            '[{"id":1,"description":"open Thunderbird","depends_on":[]},'
+            '{"id":2,"description":"click the Write new message button","depends_on":[1]},'
+            '{"id":3,"description":"set To to alex@example.com, and type the message'
+        )
+        subs = self._router()._parse_subtasks(raw)
+        assert [s.id for s in subs] == [1, 2]
+        assert subs[0].description == "open Thunderbird"
+
+    def test_truncated_after_object_salvages_all_complete(self):
+        raw = (
+            '[{"id":1,"description":"open Notepad","depends_on":[]},'
+            '{"id":2,"description":"type: hello","depends_on":[1]},'
+        )
+        subs = self._router()._parse_subtasks(raw)
+        assert [s.id for s in subs] == [1, 2]
+
+    def test_intact_json_still_parses(self):
+        raw = '[{"id":1,"description":"open Calculator","depends_on":[]}]'
+        subs = self._router()._parse_subtasks(raw)
+        assert len(subs) == 1 and subs[0].description == "open Calculator"
+
+    def test_unsalvageable_still_raises(self):
+        import pytest
+        with pytest.raises((ValueError, json.JSONDecodeError)):
+            self._router()._parse_subtasks('[{"id":1,"description":"open')
+
+
+class TestInstalledAppHint:
+    """Ground-truth app hint: OS app list × the user's own words. No hardcoding."""
+
+    def _hint(self, instruction, apps):
+        from unittest.mock import patch
+        with patch("desktop.system.installed_apps", return_value=apps):
+            return RouterAgent._installed_app_hint(instruction)
+
+    def test_mentioned_installed_app_is_hinted(self):
+        hint = self._hint(
+            "schedule an outlook meeting with shehroz at 3pm",
+            ["Outlook (new)", "Microsoft Edge", "Calculator"],
+        )
+        assert "Outlook (new)" in hint
+        assert "INSTALLED" in hint
+
+    def test_unmentioned_apps_are_not_hinted(self):
+        hint = self._hint(
+            "schedule an outlook meeting",
+            ["Zoom Workplace", "Spotify"],
+        )
+        assert hint == ""
+
+    def test_no_apps_detected_means_no_hint(self):
+        assert self._hint("open outlook", []) == ""
+
+    def test_any_app_name_works_generally(self):
+        hint = self._hint("play some music on spotify", ["Spotify", "Outlook"])
+        assert "Spotify" in hint and "Outlook" not in hint
+
+
+class TestAppHintWholeWordMatching:
+    """Regression: loose substring matching sent a run into Task Scheduler.
+
+    'schedule a meeting WITH shehroz' must NOT hint 'Task Scheduler'
+    ("schedule" ⊂ "Scheduler") or 'Windows Defender Firewall with Advanced
+    Security' ("with" is a word of it). Only actually-named apps count.
+    """
+
+    _APPS = ["Task Scheduler",
+             "Windows Defender Firewall with Advanced Security",
+             "Outlook (new)", "Zoom Workplace"]
+
+    def _hint(self, instruction):
+        from unittest.mock import patch
+        with patch("desktop.system.installed_apps", return_value=self._APPS):
+            return RouterAgent._installed_app_hint(instruction)
+
+    def test_no_app_named_means_no_hint(self):
+        assert self._hint(
+            "schedule a meeting with shehroz alex@example.com 3pm 6 july"
+        ) == ""
+
+    def test_substring_of_app_word_does_not_match(self):
+        # "schedule" must not summon "Scheduler"
+        assert "Task Scheduler" not in self._hint("schedule something for me")
+
+    def test_named_app_still_hinted(self):
+        hint = self._hint("schedule a meeting in outlook with shehroz")
+        assert "Outlook (new)" in hint
+        assert "Firewall" not in hint and "Task Scheduler" not in hint
+
+    def test_zoom_by_name_still_works(self):
+        hint = self._hint("start a zoom call with my friend")
+        assert "Zoom Workplace" in hint
+
+
+class TestFailureSummaryCarriesBlocker:
+    """Live failure 2026-07-05 17:53-18:02: Teams sat at its sign-in window
+    for 9 minutes and the run ended with just 'task failed' — while the goal
+    check had named the blocker every cycle. The summary must surface it.
+    """
+
+    def _router(self):
+        client = MagicMock()
+        resp = MagicMock()
+        resp.content = "Task failed: Teams is at a sign-in screen."
+        client.query_llm.return_value = resp
+        return RouterAgent(client), client
+
+    def test_blocker_included_on_failure(self):
+        router, client = self._router()
+        router.summarize_completion(
+            "t1", [1, 2], False,
+            blocker="the schedule-meeting form is not open; only "
+                    "'Switch to another account' is on screen",
+        )
+        sent = client.query_llm.call_args[0][0][1]["content"]
+        assert "Switch to another account" in sent
+        assert "blocker" in sent.lower()
+
+    def test_blocker_ignored_on_success(self):
+        router, client = self._router()
+        router.summarize_completion("t1", [1, 2], True, blocker="stale note")
+        sent = client.query_llm.call_args[0][0][1]["content"]
+        assert "stale note" not in sent
+
+    def test_backward_compatible_without_blocker(self):
+        router, client = self._router()
+        out = router.summarize_completion("t1", [1], False)
+        assert isinstance(out, str) and out

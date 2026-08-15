@@ -24,9 +24,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from PIL import Image, ImageDraw, ImageFont
 
-from agents.grounding import OCREngine, UIGroundingAgent
-from core.capture.screenshot import ScreenCapture, _screen_size
-from core.ovms_client import OVMSClient
+from agents.grounding import UIGroundingAgent
+from core.inference import OVMSClient
+from desktop.capture import ScreenCapture, _screen_size
+from desktop.ocr import OCREngine
 
 # ── Expected regions ──────────────────────────────────────────────────────────
 # Each entry: (label, expected_region_as_fraction (x0,y0,x1,y1), description)

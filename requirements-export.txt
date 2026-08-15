@@ -1,0 +1,29 @@
+# ── ONE-TIME model-conversion toolchain ───────────────────────────────────────
+# Needed ONLY on a machine that converts UI-TARS to OpenVINO INT4 IR itself
+# (start.py runs `optimum-cli export openvino ...` on first run). Once the IR
+# models exist in models/, OVMS serves them and this toolchain is never used
+# again — a deploy machine that receives the converted models does NOT need it.
+#
+#   pip install -r requirements-export.txt
+#
+# IMPORTANT — install CPU-only torch FIRST to avoid ~3.4 GB of NVIDIA CUDA +
+# Triton wheels. This is an Intel-GPU target; conversion runs on CPU and the
+# CUDA stack is never used:
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-export.txt
+#
+# (Without the CPU-only step, pip pulls the default CUDA torch build:
+#  nvidia-* ~2.7 GB + triton ~0.7 GB + torch ~1.2 GB for nothing.)
+
+optimum-intel[openvino]>=1.18.0
+nncf>=2.11.0
+jinja2>=3.0.0                      # OVMS export tool: graph.pbtxt templates
+
+# Upper bound is real: optimum-intel's OpenVINO exporter caps qwen2_5_vl —
+# UI-TARS's architecture — at transformers 5.0 (MAX_TRANSFORMERS_VERSION),
+# while optimum-intel itself accepts <5.6. Unpinned, pip installs a version the
+# exporter rejects, and only says so after downloading and tracing the weights:
+#   ValueError: The current version of Transformers does not allow for the
+#   export of the model. Maximum required is 5.0, got: 5.5.4
+transformers>=4.51,<=5.0.0

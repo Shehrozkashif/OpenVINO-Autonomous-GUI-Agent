@@ -1,0 +1,10 @@
+# ── Dev / test tooling ────────────────────────────────────────────────────────
+# Not needed to run or deploy the agent — only for the test suite and linting.
+#   pip install -r requirements-dev.txt
+pytest>=7.4.0
+pytest-cov>=4.1.0
+ruff==0.16.1       # lint/format per Google style guide: `ruff check .`
+                   # PINNED on purpose: an unpinned linter turns a new ruff
+                   # release into a red CI run on code nobody touched. Bump
+                   # it here and in .pre-commit-config.yaml together.
+pre-commit>=3.5.0  # run the CI checks before pushing: `pre-commit install`

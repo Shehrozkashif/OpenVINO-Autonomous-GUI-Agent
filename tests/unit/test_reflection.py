@@ -15,16 +15,25 @@ sys.path.insert(0, ".")
 from unittest.mock import MagicMock
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from agents.reflection import (
     _LLM_REFLECTION_PROMPT,
+    _LLM_SYSTEM,
     _VLM_REFLECTION_PROMPT,
     ReflectionAgent,
     ReflectionResult,
 )
-from core.capture.screenshot import frame_phash
-from core.protocols import ActionStep, SubTask
+from core.runstate import SubtaskRun
+from core.types import ActionStep, SubTask
+from desktop.capture import frame_phash
+from tests.unit.conftest import make_history
+
+# Everything the LLM verifier is told, across both turns. The per-action rules
+# live in the system turn (constant, so the server's prefix cache keeps them)
+# and the step's own details in the user turn, but the model reads one prompt —
+# so the stance tests below assert against the whole of it.
+_LLM_PROMPT = _LLM_SYSTEM + "\n" + _LLM_REFLECTION_PROMPT
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. Prompt safety and raw confidence pass-through
@@ -43,18 +52,18 @@ class TestPromptStance:
     """The prompts must not bias toward success on uncertain outcomes."""
 
     def test_llm_prompt_no_lenient_instruction(self):
-        assert "lenient" not in _LLM_REFLECTION_PROMPT.lower(), (
+        assert "lenient" not in _LLM_PROMPT.lower(), (
             "LLM prompt must not tell the model to be lenient"
         )
 
     def test_llm_prompt_no_ambiguous_success(self):
-        assert "ambiguous case → success=true" not in _LLM_REFLECTION_PROMPT.lower(), (
+        assert "ambiguous case → success=true" not in _LLM_PROMPT.lower(), (
             "Old 'ambiguous case → success=true' instruction must be removed"
         )
-        assert "any ambiguous" not in _LLM_REFLECTION_PROMPT.lower()
+        assert "any ambiguous" not in _LLM_PROMPT.lower()
 
     def test_llm_prompt_ambiguous_defaults_to_false(self):
-        assert "success=false" in _LLM_REFLECTION_PROMPT.lower(), (
+        assert "success=false" in _LLM_PROMPT.lower(), (
             "LLM prompt must instruct the model to return success=false for ambiguous cases"
         )
 
@@ -500,7 +509,8 @@ def _make_orchestrator(reflection_results: list, step_override: ActionStep = Non
     This prevents the planner's second call (which returns None/"goal achieved")
     from masking a step failure — isolating Fix 0.1's logic cleanly.
     """
-    from core.orchestrator import OrchestratorConfig, TaskOrchestrator
+    from core.orchestrator import TaskOrchestrator
+    from core.runstate import OrchestratorConfig
 
     reflector = MagicMock()
     reflector.min_confidence = 0.75
@@ -526,9 +536,7 @@ def _make_orchestrator(reflection_results: list, step_override: ActionStep = Non
     planner.plan_steps = MagicMock(side_effect=[[step], None])
 
     capturer = MagicMock()
-    memory = MagicMock()
-    memory.get_failure_hints = MagicMock(return_value=[])
-    memory.store_failure_pattern = MagicMock()
+    history = make_history()
 
     orch = TaskOrchestrator(
         router=MagicMock(),
@@ -537,7 +545,7 @@ def _make_orchestrator(reflection_results: list, step_override: ActionStep = Non
         actor=actor,
         reflector=reflector,
         capturer=capturer,
-        task_memory=memory,
+        history=history,
         config=OrchestratorConfig(
             max_retries_per_step=3,
             max_steps_per_subtask=5,
@@ -589,15 +597,16 @@ class TestFix01_SuccessCondition:
         step.value = "hello"
         reflections = [_make_reflection(success=False, confidence=0.60)] * 3
         orch = _make_orchestrator(reflections, step_override=step)
-        result = orch._execute_subtask(_make_subtask("type hello"))
-        assert result is True, (
-            "An uncertain type is accepted (next step re-checks live) — subtask "
-            "should not fail outright"
+        run = SubtaskRun(started_at=0.0)
+        outcome = orch._run_step_attempts(run, _make_subtask("type hello"), step)
+        assert outcome == "step_ok", (
+            "An uncertain type is accepted (the next step re-checks live)"
         )
         assert orch.reflector.verify.call_count == 1, (
             "An uncertain type must be accepted on the first verdict, never "
             "re-typed (no double-typing)"
         )
+        assert orch.actor.execute.call_count == 1, "the text must be typed once"
 
     def test_uncertain_enter_accepts_without_resubmitting(self):
         """key_press Enter, reflector UNCERTAIN (success=False, conf=0.60).
@@ -612,12 +621,14 @@ class TestFix01_SuccessCondition:
         step.description = "press enter to launch app"
         reflections = [_make_reflection(success=False, confidence=0.60)] * 3
         orch = _make_orchestrator(reflections, step_override=step)
-        result = orch._execute_subtask(_make_subtask("press enter"))
-        assert result is True
+        run = SubtaskRun(started_at=0.0)
+        outcome = orch._run_step_attempts(run, _make_subtask("press enter"), step)
+        assert outcome == "step_ok"
         assert orch.reflector.verify.call_count == 1, (
             "An uncertain Enter must be accepted on the first verdict, never "
             "re-submitted"
         )
+        assert orch.actor.execute.call_count == 1, "Enter must fire once"
 
     def test_failure_high_conf_fails(self):
         """Reflector says success=False, conf=0.80 (above min_confidence=0.75).
@@ -692,6 +703,15 @@ def _verdict_json(success, conf):
             % ("true" if success else "false", conf))
 
 
+def _patterned(box) -> Image.Image:
+    """A white frame with a black rectangle at `box` — structure a perceptual
+    hash can actually tell apart.
+    """
+    img = Image.new("RGB", (200, 100), (255, 255, 255))
+    ImageDraw.Draw(img).rectangle(box, fill=(0, 0, 0))
+    return img
+
+
 def _make_agent(llm_json, vlm_json, ocr_words=3, escalate=True):
     client = MagicMock()
     client.query_llm = MagicMock(return_value=MagicMock(content=llm_json))
@@ -704,7 +724,7 @@ def _make_agent(llm_json, vlm_json, ocr_words=3, escalate=True):
     ])
 
     capturer = MagicMock()
-    capturer.capture = MagicMock(return_value=Image.new("RGB", (200, 100), (255, 255, 255)))
+    capturer.capture = MagicMock(return_value=_patterned((120, 30, 190, 95)))
 
     agent = ReflectionAgent(client, capturer, min_confidence=0.75, ocr=ocr,
                             escalate_uncertain=escalate)
@@ -712,8 +732,12 @@ def _make_agent(llm_json, vlm_json, ocr_words=3, escalate=True):
     return agent, client
 
 
-# Pre-hash of a different image so the delta check never short-circuits.
-_PRE = frame_phash(Image.new("RGB", (200, 100), (0, 0, 0)))
+# Pre-hash of a VISUALLY different frame, so the "screen barely changed"
+# guard never short-circuits the escalation path under test.
+# Flat fills do not work here: a perceptual hash of an all-black frame and an
+# all-white one differ by 1 bit, which the guard reads as "nothing happened".
+# Real screens have structure, so the fixtures must too.
+_PRE = frame_phash(_patterned((10, 10, 60, 60)))
 
 
 class TestReconcile:
@@ -774,3 +798,39 @@ class TestEscalation:
                                     escalate=False)
         agent.verify(_step_vlm("click"), pre_hash=_PRE)
         assert not client.query_vlm.called
+
+
+class TestControlsDeltaNote:
+    """Regression (live AI-PC 07:26 run): the attendee click was judged
+    FAILED while 'Remove <email>' [Button] had appeared in the accessibility
+    tree — tree-level appear/disappear evidence must reach the LLM judge.
+    """
+
+    def test_appeared_and_disappeared_listed(self, monkeypatch):
+        monkeypatch.setattr(
+            "desktop.uia.get_interactive_elements",
+            lambda **kw: [("Remove a@b.com", "Button"), ("Send", "Button")],
+        )
+        note = ReflectionAgent._controls_delta_note(
+            {"'Save' [Button]", "'Send' [Button]"}
+        )
+        assert "appeared: 'Remove a@b.com' [Button]" in note
+        assert "disappeared: 'Save' [Button]" in note
+
+    def test_no_snapshot_returns_empty(self):
+        assert ReflectionAgent._controls_delta_note(None) == ""
+        assert ReflectionAgent._controls_delta_note(set()) == ""
+
+    def test_unchanged_controls_reported_as_negative_evidence(self, monkeypatch):
+        monkeypatch.setattr(
+            "desktop.uia.get_interactive_elements",
+            lambda **kw: [("Send", "Button")],
+        )
+        note = ReflectionAgent._controls_delta_note({"'Send' [Button]"})
+        assert "no interactive controls appeared or disappeared" in note
+
+    def test_unreadable_tree_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(
+            "desktop.uia.get_interactive_elements", lambda **kw: []
+        )
+        assert ReflectionAgent._controls_delta_note({"'Send' [Button]"}) == ""

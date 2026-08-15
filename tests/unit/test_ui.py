@@ -24,7 +24,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeyEvent
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QMessageBox, QScrollArea
 
 from ui.events import AgentEventBus, AgentState
 
@@ -60,13 +60,12 @@ def _no_live_screen_capture(monkeypatch):
 # Verbatim log lines as core/orchestrator.py emits them
 ORCHESTRATOR_LOG = [
     "[TASK START] 'open notepad and type hello'",
-    "[MEMORY] Similar past task found (sim=0.91)",
     "[ROUTER] 2 sub-task(s)",
     "\n[SUBTASK 1] Open Notepad",
     "  Step 1: [key_press] Open the search launcher",
     "  Verified (conf=0.95)",
     "  Step 2: [type] Type 'notepad' in the search box",
-    "  Uncertain result — retrying (uncertain outcome (conf=0.50, threshold=0.95))",
+    "  Uncertain result - retrying (uncertain outcome (conf=0.50, threshold=0.95))",
     "  Retry 1/3…",
     "  Verified (conf=0.88)",
     "  [CHECK] 'notepad' process confirmed running",
@@ -74,7 +73,7 @@ ORCHESTRATOR_LOG = [
     "\n[SUBTASK 2] Type hello in Notepad",
     "  Step 1: [click] Click the Notepad text area",
     "  Verification failed: text area not focused (conf=0.97)",
-    "  Step failed — re-evaluating next action",
+    "  Step failed - re-evaluating next action",
     "  [VISUAL-REPLAN] Text planning stuck — asking VLM with screenshot",
     "  Step 2: [type] Type hello",
     "  [FIREWALL] MEDIUM risk detected: shell keyword",
@@ -98,7 +97,6 @@ def test_event_bus_parses_orchestrator_stream(app):
     bus.retrying.connect(lambda a, t: events.append(("retry", a, t)))
     bus.guard_event.connect(lambda k, m: events.append(("guard", k)))
     bus.extracted.connect(lambda k, v: events.append(("extract", k, v)))
-    bus.memory_hint.connect(lambda s: events.append(("memory", s)))
     bus.task_done.connect(lambda s, e: events.append(("done", e)))
 
     for line in ORCHESTRATOR_LOG:
@@ -115,10 +113,40 @@ def test_event_bus_parses_orchestrator_stream(app):
     assert any(e[0] == "guard" and e[1] == "FIREWALL" for e in events)
     assert any(e[0] == "guard" and e[1] == "VISION" for e in events)
     assert ("extract", "page_title", "Untitled - Notepad") in events
-    assert ("memory", 0.91) in events
     assert ("done", 42.3) in events
     assert bus.steps_total == 4
     assert bus.last_confidence == 0.92
+
+
+@pytest.mark.parametrize("fixture_name", ["ORCHESTRATOR_LOG", "PIPELINE_LOG"])
+def test_every_log_line_is_understood(app, fixture_name):
+    """No line in either fixture may fall through the parser unrecognised.
+
+    Orchestrator log strings are a public interface — ui/events.py parses them
+    to drive the mission timeline — so a line the UI no longer understands is
+    a silent bug: the timeline simply goes quiet for it.
+
+    Three lines were dead this way before this test existed. Two were written
+    with em-dashes ("Step failed — re-evaluating") that core/orchestrator.py
+    never emits; it uses ASCII hyphens. One was a [MEMORY] hint removed from
+    the backend. All three sat in a fixture whose comment promised verbatim
+    output, which is exactly how the drift went unnoticed.
+
+    Recognition, not emission, is the contract: some lines only advance the
+    state machine, which stays silent when the state is already correct.
+    """
+    fixtures = {"ORCHESTRATOR_LOG": ORCHESTRATOR_LOG, "PIPELINE_LOG": PIPELINE_LOG}
+    bus = AgentEventBus()
+    unparsed = [
+        sub.strip()
+        for line in fixtures[fixture_name]
+        for sub in line.splitlines()
+        if sub.strip() and not bus._parse(sub)
+    ]
+    assert not unparsed, (
+        f"{fixture_name}: the UI does not understand these lines, so the "
+        "mission timeline would stay silent for them:\n  "
+        + "\n  ".join(unparsed))
 
 
 # Verbatim loguru lines from a real run (agents/, core/ — via LoguruBridge)
@@ -426,3 +454,141 @@ def test_empty_state_quick_action_runs_through_composer(win, app):
     win.page_home._pick("Open Calculator")
     assert win.page_home.composer.input.toPlainText() == "Open Calculator"
     assert win.instruction_input.toPlainText() == "Open Calculator"
+
+
+# ── Window geometry ───────────────────────────────────────────────────────────
+# The window used to open at a hard-coded setGeometry(80, 60, 1480, 920): 980 px
+# of height once the offset is counted, against roughly 1032 usable on a 1080p
+# laptop, and less at any display scaling above 100%. The instruction box and the
+# Run button sat under the taskbar, so a new user's first move was to resize the
+# window to find the controls. These pin the rule that replaced it.
+
+@pytest.mark.parametrize("avail_w,avail_h", [
+    (1024, 768),    # oldest display still worth supporting
+    (1280, 800),
+    (1366, 728),    # the common budget laptop, after its taskbar
+    (1852, 963),    # the machine this agent was developed on
+    (1920, 1032),   # 1080p after the taskbar
+    (2560, 1400),
+    (3840, 2120),   # 4K
+    (800, 600),     # smaller than the minimum — must still fit
+])
+def test_window_never_opens_larger_than_the_screen(avail_w, avail_h):
+    from ui.main_window import DesktopGUIAgent
+    w, h = DesktopGUIAgent.fit_to_screen(avail_w, avail_h)
+    assert w <= avail_w, f"{w}px wide on a {avail_w}px screen"
+    assert h <= avail_h, f"{h}px tall on a {avail_h}px screen"
+    assert w > 0 and h > 0
+
+
+def test_window_uses_the_room_it_has_on_a_normal_laptop():
+    """A 1080p laptop should get the full preferred size, not a shrunken one."""
+    from ui.main_window import DesktopGUIAgent
+    w, h = DesktopGUIAgent.fit_to_screen(1920, 1032)
+    assert (w, h) == (DesktopGUIAgent._WANT_W, DesktopGUIAgent._WANT_H)
+
+
+def test_window_opens_inside_the_available_area(win, app):
+    """End to end: the real window, on the real screen Qt reports."""
+    from PyQt6.QtGui import QGuiApplication
+    screen = win.screen() or QGuiApplication.primaryScreen()
+    avail = screen.availableGeometry()
+    g = win.frameGeometry()
+    assert g.width() <= avail.width(), f"{g.width()} > {avail.width()}"
+    assert g.height() <= avail.height(), f"{g.height()} > {avail.height()}"
+
+
+# ── Home page width ───────────────────────────────────────────────────────────
+# Fitting the WINDOW to the screen was only half the problem. Inside it, the Home
+# page held two widgets with no width ceiling: a QLabel carrying a whole task
+# instruction (~250 characters) per recent-automation row, and four suggestion
+# chips side by side. A QLabel refuses to be narrower than its text, so the row
+# set a minimum on the page, the page set one on its scroll area, and the scroll
+# area grew to 1992 px inside a 972 px column. Everything to the right of that
+# column was unreachable — including the Run Task button, which sits at the far
+# right of the composer. The window looked fine; its main button was simply gone.
+
+def _home_with_history(instruction: str, width: int, rows: int = 3):
+    """A Home page holding real-length instructions, like a returning user's.
+
+    Laid out for real at `width`. show() and activate() are not ceremony: an
+    unshown page reports a placeholder minimumSizeHint, so a test that skips
+    them passes just as happily on the broken layout as on the fixed one.
+    """
+    import time as _time
+
+    from ui.events import AgentEventBus
+    from ui.pages import HomePage
+
+    class _History:
+        def get_recent_tasks(self, limit=30):
+            return [{"instruction": instruction, "success_count": 3,
+                     "avg_duration_s": 92.0, "last_used": _time.time() - 3600 * (i + 1)}
+                    for i in range(rows)]
+
+    page = HomePage(lambda: _History(), AgentEventBus())
+    page.resize(width, 860)
+    page.show()
+    page.refresh()
+    QApplication.processEvents()
+    page.findChild(QScrollArea).widget().layout().activate()
+    QApplication.processEvents()
+    return page
+
+
+def _centre_column(avail_w: int, avail_h: int) -> int:
+    """Width the middle column gets on a given screen, panels open."""
+    from ui.main_window import DesktopGUIAgent
+    from ui.panels import IntelligencePanel
+    from ui.widgets import NavRail
+    win_w, _ = DesktopGUIAgent.fit_to_screen(avail_w, avail_h)
+    return win_w - NavRail.EXPANDED - IntelligencePanel.WIDTH
+
+
+@pytest.mark.parametrize("avail_w,avail_h", [
+    (1366, 728),    # budget laptop — the tightest case with both panels open
+    (1852, 963),    # the machine this agent was developed on
+    (1920, 1032),   # 1080p after the taskbar
+])
+def test_home_page_fits_its_column_without_scrolling_sideways(avail_w, avail_h, app):
+    from ui.pages import DEMO_PROMPT
+    column = _centre_column(avail_w, avail_h)
+    page = _home_with_history(DEMO_PROMPT, width=column)
+    scroll = page.findChild(QScrollArea)
+    assert scroll.widget().width() <= scroll.viewport().width(), (
+        f"Home lays out {scroll.widget().width()}px wide in a {column}px column on a "
+        f"{avail_w}x{avail_h} screen — everything past the edge is unreachable")
+    assert not scroll.horizontalScrollBar().isVisible()
+
+
+@pytest.mark.parametrize("avail_w,avail_h", [(1366, 728), (1852, 963), (1920, 1032)])
+def test_run_button_is_inside_the_window(avail_w, avail_h, app):
+    """The symptom the user reported: the Run button had left the screen."""
+    from ui.pages import DEMO_PROMPT
+    column = _centre_column(avail_w, avail_h)
+    page = _home_with_history(DEMO_PROMPT, width=column)
+    btn = page.composer.run_btn
+    right = btn.mapTo(page, btn.rect().topRight()).x()
+    assert right <= column, (
+        f"Run Task ends at {right}px in a {column}px column — off the window")
+    assert btn.isVisible()
+
+
+def test_recent_automation_row_shrinks_below_its_text(app):
+    """The row that caused it: the label must not pin a width to its string."""
+    from ui.widgets import ElidedLabel
+    page = _home_with_history("x" * 400, width=900, rows=1)
+    row = page.recent_box.itemAt(0).widget()
+    assert row.findChild(ElidedLabel) is not None, "instruction label must elide"
+    assert row.minimumSizeHint().width() < 400, (
+        f"row demands {row.minimumSizeHint().width()}px for one long instruction")
+
+
+def test_elided_label_keeps_the_full_text_for_the_tooltip(app):
+    """Eliding is presentation only — nothing may read the truncated string."""
+    from ui.widgets import ElidedLabel
+    full = "open Microsoft Teams and do a great many other things besides"
+    lbl = ElidedLabel(full)
+    lbl.resize(60, 20)
+    assert lbl.text() == full
+    assert lbl.toolTip() == full

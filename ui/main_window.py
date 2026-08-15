@@ -16,7 +16,16 @@ import time
 from collections import deque
 
 from PyQt6.QtCore import QObject, QSettings, QTimer, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QIcon, QLinearGradient, QPainter, QPixmap, QRadialGradient
+from PyQt6.QtGui import (
+    QBrush,
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QLinearGradient,
+    QPainter,
+    QPixmap,
+    QRadialGradient,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -36,11 +45,11 @@ from ui.hud import MissionHUD
 from ui.icons import icon_pixmap
 from ui.pages import (
     HomePage,
-    MemoryPage,
     MissionPage,
     ScreenHistoryPage,
     SessionsPage,
     SettingsPage,
+    TaskHistoryPage,
     WorkflowsPage,
 )
 from ui.panels import IntelligencePanel
@@ -58,6 +67,12 @@ class WorkerSignals(QObject):
     # "answer": [None]} — the UI slot fills answer and sets the event.
     ask_user = pyqtSignal(str, object)
     confirm_action = pyqtSignal(str, str, object)
+    # Missing-detail elicitation finished (pre-mission, window still visible);
+    # carries the instruction enriched with the user's answers.
+    elicit_done = pyqtSignal(str)
+    # Pointer action fired by the controller (worker thread) — the UI thread
+    # pulses a capture-excluded ring at that spot so clicks are visible.
+    pointer_action = pyqtSignal(int, int, str)
 
 
 class Shell(QWidget):
@@ -87,13 +102,80 @@ _PAGES = [
     ("bolt",   "Mission Control"),
     ("layers", "Agent Sessions"),
     ("flow",   "Workflows"),
-    ("db",     "Memory"),
+    ("db",     "Task History"),
     ("screen", "Screen History"),
     ("gear",   "Settings"),
 ]
 
 
 class DesktopGUIAgent(QMainWindow):
+    # Preferred opening size on a roomy display. Not a promise — the window is
+    # shrunk to whatever the screen actually offers, see _apply_startup_geometry.
+    _WANT_W, _WANT_H = 1480, 920
+    # Floor. The nav rail (196 expanded) and the activity panel (312 fixed)
+    # together take 508, so below ~1040 the middle column stops being usable.
+    # The height floor is kept under 720 so a 1366x768 laptop still fits after
+    # its taskbar.
+    _MIN_W, _MIN_H = 1040, 640
+    # resize() sizes the CLIENT area; the border and title bar sit outside it.
+    # Clamping to exactly the screen width therefore still hangs the frame off
+    # the edge, which is visible on a 1024x768 display. Reserve room for it.
+    _FRAME_W, _FRAME_H = 16, 48
+
+    def _apply_startup_geometry(self):
+        """Open at a size that FITS, centred on the current screen.
+
+        This used to be setGeometry(80, 60, 1480, 920) — a fixed rectangle
+        needing 980 px of height once the 60 px offset is counted. A 1080p
+        laptop has about 1032 px left after the taskbar, and less at any
+        display scaling above 100%, so the bottom of the window — the
+        instruction box and the Run button — sat under the taskbar or off the
+        screen entirely. The first thing a new user had to do was drag the
+        window bigger to find the controls.
+
+        availableGeometry() is the taskbar-aware rectangle of the screen, so
+        sizing against it is what keeps every control reachable on a small
+        laptop and a 4K monitor alike.
+        """
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:      # no display at all — nothing to fit to
+            self.setMinimumSize(self._MIN_W, self._MIN_H)
+            self.resize(self._WANT_W, self._WANT_H)
+            return
+
+        avail = screen.availableGeometry()
+        # The floor is capped by the screen. A minimum wider than the display
+        # cannot be honoured by shrinking — Qt just hands back a window bigger
+        # than the screen, which is the very bug this method exists to fix.
+        # Dropping our own floor here does not let the layout collapse: Qt still
+        # enforces the minimum its child widgets need.
+        # Same frame allowance as fit_to_screen: a minimum of exactly the screen
+        # width would override the fitted size and put the border back off-edge.
+        self.setMinimumSize(min(self._MIN_W, avail.width() - self._FRAME_W),
+                            min(self._MIN_H, avail.height() - self._FRAME_H))
+
+        w, h = self.fit_to_screen(avail.width(), avail.height())
+        self.resize(w, h)
+        self.move(avail.x() + (avail.width() - w) // 2,
+                  avail.y() + (avail.height() - h) // 2)
+
+    @classmethod
+    def fit_to_screen(cls, avail_w: int, avail_h: int) -> tuple[int, int]:
+        """Opening size for a screen whose usable area is avail_w x avail_h.
+
+        Split out from _apply_startup_geometry so the rule can be checked
+        against real display sizes without a display — see test_ui.py. The one
+        invariant that matters: the result never exceeds what it was given.
+        """
+        # A margin keeps it reading as a window rather than a kiosk, but must
+        # never shrink it past the floor.
+        w = max(cls._MIN_W, min(cls._WANT_W, avail_w - 80))
+        h = max(cls._MIN_H, min(cls._WANT_H, avail_h - 80))
+        # On a display smaller than the floor, fitting wins over the floor.
+        # The frame allowance only bites here — on any normal screen the 80 px
+        # margin above is already the binding constraint.
+        return min(w, avail_w - cls._FRAME_W), min(h, avail_h - cls._FRAME_H)
+
     def __init__(self, orchestrator=None):
         super().__init__()
         self.orchestrator = orchestrator
@@ -101,13 +183,14 @@ class DesktopGUIAgent(QMainWindow):
         self.signals = WorkerSignals()
         self.bus = AgentEventBus()
         self._running = False
-        self._memory = None
+        self._history = None
+        self._click_pulse = None   # lazy ClickPulse overlay (see _on_pointer_action)
         # (timestamp, QPixmap, action_text) frames recorded during missions
         self.frame_store = deque(maxlen=48)
         self._frame_counter = 0
 
         self.setWindowTitle("Desktop GUI Agent")
-        self.setGeometry(80, 60, 1480, 920)
+        self._apply_startup_geometry()
         self.setWindowIcon(QIcon(icon_pixmap("sparkle", QColor(C.ACCENT), 32)))
         self.setStyleSheet(build_stylesheet())
 
@@ -128,18 +211,18 @@ class DesktopGUIAgent(QMainWindow):
         self.log_bridge.line.connect(self.bus.feed)
         self.log_bridge.install()
 
-    # ── Memory access (shared by pages) ───────────────────────────────────────
+    # ── Task-history access (shared by pages) ─────────────────────────────────
 
-    def _get_memory(self):
+    def _get_history(self):
         if self.orchestrator is not None:
-            return self.orchestrator.memory
-        if self._memory is None:
+            return self.orchestrator.history
+        if self._history is None:
             try:
-                from memory.task_memory import TaskMemory
-                self._memory = TaskMemory()
+                from core.history import TaskHistory
+                self._history = TaskHistory()
             except Exception:
                 return None
-        return self._memory
+        return self._history
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -179,15 +262,15 @@ class DesktopGUIAgent(QMainWindow):
 
         # Pages
         self.stack = QStackedWidget()
-        self.page_home = HomePage(self._get_memory, self.bus)
+        self.page_home = HomePage(self._get_history, self.bus)
         self.page_mission = MissionPage(self.bus)
-        self.page_sessions = SessionsPage(self._get_memory)
-        self.page_workflows = WorkflowsPage(self._get_memory)
-        self.page_memory = MemoryPage(self._get_memory)
+        self.page_sessions = SessionsPage(self._get_history)
+        self.page_workflows = WorkflowsPage(self._get_history)
+        self.page_history = TaskHistoryPage(self._get_history)
         self.page_screens = ScreenHistoryPage(self.frame_store)
         self.page_settings = SettingsPage()
         for page in (self.page_home, self.page_mission, self.page_sessions,
-                     self.page_workflows, self.page_memory, self.page_screens,
+                     self.page_workflows, self.page_history, self.page_screens,
                      self.page_settings):
             self.stack.addWidget(page)
         col.addWidget(self.stack, stretch=1)
@@ -265,20 +348,55 @@ class DesktopGUIAgent(QMainWindow):
         self.signals.error.connect(self._on_error)
         self.signals.ask_user.connect(self._on_ask_user)
         self.signals.confirm_action.connect(self._on_confirm_action)
+        self.signals.elicit_done.connect(self._launch_mission)
+        self.signals.pointer_action.connect(self._on_pointer_action)
+        # Let the controller report every click so the user can see where the
+        # agent's mouse lands (emit is thread-safe from the worker thread).
+        if self.orchestrator is not None:
+            try:
+                self.orchestrator.actor.controller.on_pointer = (
+                    lambda x, y, kind: self.signals.pointer_action.emit(x, y, kind)
+                )
+            except AttributeError:
+                pass  # headless/mock orchestrator without a real controller
+
+    def _on_pointer_action(self, x: int, y: int, kind: str):
+        """UI-thread slot: pulse the click indicator at the action's location."""
+        if self._click_pulse is None:
+            from ui.click_pulse import ClickPulse
+            self._click_pulse = ClickPulse()
+        self._click_pulse.flash(x, y, kind)
 
     # ── Blocking questions from the worker thread ─────────────────────────────
+
+    def _restore_for_dialog(self) -> bool:
+        """Bring the window back if minimized so a modal dialog can be seen
+        and hold focus (a dialog parented to a minimized window centers
+        off-screen at -32000 and loses keystrokes). Returns True if the
+        window must be re-minimized afterwards.
+        """
+        if self.isMinimized():
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            return True
+        return False
 
     def _on_ask_user(self, question: str, ctx: dict):
         """UI-thread slot: ask the user for a missing detail (e.g. meeting time)."""
         from PyQt6.QtWidgets import QInputDialog
+        re_minimize = self._restore_for_dialog()
         try:
             text, ok = QInputDialog.getText(self, "The agent needs a detail", question)
             ctx["answer"][0] = text.strip() if ok and text.strip() else None
         finally:
             ctx["event"].set()
+            if re_minimize:
+                self.showMinimized()
 
     def _on_confirm_action(self, summary: str, command: str, ctx: dict):
         """UI-thread slot: confirm a potentially destructive command."""
+        re_minimize = self._restore_for_dialog()
         reply = QMessageBox.question(
             self, "Confirm potentially destructive action",
             f"{summary}\n\nCommand:\n{command}\n\nAllow the agent to run this?",
@@ -289,6 +407,8 @@ class DesktopGUIAgent(QMainWindow):
             ctx["answer"][0] = reply == QMessageBox.StandardButton.Yes
         finally:
             ctx["event"].set()
+            if re_minimize:
+                self.showMinimized()
 
     def _ask_blocking(self, question: str) -> str | None:
         """Called from the worker thread. Blocks (max 180 s) until the user
@@ -309,12 +429,25 @@ class DesktopGUIAgent(QMainWindow):
         return bool(ctx["answer"][0])
 
     def _start_screen_timer(self):
+        self._capturing = False
         self._screen_timer = QTimer(self)
         self._screen_timer.timeout.connect(self._refresh_screen)
         self._screen_timer.start(1000)  # 1 FPS live view
 
     def _refresh_screen(self):
-        from core.capture.screenshot import ScreenCapture
+        # Grab + PNG-encode the whole desktop OFF the UI thread. At 1440p/4K a
+        # full GDI capture + LANCZOS resize + PNG encode is 150-400 ms; running
+        # it on the Qt event loop once a second stalled clicks and keystrokes
+        # (buttons felt dead, typing stuttered). Only the cheap QPixmap decode
+        # stays on the UI thread (_show_screenshot). Skip the cycle if a prior
+        # grab is still in flight so slow frames never pile up.
+        if self._capturing:
+            return
+        self._capturing = True
+        threading.Thread(target=self._grab_screen_frame, daemon=True).start()
+
+    def _grab_screen_frame(self):
+        from desktop.capture import ScreenCapture
         try:
             img = ScreenCapture().capture_resized(960, 540)
             buf = io.BytesIO()
@@ -322,6 +455,8 @@ class DesktopGUIAgent(QMainWindow):
             self.signals.screenshot_update.emit(buf.getvalue())
         except Exception:
             pass
+        finally:
+            self._capturing = False
 
     def _show_screenshot(self, img_bytes: bytes):
         px = QPixmap()
@@ -335,6 +470,25 @@ class DesktopGUIAgent(QMainWindow):
                     (time.time(), px, self.bus.current_step))
 
     # ── Task lifecycle ────────────────────────────────────────────────────────
+
+    def _emit_log(self, msg: str):
+        """Route an orchestrator decision to loguru, which reaches both places.
+
+        The GUI wired orchestrator.log straight to the HUD signal, so every
+        routing decision ([SUBTASK]/[GOAL-CHECK]/[CLICK-CHECK]/…) was invisible
+        in the terminal — the log the dev loop actually pastes. Emitting through
+        loguru puts it in the terminal (and file sink) AND still reaches the HUD
+        via the always-installed LoguruBridge (events.py) → bus.feed. Going
+        through loguru only — not also signals.log_update — avoids feeding
+        bus.feed twice (LoguruBridge + log_update), which would double the line.
+        """
+        try:
+            from loguru import logger
+            logger.opt(depth=1).info(msg)
+        except Exception:
+            # Loguru unavailable for some reason — fall back to the HUD signal
+            # so a decision is never silently dropped.
+            self.signals.log_update.emit(msg)
 
     def _run_task(self):
         if self._running:
@@ -357,6 +511,28 @@ class DesktopGUIAgent(QMainWindow):
         self.bus.reset()
         self.panel.clear_mission()
         self._goto_page(1)  # Mission Control
+
+        # Ask for missing details BEFORE minimizing. A modal question parented
+        # to a minimized window centers off-screen at (-32000,-32000) and
+        # cannot hold keyboard focus — users lost their answer mid-typing and
+        # the mission proceeded with the raw instruction. The ~3 s LLM check +
+        # dialogs run on a prep thread while the window is still visible;
+        # _launch_mission then minimizes and starts the worker with the
+        # enriched instruction.
+        self.orchestrator.log = self._emit_log
+        self.orchestrator.on_ask = self._ask_blocking
+
+        def _prep():
+            try:
+                enriched = self.orchestrator._elicit_missing_parameters(instruction)
+            except Exception:
+                enriched = instruction
+            self.signals.elicit_done.emit(enriched)
+
+        threading.Thread(target=_prep, daemon=True).start()
+
+    def _launch_mission(self, instruction: str):
+        """UI-thread slot: details are in — minimize and start the mission."""
         self.showMinimized()
         self.hud.show_mission()
         # Delay the worker 500 ms so the window manager fully hides this
@@ -370,11 +546,11 @@ class DesktopGUIAgent(QMainWindow):
 
     def _worker(self, instruction: str):
         try:
-            self.orchestrator.log = \
-                lambda msg: self.signals.log_update.emit(msg)
-            # Human-in-the-loop hooks: missing-detail questions and
-            # destructive-command confirmations pop dialogs on the UI thread.
-            self.orchestrator.on_ask = self._ask_blocking
+            self.orchestrator.log = self._emit_log
+            # Elicitation already ran pre-minimize (_run_task) — disable it in
+            # execute() so the mission never pops a dialog under a minimized
+            # window. Destructive-command confirmation stays wired.
+            self.orchestrator.on_ask = None
             self.orchestrator.on_confirm = self._confirm_blocking
             result = self.orchestrator.execute(instruction)
             self.signals.task_complete.emit(result)
@@ -384,6 +560,13 @@ class DesktopGUIAgent(QMainWindow):
     def _stop_task(self):
         if self.orchestrator:
             self.orchestrator.stop()
+            # Instant feedback: the worker may still be finishing an in-flight
+            # model call for a few seconds, so the mission does not end on this
+            # exact click. Tell the user their Stop registered instead of
+            # leaving a dead-looking button.
+            self.hud.state_label.setText("Stopping…")
+            self.hud.detail.setText("Finishing the current step, then halting…")
+            self.status_chip.set_state("Stopping…", C.WARNING)
 
     def _on_done(self, result: dict):
         self._running = False

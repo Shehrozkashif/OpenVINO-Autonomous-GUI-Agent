@@ -1,8 +1,8 @@
 """Live long-horizon test suite — multi-subtask tasks with ground-truth verification.
 
 Exercises the long-task machinery end to end on a real desktop:
-  adaptive wall-clock budgets, per-subtask checkpointing, task-level
-  replanning, and the UIA structured-control actions (set_value / select).
+  adaptive wall-clock budgets, task-level replanning, and the UIA
+  structured-control actions (set_value / select).
 
 Use cases
 ---------
@@ -222,8 +222,8 @@ class LongHorizonTester:
             # Ground truth: the topic appears in Zoom's upcoming-meetings list,
             # read through the accessibility tree (not OCR).
             try:
-                from core import windows_uia
-                found = windows_uia.find_element(topic, timeout_s=4.0)
+                from desktop import uia
+                found = uia.find_element(topic, timeout_s=4.0)
                 if found:
                     return True, f"meeting '{topic}' visible in Zoom"
             except Exception as e:

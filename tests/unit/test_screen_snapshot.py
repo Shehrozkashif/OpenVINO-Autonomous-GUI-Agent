@@ -15,8 +15,10 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from agents.grounding import OCREngine, OCRWord
-from core.capture.screen_snapshot import (
+import pytest
+
+from desktop.ocr import OCREngine, OCRWord
+from desktop.snapshot import (
     OCRRegion,
     ScreenSnapshot,
     _point_in_rect,
@@ -158,11 +160,11 @@ class TestCaptureSnapshot(unittest.TestCase):
         ocr.extract.return_value = words
         return ocr
 
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
+    @patch("desktop.snapshot._get_foreground_hwnd_and_title",
            return_value=(42, "Notepad"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
+    @patch("desktop.snapshot._get_foreground_process",
            return_value="notepad.exe")
-    @patch("core.capture.screen_snapshot._enum_visible_windows",
+    @patch("desktop.snapshot._enum_visible_windows",
            return_value=[
                (42, "Notepad", (0, 0, 800, 600)),
                (99, "AgentLog", (900, 0, 1920, 600)),
@@ -173,11 +175,11 @@ class TestCaptureSnapshot(unittest.TestCase):
         snap = capture_snapshot(capturer, ocr)
         self.assertEqual(snap.foreground_window_title, "Notepad")
 
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
+    @patch("desktop.snapshot._get_foreground_hwnd_and_title",
            return_value=(42, "Notepad"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
+    @patch("desktop.snapshot._get_foreground_process",
            return_value="notepad.exe")
-    @patch("core.capture.screen_snapshot._enum_visible_windows",
+    @patch("desktop.snapshot._enum_visible_windows",
            return_value=[
                (42, "Notepad", (0, 0, 800, 600)),
                (99, "AgentLog", (900, 0, 1920, 600)),
@@ -188,11 +190,11 @@ class TestCaptureSnapshot(unittest.TestCase):
         snap = capture_snapshot(capturer, ocr)
         self.assertEqual(snap.foreground_process, "notepad.exe")
 
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
+    @patch("desktop.snapshot._get_foreground_hwnd_and_title",
            return_value=(42, "Notepad"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
+    @patch("desktop.snapshot._get_foreground_process",
            return_value="notepad.exe")
-    @patch("core.capture.screen_snapshot._enum_visible_windows",
+    @patch("desktop.snapshot._enum_visible_windows",
            return_value=[
                (42, "Notepad", (0, 0, 800, 600)),
                (99, "AgentLog", (900, 0, 1920, 600)),
@@ -207,11 +209,11 @@ class TestCaptureSnapshot(unittest.TestCase):
         self.assertTrue(len(snap.ocr_regions) > 0)
         self.assertTrue(snap.ocr_regions[0].is_in_foreground)
 
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
+    @patch("desktop.snapshot._get_foreground_hwnd_and_title",
            return_value=(42, "Notepad"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
+    @patch("desktop.snapshot._get_foreground_process",
            return_value="notepad.exe")
-    @patch("core.capture.screen_snapshot._enum_visible_windows",
+    @patch("desktop.snapshot._enum_visible_windows",
            return_value=[
                (42, "Notepad",  (0, 0, 800, 600)),
                (99, "AgentLog", (1400, 0, 1920, 600)),
@@ -226,47 +228,29 @@ class TestCaptureSnapshot(unittest.TestCase):
         if snap.ocr_regions:
             self.assertFalse(snap.ocr_regions[0].is_in_foreground)
 
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
+    @patch("desktop.snapshot._get_foreground_hwnd_and_title",
            return_value=(42, "App"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
+    @patch("desktop.snapshot._get_foreground_process",
            return_value="app.exe")
-    @patch("core.capture.screen_snapshot._enum_visible_windows", return_value=[])
-    def test_low_confidence_words_filtered(self, *_mocks):
+    @patch("desktop.snapshot._enum_visible_windows", return_value=[])
+    def test_unusable_words_are_filtered(self, *_mocks):
+        """OCR noise never reaches the planner: too unsure to trust, too short
+        to identify a control, or path-like text that is content, not a label.
+        """
         capturer = self._make_capturer()
-        words = [_word("lo", x=10, y=10, w=20, h=10, conf=0.40)]
-        ocr = self._make_ocr(words)
-        snap = capture_snapshot(capturer, ocr)
-        self.assertEqual(len(snap.ocr_regions), 0)
+        for word in (
+            _word("lo", x=10, y=10, w=20, h=10, conf=0.40),        # low confidence
+            _word("a", x=10, y=10, w=10, h=10, conf=0.95),         # too short
+            _word("C:\\path", x=10, y=10, w=60, h=10, conf=0.95),  # special chars
+        ):
+            snap = capture_snapshot(capturer, self._make_ocr([word]))
+            self.assertEqual(len(snap.ocr_regions), 0, word.text)
 
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
-           return_value=(42, "App"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
-           return_value="app.exe")
-    @patch("core.capture.screen_snapshot._enum_visible_windows", return_value=[])
-    def test_short_words_filtered(self, *_mocks):
-        capturer = self._make_capturer()
-        words = [_word("a", x=10, y=10, w=10, h=10, conf=0.95)]
-        ocr = self._make_ocr(words)
-        snap = capture_snapshot(capturer, ocr)
-        self.assertEqual(len(snap.ocr_regions), 0)
-
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
-           return_value=(42, "App"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
-           return_value="app.exe")
-    @patch("core.capture.screen_snapshot._enum_visible_windows", return_value=[])
-    def test_special_char_words_filtered(self, *_mocks):
-        capturer = self._make_capturer()
-        words = [_word("C:\\path", x=10, y=10, w=60, h=10, conf=0.95)]
-        ocr = self._make_ocr(words)
-        snap = capture_snapshot(capturer, ocr)
-        self.assertEqual(len(snap.ocr_regions), 0)
-
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
+    @patch("desktop.snapshot._get_foreground_hwnd_and_title",
            return_value=(0, "Desktop"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
+    @patch("desktop.snapshot._get_foreground_process",
            return_value="unknown")
-    @patch("core.capture.screen_snapshot._enum_visible_windows", return_value=[])
+    @patch("desktop.snapshot._enum_visible_windows", return_value=[])
     def test_non_windows_all_regions_foreground(self, *_mocks):
         # fg_hwnd==0 → treat everything as foreground
         capturer = self._make_capturer()
@@ -276,11 +260,11 @@ class TestCaptureSnapshot(unittest.TestCase):
         for r in snap.ocr_regions:
             self.assertTrue(r.is_in_foreground)
 
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
+    @patch("desktop.snapshot._get_foreground_hwnd_and_title",
            return_value=(42, "App"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
+    @patch("desktop.snapshot._get_foreground_process",
            return_value="app.exe")
-    @patch("core.capture.screen_snapshot._enum_visible_windows", return_value=[])
+    @patch("desktop.snapshot._enum_visible_windows", return_value=[])
     def test_screen_hash_populated(self, *_mocks):
         capturer = self._make_capturer()
         ocr = self._make_ocr([])
@@ -288,11 +272,11 @@ class TestCaptureSnapshot(unittest.TestCase):
         self.assertIsNotNone(snap.screen_hash)
         self.assertGreater(len(snap.screen_hash), 0)
 
-    @patch("core.capture.screen_snapshot._get_foreground_hwnd_and_title",
+    @patch("desktop.snapshot._get_foreground_hwnd_and_title",
            return_value=(42, "App"))
-    @patch("core.capture.screen_snapshot._get_foreground_process",
+    @patch("desktop.snapshot._get_foreground_process",
            return_value="app.exe")
-    @patch("core.capture.screen_snapshot._enum_visible_windows", return_value=[])
+    @patch("desktop.snapshot._enum_visible_windows", return_value=[])
     def test_timestamp_recent(self, *_mocks):
         capturer = self._make_capturer()
         ocr = self._make_ocr([])
@@ -305,28 +289,20 @@ class TestCaptureSnapshot(unittest.TestCase):
 
 # ── TestPointInRect helper ─────────────────────────────────────────────────────
 
-class TestPointInRect(unittest.TestCase):
+RECT = (0, 0, 100, 100)   # left/top inclusive, right/bottom exclusive
 
-    def test_inside(self):
-        self.assertTrue(_point_in_rect(50, 50, (0, 0, 100, 100)))
 
-    def test_left_edge(self):
-        self.assertTrue(_point_in_rect(0, 50, (0, 0, 100, 100)))
-
-    def test_top_edge(self):
-        self.assertTrue(_point_in_rect(50, 0, (0, 0, 100, 100)))
-
-    def test_right_edge_exclusive(self):
-        self.assertFalse(_point_in_rect(100, 50, (0, 0, 100, 100)))
-
-    def test_bottom_edge_exclusive(self):
-        self.assertFalse(_point_in_rect(50, 100, (0, 0, 100, 100)))
-
-    def test_outside_left(self):
-        self.assertFalse(_point_in_rect(-1, 50, (0, 0, 100, 100)))
-
-    def test_outside_right(self):
-        self.assertFalse(_point_in_rect(101, 50, (0, 0, 100, 100)))
+@pytest.mark.parametrize("x, y, inside", [
+    (50, 50, True),     # interior
+    (0, 50, True),      # left edge  — inclusive
+    (50, 0, True),      # top edge   — inclusive
+    (100, 50, False),   # right edge — exclusive
+    (50, 100, False),   # bottom edge — exclusive
+    (-1, 50, False),
+    (101, 50, False),
+])
+def test_point_in_rect(x, y, inside):
+    assert _point_in_rect(x, y, RECT) is inside
 
 
 # ── TestPlannerFormattedOutput ─────────────────────────────────────────────────
@@ -352,7 +328,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
 
         planner.client.query_llm = fake_query_llm
 
-        from core.protocols import SubTask
+        from core.types import SubTask
         subtask = SubTask(id=1, description="create a folder")
         planner.plan_next_step(subtask, screen_context="old flat context", snapshot=snap)
 
@@ -374,7 +350,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
 
         planner.client.query_llm = fake_query_llm
 
-        from core.protocols import SubTask
+        from core.types import SubTask
         subtask = SubTask(id=1, description="do something")
         planner.plan_next_step(subtask, snapshot=snap)
 
@@ -394,7 +370,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
 
         planner.client.query_llm = fake_query_llm
 
-        from core.protocols import SubTask
+        from core.types import SubTask
         subtask = SubTask(id=1, description="do something")
         planner.plan_next_step(subtask, screen_context="flat token list")
 
@@ -403,7 +379,7 @@ class TestPlannerFormattedOutput(unittest.TestCase):
     def test_snapshot_none_does_not_crash(self):
         planner = self._make_planner()
         planner.client.query_llm = MagicMock(return_value=MagicMock(content="[]"))
-        from core.protocols import SubTask
+        from core.types import SubTask
         subtask = SubTask(id=1, description="do something")
         result = planner.plan_next_step(subtask, snapshot=None)
         self.assertIsNone(result)

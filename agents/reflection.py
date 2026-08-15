@@ -19,13 +19,20 @@ from dataclasses import dataclass
 from loguru import logger
 from PIL import Image
 
-from agents.grounding import OCREngine
-from core.capture.screenshot import ScreenCapture
-from core.protocols import ActionStep, InferenceClient
+from core.inference import InferenceClient
+from core.types import ActionStep
+from desktop.capture import ScreenCapture
+from desktop.ocr import OCREngine
 
 
 @dataclass
 class ReflectionResult:
+    """Verdict on whether one action step succeeded, returned by the verifier.
+
+    `should_retry` and `recovery_hint` steer the orchestrator's next move when
+    `success` is False; `ocr_text` is handed back so the next plan can reuse it.
+    """
+
     success: bool
     confidence: float
     observation: str
@@ -39,14 +46,14 @@ class ReflectionResult:
 # Sent to the LLM with OCR text. Much more reliable than asking a grounding
 # VLM to reason about conditional success criteria.
 
-_LLM_SYSTEM = "You are a desktop automation verifier. Reply with valid JSON only."
-
-_LLM_REFLECTION_PROMPT = """\
-Verify whether a desktop automation step succeeded.
-
-STEP     : {action_type} — {description}
-EXPECTED : {verification}
-SCREEN TEXT (OCR after action): {ocr_text}
+# The per-action rules used to sit BELOW the step and the OCR text, in the same
+# user turn. That is ~450 tokens of constant instructions parked behind a block
+# that is different on every single step, so the server's prefix cache could
+# never hold them and the GPU re-read them once per verification. Constant text
+# belongs in the system turn, which is identical call after call — same words to
+# the model, now read once and reused.
+_LLM_SYSTEM = """\
+You are a desktop automation verifier. Reply with valid JSON only.
 
 Rules — base your verdict on evidence in the screen text:
   click/right_click  : SUCCEED only if a new menu, dialog, window title, or
@@ -73,8 +80,16 @@ Rules — base your verdict on evidence in the screen text:
                        Do NOT default to success when uncertain.
 
 Reply JSON only:
-{{"success": true/false, "confidence": 0.0-1.0, "observation": "one sentence", \
-"error_description": "", "should_retry": true/false, "recovery_hint": ""}}"""
+{"success": true/false, "confidence": 0.0-1.0, "observation": "one sentence", \
+"error_description": "", "should_retry": true/false, "recovery_hint": ""}"""
+
+# Only the parts that change from step to step.
+_LLM_REFLECTION_PROMPT = """\
+Verify whether a desktop automation step succeeded.
+
+STEP     : {action_type} — {description}
+EXPECTED : {verification}
+SCREEN TEXT (OCR after action): {ocr_text}"""
 
 
 # ── VLM reflection prompt (fallback for icon-heavy / sparse screens) ──────────
@@ -108,7 +123,7 @@ Reply JSON only:
 # Actions whose success is judged visually (a menu, selection highlight, toggle
 # state, icon change) rather than by text. For these, an uncertain OCR→LLM verdict
 # is escalated to a pixel-level VLM check — the LLM never saw the screenshot.
-_VISUAL_ACTIONS = ("click", "right_click", "double_click", "scroll", "drag")
+_VISUAL_ACTIONS = ("click", "right_click", "double_click", "scroll")
 
 
 class ReflectionAgent:
@@ -134,13 +149,19 @@ class ReflectionAgent:
     # ── public API ────────────────────────────────────────────────────────────
 
     def verify(self, step: ActionStep, wait_s: float = 1.5,
-               pre_hash=None) -> ReflectionResult:
+               pre_hash=None, controls_before: set | None = None) -> ReflectionResult:
         """Verify if an action step succeeded.
         1. For click actions: use pre_hash (captured by orchestrator BEFORE the action)
            as the baseline. Falls back to capturing after-action if pre_hash is None.
         2. Adaptive wait for UI to settle.
         3. Capture after-screenshot; if hash unchanged for click → immediate failure.
         4. OCR → LLM (primary) or VLM (fallback if screen is icon-heavy).
+
+        controls_before: pre-action snapshot of accessibility-tree control
+        labels. When given, the LLM judge also sees which controls appeared/
+        disappeared — tree-level proof of effect on WebView2 screens whose
+        pixels OCR cannot read (live: an attendee click was judged FAILED
+        while 'Remove <email>' [Button] had appeared in the tree).
         """
         if step.action_type == "wait":
             try:
@@ -154,7 +175,7 @@ class ReflectionAgent:
                 should_retry=False, recovery_hint=""
             )
 
-        from core.capture.screenshot import frame_phash
+        from desktop.capture import frame_phash
 
         _CLICK_ACTIONS = ("click", "right_click", "double_click")
         # Use the pre-action hash captured by the orchestrator before execute() fires.
@@ -168,11 +189,12 @@ class ReflectionAgent:
         # Capture once — reuse for both paths
         screenshot = self.capturer.capture()
 
+        _after_hash = frame_phash(screenshot) if _before_hash is not None else None
         if _before_hash is not None:
             # High-fidelity frame comparison (H2). delta==0 now genuinely means
             # "nothing changed on screen", so a click that opened a small menu is
             # no longer mis-scored as a no-op.
-            if (_before_hash - frame_phash(screenshot)) == 0:
+            if (_before_hash - _after_hash) == 0:
                 result = ReflectionResult(
                     success=False,
                     confidence=0.98,
@@ -189,7 +211,7 @@ class ReflectionAgent:
                     f"[REFLECTION] {result.error_description} | hint: {result.recovery_hint}"
                 )
                 return result
-        from core.capture.screenshot import OCR_THUMB
+        from desktop.capture import OCR_THUMB
         thumb = screenshot.copy()
         thumb.thumbnail(OCR_THUMB)
         words = self._ocr.extract(thumb)
@@ -206,7 +228,15 @@ class ReflectionAgent:
         _used_llm = len(meaningful) >= 3 or _force_llm
         if _used_llm:
             ocr_text = ", ".join(w.text for w in meaningful[:40]) if meaningful else "(screen appears blank or icon-only)"
-            result = self._verify_with_llm(step, ocr_text, verification)
+            # Focus is INVISIBLE to OCR: "the address bar is now focused"
+            # cannot be confirmed from screen text, so the verifier failed
+            # successful ctrl+l hotkeys forever (seen live, 12 retries).
+            # Give the LLM the accessibility tree's answer as ground truth.
+            focus_note = self._focused_control_note()
+            controls_note = self._controls_delta_note(controls_before)
+            result = self._verify_with_llm(
+                step, ocr_text + focus_note + controls_note, verification
+            )
             result.ocr_text = ocr_text
         else:
             ocr_text = ""
@@ -234,7 +264,33 @@ class ReflectionAgent:
                 vlm_result = self._verify_with_vlm(
                     step, self._encode(screenshot), verification
                 )
-                result = self._reconcile(result, vlm_result)
+                # Pixel evidence outranks the VLM's judgement: a click that was
+                # supposed to reveal new UI cannot have succeeded when the
+                # screen is near-identical to the pre-click frame (≤2 of 64
+                # phash bits — cursor/hover noise). VLM verifiers hallucinate
+                # "the dialog appeared" on such frames (seen live, 4×), which
+                # cascades into false task completion.
+                if (
+                    vlm_result.success
+                    and _before_hash is not None
+                    and (_before_hash - _after_hash) <= 2
+                ):
+                    logger.info(
+                        "[REFLECTION] VLM claims success but the screen is "
+                        "nearly unchanged since before the click — distrusting"
+                    )
+                    result.success = False
+                    result.should_retry = True
+                    result.error_description = (
+                        result.error_description
+                        or "Screen barely changed after the click"
+                    )
+                    result.recovery_hint = (
+                        result.recovery_hint
+                        or "Re-ground the target element; it may have moved or become inactive"
+                    )
+                else:
+                    result = self._reconcile(result, vlm_result)
                 result.ocr_text = ocr_text   # preserve OCR for orchestrator reuse
             except Exception as e:
                 logger.debug(
@@ -251,6 +307,67 @@ class ReflectionAgent:
         return result
 
     # ── verification paths ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _focused_control_note() -> str:
+        """One-line ground truth about which control owns keyboard focus.
+
+        Appended to the OCR text given to the LLM verifier so outcomes that
+        are invisible to OCR (focus moves, caret placement, a field being
+        selected) are verifiable against the accessibility tree instead of
+        being systematically failed. ~50 ms; empty string when unavailable.
+        """
+        try:
+            from desktop.uia import focused_element_info
+            info = focused_element_info(timeout_s=0.8)
+            if info:
+                name = info["name"][:60]
+                value = (info["value"] or "").strip()[:60]
+                return (
+                    f"\nKeyboard focus (accessibility tree, ground truth): "
+                    f"{info['control_type']} '{name}'"
+                    + (f" containing '{value}'" if value else " (empty)")
+                )
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _controls_delta_note(before: set | None) -> str:
+        """Which accessibility-tree controls appeared/disappeared since the
+        pre-action snapshot — ground truth the OCR text cannot provide.
+        Empty string when no snapshot was given or the tree is unreadable.
+        """
+        if not before:
+            return ""
+        try:
+            from desktop.uia import get_interactive_elements
+            now = {
+                f"'{n}' [{t}]"
+                for n, t in get_interactive_elements(
+                    max_elements=60, timeout_s=1.5
+                )
+            }
+            if not now:
+                return ""
+            appeared = sorted(now - before)[:8]
+            gone = sorted(before - now)[:8]
+            if not appeared and not gone:
+                return (
+                    "\nUI controls (accessibility tree, ground truth): no "
+                    "interactive controls appeared or disappeared after the action"
+                )
+            parts = []
+            if appeared:
+                parts.append("appeared: " + ", ".join(appeared))
+            if gone:
+                parts.append("disappeared: " + ", ".join(gone))
+            return (
+                "\nUI control changes after the action (accessibility tree, "
+                "ground truth): " + "; ".join(parts)
+            )
+        except Exception:
+            return ""
 
     def _verify_with_llm(
         self, step: ActionStep, ocr_text: str, verification: str
@@ -311,7 +428,7 @@ class ReflectionAgent:
         )
         is_snap_launch = (
             step.action_type == "type" and
-            any(w in (step.value or "").lower() for w in ("firefox", "thunderbird"))
+            any(w in (step.value or "").lower() for w in ("teams", "thunderbird"))
         )
         if is_app_launch:
             return 1.5, 3.0
@@ -415,7 +532,6 @@ class ReflectionAgent:
 # match wins, so more specific combos must come before their prefixes).
 _HOTKEY_HINTS = {
     "ctrl+shift+s": "Save As dialog appeared",
-    "ctrl+alt+t":   "terminal window opened",
     "ctrl+s": (
         "File saved — silence is success (named file saves with no dialog). "
         "A Save-As dialog appearing is also success. Fail only if an error message appears."

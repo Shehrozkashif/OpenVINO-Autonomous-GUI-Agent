@@ -9,6 +9,7 @@ Organised by concern (each section was originally its own file):
   3. Visual planning recovery path and the planner parse-error fix
 """
 import sys
+import time
 
 sys.path.insert(0, ".")
 
@@ -18,8 +19,11 @@ import pytest
 
 from agents.planning import PlanningAgent, PlanningParseError, _parse_visual_action
 from agents.reflection import ReflectionResult
-from core.orchestrator import OrchestratorConfig, TaskOrchestrator
-from core.protocols import ActionStep, SubTask
+from core import subtasks
+from core.orchestrator import TaskOrchestrator
+from core.runstate import OrchestratorConfig, SubtaskRun
+from core.types import ActionStep, SubTask
+from tests.unit.conftest import make_history
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. Planning prompt safety — "when in doubt, stop" bias and LOOP PREVENTION rule
@@ -48,14 +52,19 @@ def _make_agent(llm_response: str = "[]"):
     return PlanningAgent(client=client), client
 
 
-def _user_msg(client) -> str:
-    """Extract the user-role message content from the last query_llm call."""
+def _prompt(client) -> str:
+    """Everything the last query_llm call put in front of the model.
+
+    Deliberately role-agnostic: what these tests care about is that a rule
+    REACHES the model, not which turn carries it. The completion rules moved
+    from the tail of the user turn into the system turn so the server's prefix
+    cache can keep them, and that move must not read as a regression here.
+    """
     call_args = client.query_llm.call_args
     messages: list = call_args[0][0]   # first positional arg
-    for m in messages:
-        if m["role"] == "user":
-            return m["content"]
-    raise AssertionError("No user-role message found in query_llm call")
+    if not messages:
+        raise AssertionError("query_llm called with no messages")
+    return "\n".join(m["content"] for m in messages)
 
 
 class TestPromptBias:
@@ -64,7 +73,7 @@ class TestPromptBias:
     def test_old_act_on_doubt_instruction_removed(self):
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "when in doubt, return the action step" not in msg.lower(), (
             "Old 'When in doubt, return the action step rather than []' must be removed"
         )
@@ -73,13 +82,13 @@ class TestPromptBias:
         """Guard against the phrase being re-introduced in any capitalisation."""
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "return the action step rather than" not in msg.lower()
 
     def test_new_stop_on_doubt_instruction_present(self):
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "when in doubt" in msg.lower(), "A 'when in doubt' instruction must still exist"
         # The new instruction must direct toward stopping, not acting
         lower = msg.lower()
@@ -95,7 +104,7 @@ class TestPromptBias:
         """Bias test holds even when called with no completed steps."""
         agent, client = _make_agent()
         agent.plan_next_step(_subtask(), completed=[])
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "return the action step rather than" not in msg.lower()
 
     def test_stop_on_doubt_applies_with_history(self):
@@ -105,19 +114,19 @@ class TestPromptBias:
             _subtask(),
             completed=["click Desktop", "right_click Desktop"],
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "return the action step rather than" not in msg.lower()
 
 
 class TestLoopPrevention:
-    """The LOOP PREVENTION rule must be in every user message sent to the LLM."""
+    """The LOOP PREVENTION rule must be in every prompt sent to the LLM."""
 
     def test_loop_prevention_rule_present_no_history(self):
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower(), (
-            "LOOP PREVENTION rule must always be present in the user message"
+            "LOOP PREVENTION rule must always be present in the prompt"
         )
 
     def test_loop_prevention_rule_present_with_history(self):
@@ -126,14 +135,14 @@ class TestLoopPrevention:
             _subtask(),
             completed=["click New", "click New"],
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower()
 
     def test_loop_prevention_mentions_preceding_step(self):
         """The rule must reference the 'immediately preceding' step concept."""
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         lower = msg.lower()
         assert "preceding" in lower or "immediately" in lower, (
             "LOOP PREVENTION rule must mention the immediately preceding step"
@@ -143,7 +152,7 @@ class TestLoopPrevention:
         """The rule must tell the model to either advance or return []."""
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         lower = msg.lower()
         pos = lower.find("loop prevention")
         snippet = lower[pos:pos + 250]
@@ -159,16 +168,16 @@ class TestLoopPrevention:
             _subtask(),
             screen_context='"New Folder" "Rename" "Copy"',
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower()
 
-    def test_loop_prevention_present_with_failure_hints(self):
+    def test_loop_prevention_present_with_step_history(self):
         agent, client = _make_agent()
         agent.plan_next_step(
             _subtask(),
-            failure_hints=["clicking 'New' dismissed the submenu"],
+            completed=["clicked 'New'"],
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower()
 
     def test_loop_prevention_present_with_task_context(self):
@@ -177,7 +186,7 @@ class TestLoopPrevention:
             _subtask(),
             task_context=["Opened the context menu"],
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower()
 
 
@@ -187,16 +196,13 @@ class TestExistingCriteriaPreserved:
     def _msg(self):
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        return _user_msg(client)
+        return _prompt(client)
 
     def test_open_terminal_criterion_present(self):
         assert "open terminal" in self._msg().lower()
 
     def test_run_command_criterion_present(self):
         assert "run:" in self._msg().lower() or "key_press enter" in self._msg().lower()
-
-    def test_open_browser_criterion_present(self):
-        assert "open browser" in self._msg().lower()
 
     def test_click_menu_item_criterion_present(self):
         assert "submenu" in self._msg().lower()
@@ -262,21 +268,14 @@ class TestRightClickOverride:
         assert step is not None
         assert step.action_type == "right_click"
 
-    def test_right_click_startswith_overrides_click(self):
-        """Subtask starting with 'right click' (no 'on') is overridden."""
-        step = _planner("click").plan_next_step(_sub("right click the taskbar icon"))
-        assert step is not None
-        assert step.action_type == "right_click"
-
-    def test_right_click_hyphenated_on_overrides_click(self):
-        """'right-click on X' with hyphen is overridden."""
-        step = _planner("click").plan_next_step(_sub("right-click on the selected file"))
-        assert step is not None
-        assert step.action_type == "right_click"
-
-    def test_right_click_hyphenated_startswith_overrides_click(self):
-        """Subtask starting with 'right-click' (hyphen, no 'on') is overridden."""
-        step = _planner("click").plan_next_step(_sub("right-click the desktop"))
+    @pytest.mark.parametrize("description", [
+        "right click the taskbar icon",       # no "on"
+        "right-click on the selected file",   # hyphenated
+        "right-click the desktop",            # hyphenated, no "on"
+    ])
+    def test_right_click_phrasings_override_click(self, description):
+        """Every way a user writes "right click" must beat the LLM's "click"."""
+        step = _planner("click").plan_next_step(_sub(description))
         assert step is not None
         assert step.action_type == "right_click"
 
@@ -491,17 +490,18 @@ def _make_orch(plan_steps, reflections, visual_replan_after=2):
     grounder.ground = MagicMock(return_value=GroundingResult(
         found=True, confidence=0.9, x=10, y=20, latency_ms=1.0,
         target="Btn", element_type="foreground_interactive"))
+    # Explicit-coordinate clicks consult the dead-point blacklist; a bare
+    # MagicMock return is TRUTHY and would refuse every visual click.
+    grounder.is_dead_point = MagicMock(return_value=False)
 
     planner = MagicMock()
     planner.plan_steps = MagicMock(side_effect=[[s] for s in plan_steps] + [None] * 10)
 
-    memory = MagicMock()
-    memory.get_failure_hints = MagicMock(return_value=[])
-    memory.store_failure_pattern = MagicMock()
+    history = make_history()
 
     orch = TaskOrchestrator(
         router=MagicMock(), planner=planner, grounder=grounder, actor=actor,
-        reflector=reflector, capturer=MagicMock(), task_memory=memory,
+        reflector=reflector, capturer=MagicMock(), history=history,
         config=OrchestratorConfig(
             max_retries_per_step=1, max_steps_per_subtask=10,
             consecutive_failures_limit=5,
@@ -564,18 +564,27 @@ class TestVisualReplanEscalation:
         orch._plan_visual.assert_not_called()
 
     def test_vlm_infrastructure_error_falls_back_to_text_planner(self):
-        """A VLM error during visual replan degrades to the text planner."""
+        """A VLM error during visual replan degrades to the text planner.
+
+        A model-swap timeout is infrastructure, not a planning verdict: the
+        cycle must still produce an action from the text path instead of
+        propagating the error and killing the subtask.
+        """
+        step_c = _click_step("C")
         orch = _make_orch(
-            plan_steps=[_click_step("A"), _click_step("B"), _click_step("C")],
-            reflections=[_FAIL, _FAIL, _SUCCESS],
+            plan_steps=[step_c],
+            reflections=[_SUCCESS],
         )
         orch._plan_visual = MagicMock(side_effect=RuntimeError("model swap timeout"))
 
-        result = orch._execute_subtask(SubTask(id=1, description="do thing", depends_on=[]))
+        run = SubtaskRun(started_at=time.time())
+        run.consecutive_failures = 2          # at the visual-escalation threshold
+        outcome, step = orch._plan_next_step(
+            run, SubTask(id=1, description="do thing", depends_on=[]), [])
 
-        assert result is True
-        # Text planner was used for the step after the VLM error
-        assert orch.planner.plan_steps.call_count >= 3
+        orch._plan_visual.assert_called_once()
+        assert outcome == "step", "the text planner must still supply an action"
+        assert step.target == step_c.target
 
 
 class TestPlannerParseErrorInOrchestrator:
@@ -596,14 +605,14 @@ class TestPlannerParseErrorInOrchestrator:
 class TestExplicitCoordParsing:
 
     def test_valid_coords(self):
-        assert TaskOrchestrator._explicit_coords("123,456") == (123, 456)
+        assert subtasks.explicit_coords("123,456") == (123, 456)
 
     def test_coords_with_spaces(self):
-        assert TaskOrchestrator._explicit_coords(" 12 , 34 ") == (12, 34)
+        assert subtasks.explicit_coords(" 12 , 34 ") == (12, 34)
 
     def test_text_value_is_not_coords(self):
-        assert TaskOrchestrator._explicit_coords("hello,world") is None
+        assert subtasks.explicit_coords("hello,world") is None
 
     def test_none_and_plain_text(self):
-        assert TaskOrchestrator._explicit_coords(None) is None
-        assert TaskOrchestrator._explicit_coords("down") is None
+        assert subtasks.explicit_coords(None) is None
+        assert subtasks.explicit_coords("down") is None

@@ -31,6 +31,7 @@ from ui.icons import icon_pixmap
 from ui.theme import STATE_STYLE, C, S
 from ui.widgets import (
     CommandInput,
+    ElidedLabel,
     EmptyState,
     GlassCard,
     MetricTile,
@@ -40,6 +41,34 @@ from ui.widgets import (
     Timeline,
     relative_time,
 )
+
+# One-click demo prompt: always shown as the FIRST suggestion chip. Used to
+# test all three grounding stages (UIA / OCR / VLM) with the exact same task —
+# it names every navigation step so the agent works even without the UIA
+# control list (OCR/VLM modes).
+#
+# The date is computed, not written in. A literal date silently becomes a past
+# date the moment it passes, and the demo then books a meeting in the past for
+# everyone who clicks it. Two weeks out is far enough to stay clear of the
+# current week in any timezone.
+# The attendee is example.com on purpose: whoever clicks this chip is sending a
+# real calendar invite, so it must never carry a live address.
+_DEMO_DATE = (datetime.date.today() + datetime.timedelta(days=14)).strftime("%m/%d/%Y")
+DEMO_PROMPT = (
+    "open Microsoft Teams, click the Calendar button in the left sidebar, "
+    "click the New meeting button, set the title to 'PROJECT DISCUSSION', "
+    f"set the date to {_DEMO_DATE}, set the start time to 3:00 PM, set the end "
+    "time to 3:30 PM, add attendee alex@example.com, then click "
+    "Save to create the meeting"
+)
+
+# Widest a suggestion chip may get. A row of them plus the page margins has to
+# fit the centre column, which is ~970 px once the nav rail and the activity
+# panel take their share of a 1480 px window — and only ~530 px at the smallest
+# window size we allow.
+_CHIP_MAX_W = 200
+_CHIP_PADDING = 28   # the chip's own left/right padding, from the stylesheet
+_CHIP_COLS = 2
 
 _SUGGESTIONS = [
     "Open Notepad and write a haiku about automation",
@@ -124,9 +153,9 @@ class HomePage(QWidget):
     suggestion_chosen = pyqtSignal(str)
     run_requested = pyqtSignal(str)
 
-    def __init__(self, get_memory, bus: AgentEventBus, parent=None):
+    def __init__(self, get_history, bus: AgentEventBus, parent=None):
         super().__init__(parent)
-        self.get_memory = get_memory
+        self.get_history = get_history
         inner = QWidget()
         root = QVBoxLayout(inner)
         root.setContentsMargins(S.XL, S.XL, S.XL, S.XL)
@@ -166,19 +195,22 @@ class HomePage(QWidget):
         sug_cap = QLabel("SUGGESTED MISSIONS")
         sug_cap.setProperty("role", "micro")
         root.addWidget(sug_cap)
-        self.sug_row = QHBoxLayout()
+        # A grid, not a row: four chips side by side ask for ~800 px, which is
+        # more than the centre column has on a 1366-wide laptop with the
+        # activity panel open. Two columns fit at every window size we allow.
+        self.sug_row = QGridLayout()
         self.sug_row.setSpacing(8)
-        self.sug_row.addStretch()
+        self.sug_row.setContentsMargins(0, 0, 0, 0)
+        self.sug_row.setColumnStretch(_CHIP_COLS, 1)   # keep chips left-packed
         root.addLayout(self.sug_row)
 
         # ── Metrics ────────────────────────────────────────────
         grid = QHBoxLayout()
         grid.setSpacing(S.MD)
-        self.m_automations = MetricTile("Automations learned", "flow", C.ACCENT2)
+        self.m_automations = MetricTile("Tasks recorded", "flow", C.ACCENT2)
         self.m_runs = MetricTile("Successful runs", "check", C.SUCCESS)
         self.m_avg = MetricTile("Avg task duration", "clock", C.ACCENT)
-        self.m_patterns = MetricTile("Failure patterns avoided", "shield", C.WARNING)
-        for m in (self.m_automations, self.m_runs, self.m_avg, self.m_patterns):
+        for m in (self.m_automations, self.m_runs, self.m_avg):
             grid.addWidget(m, stretch=1)
         root.addLayout(grid)
 
@@ -213,13 +245,11 @@ class HomePage(QWidget):
         super().showEvent(e)
 
     def refresh(self):
-        mem = self.get_memory()
-        tasks, patterns = [], 0
+        mem = self.get_history()
+        tasks = []
         if mem is not None:
             try:
                 tasks = mem.get_recent_tasks(limit=30)
-                patterns = mem.conn.execute(
-                    "SELECT COUNT(*) FROM failure_patterns").fetchone()[0]
             except Exception:
                 pass
 
@@ -227,22 +257,31 @@ class HomePage(QWidget):
         self.m_runs.set_value(str(sum(t["success_count"] for t in tasks)))
         durs = [t["avg_duration_s"] for t in tasks if t["avg_duration_s"]]
         self.m_avg.set_value(f"{sum(durs) / len(durs):.0f}s" if durs else "-")
-        self.m_patterns.set_value(str(patterns))
 
-        # suggestion chips: 2 from memory + canned examples
-        while self.sug_row.count() > 1:
+        # suggestion chips: 2 from task history + canned examples
+        while self.sug_row.count():
             it = self.sug_row.takeAt(0)
             if it.widget():
                 it.widget().deleteLater()
-        chips = [t["instruction"] for t in tasks[:2]]
+        chips = [DEMO_PROMPT]
+        chips += [t["instruction"] for t in tasks[:2] if t["instruction"] != DEMO_PROMPT]
         chips += [s for s in _SUGGESTIONS if s not in chips]
-        for text in chips[:4]:
-            b = QPushButton(text if len(text) <= 52 else text[:50] + "...")
+        for slot, text in enumerate(chips[:4]):
+            label = "Demo: schedule Teams meeting" if text == DEMO_PROMPT else text
+            b = QPushButton()
+            # Capped in pixels, not characters. Four chips sit in one row, so a
+            # 52-character cap let the row ask for ~1150 px — more than the
+            # centre column gets on a 1480 px window, which is half of why this
+            # page used to overflow sideways. Eliding against the real font is
+            # also honest about width in a way a character count is not.
+            b.setMaximumWidth(_CHIP_MAX_W)
+            b.setText(b.fontMetrics().elidedText(
+                label, Qt.TextElideMode.ElideRight, _CHIP_MAX_W - _CHIP_PADDING))
             b.setProperty("kind", "chip")
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(text)
             b.clicked.connect(lambda _, t=text: self._pick(t))
-            self.sug_row.insertWidget(self.sug_row.count() - 1, b)
+            self.sug_row.addWidget(b, slot // _CHIP_COLS, slot % _CHIP_COLS)
 
         # recent list
         while self.recent_box.count():
@@ -265,7 +304,7 @@ class HomePage(QWidget):
             ic = QLabel()
             ic.setPixmap(icon_pixmap("bolt", QColor(C.ACCENT), 16))
             cl.addWidget(ic)
-            name = QLabel(t["instruction"])
+            name = ElidedLabel(t["instruction"])
             name.setStyleSheet("font-size: 13px;")
             cl.addWidget(name, stretch=1)
             meta = QLabel(
@@ -389,7 +428,7 @@ class MissionPage(QWidget):
         """Logical screen size - the grounder's coordinate space."""
         if self._screen_dims is None:
             try:
-                from core.capture.screenshot import _screen_size
+                from desktop.capture import _screen_size
                 w, h = _screen_size()
             except Exception:
                 geo = self.screen().geometry()
@@ -433,9 +472,9 @@ def _stat(caption: str, value: str, stretch: bool = False):
 class SessionsPage(QWidget):
     rerun = pyqtSignal(str)
 
-    def __init__(self, get_memory, parent=None):
+    def __init__(self, get_history, parent=None):
         super().__init__(parent)
-        self.get_memory = get_memory
+        self.get_history = get_history
         root = QVBoxLayout(self)
         root.setContentsMargins(S.XL, S.LG, S.XL, S.LG)
         root.setSpacing(S.MD)
@@ -466,7 +505,7 @@ class SessionsPage(QWidget):
             it = self.list_lay.takeAt(0)
             if it.widget():
                 it.widget().deleteLater()
-        mem = self.get_memory()
+        mem = self.get_history()
         tasks = []
         if mem is not None:
             try:
@@ -518,15 +557,15 @@ class SessionsPage(QWidget):
 class WorkflowsPage(QWidget):
     run_workflow = pyqtSignal(str)
 
-    def __init__(self, get_memory, parent=None):
+    def __init__(self, get_history, parent=None):
         super().__init__(parent)
-        self.get_memory = get_memory
+        self.get_history = get_history
         root = QVBoxLayout(self)
         root.setContentsMargins(S.XL, S.LG, S.XL, S.LG)
         root.setSpacing(S.MD)
         root.addWidget(SectionHeader(
             "Workflow Library",
-            "Proven automations the agent has learned. One click to replay."))
+            "Tasks that completed cleanly here. One click to replay."))
         self.grid_host = QWidget()
         self.grid = QGridLayout(self.grid_host)
         self.grid.setSpacing(S.MD)
@@ -542,7 +581,7 @@ class WorkflowsPage(QWidget):
             it = self.grid.takeAt(0)
             if it.widget():
                 it.widget().deleteLater()
-        mem = self.get_memory()
+        mem = self.get_history()
         tasks = []
         if mem is not None:
             try:
@@ -589,34 +628,29 @@ class WorkflowsPage(QWidget):
         self.grid.setRowStretch(self.grid.rowCount(), 1)
 
 
-# ── Memory ────────────────────────────────────────────────────────────────────
+# ── Task history ──────────────────────────────────────────────────────────────
 
-class MemoryPage(QWidget):
-    def __init__(self, get_memory, parent=None):
+class TaskHistoryPage(QWidget):
+    def __init__(self, get_history, parent=None):
         super().__init__(parent)
-        self.get_memory = get_memory
+        self.get_history = get_history
         inner = QWidget()
         root = QVBoxLayout(inner)
         root.setContentsMargins(S.XL, S.LG, S.XL, S.LG)
         root.setSpacing(S.MD)
         root.addWidget(SectionHeader(
-            "Agent Memory",
-            "What the agent has learned - successes it can reuse and failure "
-            "patterns it now avoids."))
+            "Task History",
+            "Every task that completed cleanly on this machine. It is a "
+            "record for you - the agent plans from the live screen, not "
+            "from these runs."))
 
-        cap1 = QLabel("LEARNED TASKS  (semantic memory)")
+        cap1 = QLabel("COMPLETED TASKS")
         cap1.setProperty("role", "micro")
         root.addWidget(cap1)
-        self.learned_box = QVBoxLayout()
-        self.learned_box.setSpacing(6)
-        root.addLayout(self.learned_box)
+        self.history_box = QVBoxLayout()
+        self.history_box.setSpacing(6)
+        root.addLayout(self.history_box)
 
-        cap2 = QLabel("FAILURE PATTERNS  (episodic memory)")
-        cap2.setProperty("role", "micro")
-        root.addWidget(cap2)
-        self.fail_box = QVBoxLayout()
-        self.fail_box.setSpacing(6)
-        root.addLayout(self.fail_box)
         root.addStretch()
 
         outer = QVBoxLayout(self)
@@ -628,67 +662,34 @@ class MemoryPage(QWidget):
         super().showEvent(e)
 
     def refresh(self):
-        for box in (self.learned_box, self.fail_box):
-            while box.count():
-                it = box.takeAt(0)
-                if it.widget():
-                    it.widget().deleteLater()
-        mem = self.get_memory()
+        while self.history_box.count():
+            it = self.history_box.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        mem = self.get_history()
         if mem is None:
-            self.learned_box.addWidget(EmptyState(
-                "db", "Memory unavailable",
-                "The agent's memory database could not be opened."))
+            self.history_box.addWidget(EmptyState(
+                "db", "History unavailable",
+                "The task history database could not be opened."))
             return
         try:
             tasks = mem.get_recent_tasks(limit=12)
         except Exception:
             tasks = []
         if not tasks:
-            self.learned_box.addWidget(QLabel("Nothing learned yet."))
+            self.history_box.addWidget(QLabel("No completed tasks yet."))
         for t in tasks:
             row = GlassCard(shadow=False)
             lay = QHBoxLayout(row)
             lay.setContentsMargins(S.LG, S.SM, S.LG, S.SM)
             lay.addWidget(_dot(C.ACCENT2))
-            name = QLabel(t["instruction"])
+            name = ElidedLabel(t["instruction"])
             name.setStyleSheet("font-size: 12px;")
             lay.addWidget(name, stretch=1)
-            meta = QLabel(f"{t['success_count']}x reinforced")
+            meta = QLabel(f"completed {t['success_count']}x")
             meta.setProperty("role", "faint")
             lay.addWidget(meta)
-            self.learned_box.addWidget(row)
-
-        try:
-            rows = mem.conn.execute(
-                "SELECT target, action_type, error, fail_count, last_seen "
-                "FROM failure_patterns ORDER BY last_seen DESC LIMIT 20"
-            ).fetchall()
-        except Exception:
-            rows = []
-        if not rows:
-            self.fail_box.addWidget(QLabel(
-                "No failure patterns recorded - the agent hasn't needed to "
-                "learn any workarounds yet."))
-        for target, action, error, count, last_seen in rows:
-            row = GlassCard(shadow=False)
-            lay = QHBoxLayout(row)
-            lay.setContentsMargins(S.LG, S.SM, S.LG, S.SM)
-            lay.addWidget(_dot(C.WARNING))
-            col = QVBoxLayout()
-            col.setSpacing(0)
-            head = QLabel(f"{action or 'action'} -> '{target}'")
-            head.setStyleSheet("font-size: 12px; font-weight: 600;")
-            col.addWidget(head)
-            if error:
-                err = QLabel(error)
-                err.setProperty("role", "faint")
-                err.setWordWrap(True)
-                col.addWidget(err)
-            lay.addLayout(col, stretch=1)
-            meta = QLabel(f"{count}x | {relative_time(last_seen or 0)}")
-            meta.setProperty("role", "faint")
-            lay.addWidget(meta)
-            self.fail_box.addWidget(row)
+            self.history_box.addWidget(row)
 
 
 def _dot(color: str) -> QLabel:
@@ -906,7 +907,7 @@ class SettingsPage(QWidget):
 
         def worker():
             try:
-                from core.ovms_client import OVMSClient
+                from core.inference import OVMSClient
                 health = OVMSClient().check_health()
                 text = "   ".join(f"{k}: {v}" for k, v in health.items())
             except Exception as e:
@@ -926,7 +927,7 @@ class SettingsPage(QWidget):
         if not site or not user:
             QMessageBox.warning(self, "Missing", "Site and username are required.")
             return
-        from utils.credentials import set_credential
+        from desktop.credentials import set_credential
         set_credential(site, user, pwd)
         self._cred_site.clear()
         self._cred_user.clear()
@@ -938,14 +939,14 @@ class SettingsPage(QWidget):
         if not site:
             QMessageBox.warning(self, "Missing", "Enter the site name to delete.")
             return
-        from utils.credentials import delete
+        from desktop.credentials import delete
         delete(site)
         self._cred_site.clear()
         self._refresh_cred_list()
 
     def _refresh_cred_list(self):
         try:
-            from utils.credentials import list_sites
+            from desktop.credentials import list_sites
             sites = list_sites()
             self._cred_list.setText(
                 "  |  ".join(sites) if sites else "(no credentials stored)")

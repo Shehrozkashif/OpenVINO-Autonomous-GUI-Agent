@@ -17,9 +17,11 @@ env/
 models/*
 !models/.gitkeep
 
-# ── OVMS binary (downloaded by user, not part of source) ────────────────────
+# ── OVMS binary (downloaded by start.py on first run, not part of source) ───
 ovms/
 ovms.zip
+ovms_windows_*.zip
+ovms_windows_*.zip.part
 
 # ── OVMS export tool (downloaded by start.py on first run) ──────────────────
 tools/ovms/
@@ -33,6 +35,8 @@ _test_ovms.bat
 logs/
 @AutomationLog.txt
 *.db
+# task history database written by core/history.py
+data/
 
 # ── Test / lint cache ────────────────────────────────────────────────────────
 .pytest_cache/
@@ -48,3 +52,6 @@ htmlcov/
 *~
 .DS_Store
 Thumbs.db
+
+# Scratch models + logs from tools/test_qwen3vl.py (gigabytes, throwaway)
+tools/qwen3vl_probe/

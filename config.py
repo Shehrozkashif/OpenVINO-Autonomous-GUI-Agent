@@ -11,23 +11,44 @@
 # These names must match the servable names registered in the OVMS config.json
 # that start.py generates (model_repository_path below).
 
-LLM_MODEL = "qwen3-14b-int4-ov"         # text reasoning — routing, planning, reflection
-VLM_MODEL = "ui-tars-1.5-7b-int4-ov"    # GUI grounding & visual verification (UI-TARS)
+LLM_MODEL = "qwen3-8b-int4-ov"          # text reasoning — routing, planning, reflection
+VLM_MODEL = "ui-tars-1.5-7b-int8-ov"    # GUI grounding & visual verification (UI-TARS)
 
-# Sized for a 24 GB GPU: 14B LLM weights (~9.7 GB) + 7B VLM weights (~5 GB)
-# + KV caches (4 + 2 GB) + runtime overhead ≈ 22 GB.
-# On a 16 GB GPU use the smaller LLM instead:
-#   LLM_MODEL  = "qwen3-8b-int4-ov"
-#   LLM_SOURCE = "OpenVINO/Qwen3-8B-int4-ov"
-#   LLM_KV_CACHE_GB = 2
+# The 8B LLM (INT4) is the default. A two-run 14B trial (2026-07-19) lost on
+# this hardware: planning calls went from 7-15 s to 45-101 s, runs took 17
+# then 36 minutes to hit the same perception-level wall the 8B hits in 6-8,
+# its verbose JSON truncated the planner twice, and its plans were no better
+# (it clicked the window TITLE as a target and typed into a Teams chat). The
+# blocking failures are OCR-blind WebView2 state, which model scale does not
+# fix. Budget on a 27 GB GPU: 8B-int4 (~5.5 GB) + 7B-int8 VLM (~7.5 GB) +
+# KV (4 + 2 GB) + overhead ≈ 20.5 GB.
+# FP16 UI-TARS (~15 GB weights) does NOT fit alongside the LLM + KV on 27 GB.
+# The 14B export stays on disk — re-swapping is instant if reasoning ever
+# becomes the bottleneck (14B-int4 ~9.7 + int8 VLM ~7.5 + KV 6 ≈ 24.7 GB):
+#   LLM_MODEL  = "qwen3-14b-int4-ov"
+#   LLM_SOURCE = "OpenVINO/Qwen3-14B-int4-ov"
 
 # ── Model sources (where start.py fetches / converts them from) ─────────────────
 # LLM_SOURCE is a pre-converted OpenVINO IR repo on Hugging Face — OVMS pulls it
-# directly. VLM_SOURCE is the upstream UI-TARS checkpoint; start.py converts it to
-# OpenVINO INT4 IR with optimum-cli on first run (no pre-built OV build exists).
+# directly (already INT4, so LLM_WEIGHT_FORMAT is a no-op for it). VLM_SOURCE is
+# the upstream UI-TARS checkpoint; start.py converts it to OpenVINO IR at
+# VLM_WEIGHT_FORMAT with optimum-cli on first run (no pre-built OV build exists).
 
-LLM_SOURCE = "OpenVINO/Qwen3-14B-int4-ov"
+LLM_SOURCE = "OpenVINO/Qwen3-8B-int4-ov"
 VLM_SOURCE = "ByteDance-Seed/UI-TARS-1.5-7B"
+
+# Quantization each model is exported at. The VLM is converted locally, so this
+# is where its precision is chosen: "int8" trades ~2.5 GB more VRAM for more
+# accurate coordinate grounding than "int4".
+# fp16 was tested live (2026-07-20, 27.5 GB budget): the 15.5 GB fp16 VLM DOES
+# co-reside with the int4 LLM if KV is trimmed to 3+2 GB — but its grounding
+# accuracy was IDENTICAL to int8 (Chat 3px, New meeting 36px, Calendar ~250px
+# both). The model's small/stacked-icon miss is BEHAVIORAL, not precision-bound,
+# so fp16 buys nothing while costing ~8 GB and KV headroom. int8 stays the pick.
+# Changing VLM_WEIGHT_FORMAT requires the servable name (VLM_MODEL above) to
+# change too, so start.py re-exports instead of reusing the old precision's dir.
+LLM_WEIGHT_FORMAT = "int4"
+VLM_WEIGHT_FORMAT = "int8"
 
 # ── Endpoint ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +70,11 @@ TARGET_DEVICE = "GPU"
 # The LLM gets the bigger cache: router decomposition, task replanning, and
 # batch planning carry the longest prompts. The VLM only ever sees one
 # screenshot + a short instruction per request, so 2 GB is plenty.
+# Prefix caching (also enabled by start.py) shares this same budget: it parks
+# the KV of each recurring prompt prefix here so it is not recomputed every
+# call. The planning prefix is the big one at ~5.8k tokens; the goal check and
+# the verifier add a few hundred each. That is comfortably under 4 GB, but if
+# OVMS ever logs that it is evicting cache blocks, raise LLM_KV_CACHE_GB.
 # start.py applies changes here to already-exported models automatically
 # (it patches the baked cache_size in each servable's graph.pbtxt).
 LLM_KV_CACHE_GB = 4
@@ -59,10 +85,24 @@ VLM_KV_CACHE_GB = 2
 MODEL_REPOSITORY_PATH = "models"
 
 # ── Grounding ───────────────────────────────────────────────────────────────────
-# Coordinate convention of the served UI-TARS build. The prompt asks for the
-# native 0-1000 scale, but INT4 conversions sometimes emit raw pixels of the
-# input image instead — and values ≤ 1000 fit both readings, so "auto" has to
-# guess (heuristic in grounding._parse_coords). To make parsing deterministic:
-# run tests/live/test_vlm_coordinates.py on the target machine once, see which
-# convention the model actually uses, and pin this to "norm1000" or "pixels".
-VLM_COORD_SPACE = "auto"   # "auto" | "norm1000" | "pixels"
+# Coordinate convention of the served UI-TARS build. UI-TARS-1.5 is qwen2.5-VL
+# based, which emits ABSOLUTE pixel coordinates in the smart-resized image space
+# (each side rounded to a multiple of 28; no budget downscale for our screen
+# sizes). Pinned to "pixels" — a live calibration against UIA ground truth
+# (tests/live/test_vlm_coordinates.py) confirmed pixel/resized mapping beats the
+# 0-1000 reading for distinct targets (e.g. a top-right button: /1000 lands
+# off-screen, /resized lands within ~30px). grounding._CoordSpace divides by the
+# /28-rounded (resized) dimension. Re-calibrate after changing VLM_WEIGHT_FORMAT.
+VLM_COORD_SPACE = "pixels"   # "auto" | "norm1000" | "pixels"
+
+# ── Interaction ─────────────────────────────────────────────────────────────────
+# Force every grounded click to be delivered with the REAL MOUSE — the cursor
+# glides to the target and presses — instead of the faster UIA pattern-invoke
+# shortcut (which actuates a control through the accessibility API with NO cursor
+# motion). UIA still supplies the exact coordinates, so click accuracy is
+# unchanged; this only changes HOW the click is delivered. Default True: a
+# desktop-automation agent should visibly drive mouse + keyboard (demos, and
+# operators who need to trust what they see). Set False to prefer UIA invoke,
+# which is more robust on the few WebView2 buttons that swallow synthesized pixel
+# clicks. Env AGENT_FORCE_MOUSE=1/0 overrides this per-run.
+FORCE_MOUSE = True

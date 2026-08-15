@@ -3,7 +3,8 @@ name = "intel-openvino-desktop-agent"
 version = "0.1.0"
 description = "Local-first desktop GUI agent: See → Plan → Act → Verify loop driven by on-device LLM/VLM inference"
 readme = "README.md"
-requires-python = ">=3.10"
+# Upper bound is real: rapidocr-onnxruntime publishes no wheel for 3.13+.
+requires-python = ">=3.10,<3.13"
 license = { file = "LICENSE" }
 
 # Runtime dependencies are managed in requirements.txt (pip install -r requirements.txt).
@@ -35,7 +36,7 @@ extend-exclude = ["models", "tools/ovms"]  # tools/ovms is fetched verbatim from
 select = ["F", "E4", "E7", "E9", "W", "I", "UP", "B", "C4",
           "D204", "D209", "D212", "D403"]
 # UP031: %-format is clearer than .format/f-strings for strings full of literal
-# JSON braces (see tests/unit/test_reflection_vlm_escalation.py); keep %-format.
+# JSON braces (verdict payloads in tests/unit/test_reflection.py); keep %-format.
 ignore = ["UP031"]
 
 [tool.ruff.lint.pydocstyle]
@@ -43,5 +44,8 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 # Tests insert the repo root onto sys.path before importing project modules,
-# and live/e2e tests keep compact inline helpers.
+# and the live suites keep compact inline helpers.
 "tests/*" = ["E402"]
+# main.py MUST call enable_dpi_awareness() before importing Qt and the capture
+# modules, so those imports deliberately sit below that call (not at file top).
+"main.py" = ["E402"]

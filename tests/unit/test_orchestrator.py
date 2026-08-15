@@ -5,7 +5,6 @@ Organised by concern (each section was originally its own file; the helper
 functions below are suffixed per section since several sections build a
 differently-configured mock orchestrator under the same conceptual name).
 
-  1. Burst detection at the instruction level (Fix C)
   2. Deterministic terminal-command verification (_verify_command_effect)
   3. Non-idempotent actions are not blind-retried (Fix C5)
   4. Action-type-aware step deduplication / loop guard
@@ -21,248 +20,23 @@ import pytest
 
 from agents.grounding import GroundingResult
 from agents.reflection import ReflectionResult
-from core.burst_executor import detect_burst_from_instruction
-from core.orchestrator import DEDUP_LIMIT_BY_ACTION_TYPE, OrchestratorConfig, TaskOrchestrator
-from core.protocols import ActionBurst, ActionStep, SubTask
+from core import apps, groundtruth, subtasks
+from core.orchestrator import TaskOrchestrator
+from core.runstate import (
+    DEDUP_LIMIT_BY_ACTION_TYPE,
+    OrchestratorConfig,
+    SubtaskRun,
+)
+from core.types import ActionStep, SubTask
+from tests.unit.conftest import (
+    goal_check_reply,
+    make_grounder,
+    make_history,
+    make_llm,
+    make_reflector,
+)
 
 sys.path.insert(0, ".")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 1. Burst detection at the instruction level (Fix C)
-#
-# Verifies:
-#   1. When detect_burst_from_instruction matches, router.decompose is NOT called.
-#   2. The synthetic SubTask passed to _execute_subtask has burst set to the detected burst.
-#   3. When no burst matches, the router IS called normally.
-#   4. detect_burst_from_instruction correctly recognises the full folder-creation instruction.
-#   5. _execute_subtask uses subtask.burst directly when it is set (no second detect_burst call).
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _make_orch_burst() -> TaskOrchestrator:
-    """Minimal orchestrator with collaborators fully mocked."""
-    orch = TaskOrchestrator(
-        router=MagicMock(),
-        planner=MagicMock(),
-        grounder=MagicMock(),
-        actor=MagicMock(),
-        reflector=MagicMock(),
-        capturer=MagicMock(),
-        task_memory=MagicMock(),
-        config=OrchestratorConfig(max_steps_per_subtask=1),
-        on_step_log=lambda _: None,
-        ocr=MagicMock(),
-    )
-    orch.router.summarize_completion = MagicMock(return_value="done")
-    orch.memory.find_similar = MagicMock(return_value=None)
-    orch.memory.store_successful_task = MagicMock()
-    orch._get_screen_context = MagicMock(return_value='"desktop"')
-    # Patch out the real subtask execution and launch check so tests stay fast
-    orch._execute_subtask = MagicMock(return_value=True)
-    orch._verify_launch = MagicMock(return_value=True)
-    orch._wait_for_settle = MagicMock()
-    return orch
-
-
-def _fake_burst() -> ActionBurst:
-    step = ActionStep(
-        id=1, subtask_id=1, action_type="right_click",
-        target="desktop", description="test", verification="",
-    )
-    return ActionBurst(steps=[step], verify_at_end=False, timeout_ms=3000)
-
-
-class TestBurstSkipsRouter:
-
-    def test_router_decompose_not_called_when_burst_detected(self):
-        """router.decompose must not be called when a burst is found at instruction level."""
-        orch = _make_orch_burst()
-        burst = _fake_burst()
-        with patch("core.orchestrator.detect_burst_from_instruction", return_value=burst):
-            orch.execute("Right click on the desktop, click New, click Folder, type Foo, press Enter.")
-        orch.router.decompose.assert_not_called()
-
-    def test_router_decompose_called_when_no_burst(self):
-        """router.decompose IS called when detect_burst_from_instruction returns None."""
-        orch = _make_orch_burst()
-        mock_subtask = SubTask(id=1, description="open Notepad", depends_on=[])
-        orch.router.decompose = MagicMock(return_value=("task_1", [mock_subtask]))
-        with patch("core.orchestrator.detect_burst_from_instruction", return_value=None):
-            orch.execute("open Notepad")
-        orch.router.decompose.assert_called_once()
-
-    def test_only_one_subtask_created_for_burst_instruction(self):
-        """Instruction-level burst produces exactly one synthetic subtask."""
-        orch = _make_orch_burst()
-        burst = _fake_burst()
-        captured = []
-        def _capture(subtask, **kwargs):
-            captured.append(subtask)
-            return True
-        orch._execute_subtask = _capture
-
-        with patch("core.orchestrator.detect_burst_from_instruction", return_value=burst):
-            orch.execute("Right click on the desktop, click New, click Folder, type Foo, press Enter.")
-
-        assert len(captured) == 1, "Exactly one synthetic subtask must be created"
-
-    def test_synthetic_subtask_has_burst_attached(self):
-        """The synthetic subtask passed to _execute_subtask carries burst=<detected>."""
-        orch = _make_orch_burst()
-        burst = _fake_burst()
-        captured_subtask = []
-
-        def _capture(subtask, **kwargs):
-            captured_subtask.append(subtask)
-            return True
-        orch._execute_subtask = _capture
-
-        with patch("core.orchestrator.detect_burst_from_instruction", return_value=burst):
-            orch.execute("Right click on the desktop, click New, click Folder, type Foo, press Enter.")
-
-        assert captured_subtask[0].burst is burst, (
-            "subtask.burst must be the ActionBurst returned by detect_burst_from_instruction"
-        )
-
-    def test_synthetic_subtask_description_is_full_instruction(self):
-        """The synthetic subtask description is the full instruction, not a router fragment."""
-        orch = _make_orch_burst()
-        instruction = "Right click on the desktop, click New, click Folder, type MyFolder, press Enter."
-        captured_subtask = []
-
-        def _capture(subtask, **kwargs):
-            captured_subtask.append(subtask)
-            return True
-        orch._execute_subtask = _capture
-
-        burst = _fake_burst()
-        with patch("core.orchestrator.detect_burst_from_instruction", return_value=burst):
-            orch.execute(instruction)
-
-        assert captured_subtask[0].description == instruction
-
-
-class TestDetectBurstFromInstruction:
-
-    def test_full_folder_creation_instruction_detected(self):
-        """The canonical test instruction matches the 5-step shortcut-key folder burst."""
-        burst = detect_burst_from_instruction(
-            "Right click on the desktop, click New, click Folder, "
-            "type TestFolder, press Enter."
-        )
-        assert burst is not None, "Should detect burst for full folder creation instruction"
-        assert len(burst.steps) == 5
-
-    def test_full_folder_creation_step_types(self):
-        """5-step visual burst has the expected action types in order."""
-        burst = detect_burst_from_instruction(
-            "Right click on the desktop, click New, click Folder, type MyDir, press Enter."
-        )
-        types = [s.action_type for s in burst.steps]
-        assert types == ["right_click", "click", "click", "type", "key_press"]
-
-    def test_full_folder_creation_captures_name(self):
-        """The type step carries the exact folder name from the instruction."""
-        burst = detect_burst_from_instruction(
-            "Right click on the desktop, click New, click Folder, type Projects, press Enter."
-        )
-        type_step = next(s for s in burst.steps if s.action_type == "type")
-        assert type_step.value == "Projects"
-
-    def test_create_folder_called_detected(self):
-        """'create a folder called X' matches pattern 1c → 5-step shortcut-key burst."""
-        burst = detect_burst_from_instruction("create a folder called Reports")
-        assert burst is not None
-        assert len(burst.steps) == 5
-        type_step = next(s for s in burst.steps if s.action_type == "type")
-        assert type_step.value == "Reports"
-
-    def test_create_new_folder_named_detected(self):
-        """'new folder named X' matches pattern 1c."""
-        burst = detect_burst_from_instruction("new folder named Archive")
-        assert burst is not None
-        type_step = next(s for s in burst.steps if s.action_type == "type")
-        assert type_step.value == "Archive"
-
-    def test_unrelated_instruction_returns_none(self):
-        """An instruction that has nothing to do with burst patterns returns None."""
-        burst = detect_burst_from_instruction("open Firefox and navigate to gmail.com")
-        assert burst is None
-
-    def test_short_new_folder_keywords_still_match_pattern1a(self):
-        """'new folder' keyword still fires (5-step shortcut-key burst with default name)."""
-        burst = detect_burst_from_instruction("create new folder on the desktop")
-        assert burst is not None
-        assert len(burst.steps) == 5
-
-
-class TestExecuteSubtaskUsesBurstField:
-
-    def _make_subtask_orch(self):
-        """Build an orchestrator where all collaborators are stubbed for burst execution."""
-        orch = TaskOrchestrator(
-            router=MagicMock(),
-            planner=MagicMock(),
-            grounder=MagicMock(),
-            actor=MagicMock(),
-            reflector=MagicMock(),
-            capturer=MagicMock(),
-            task_memory=MagicMock(),
-            config=OrchestratorConfig(max_steps_per_subtask=5),
-            on_step_log=lambda _: None,
-            ocr=MagicMock(),
-        )
-        gr = GroundingResult(
-            found=True, confidence=0.9, x=500, y=400,
-            latency_ms=5.0, target="desktop", element_type="foreground_interactive",
-        )
-        orch.grounder.ground = MagicMock(return_value=gr)
-        orch.grounder.min_confidence = 0.5
-        orch.actor.execute = MagicMock(return_value=True)
-        orch.reflector.verify = MagicMock(return_value=MagicMock(
-            success=True, confidence=0.95, ocr_text="", error_description="",
-            should_retry=False,
-        ))
-        orch.memory.get_failure_hints = MagicMock(return_value=[])
-        orch._get_screen_context = MagicMock(return_value='"desktop"')
-        return orch
-
-    def test_subtask_with_burst_runs_burst_not_planning_loop(self):
-        """When subtask.burst is set, _execute_subtask must use the burst executor
-        and NOT call planner.plan_steps.
-        """
-        orch = self._make_subtask_orch()
-        burst = _fake_burst()
-        subtask = SubTask(id=1, description="folder task", depends_on=[], burst=burst)
-
-        with patch.object(orch.burst_executor, 'run',
-                          return_value=MagicMock(success=True, failed_at_step=None, reason="ok")) \
-             as mock_burst_run:
-            result = orch._execute_subtask(subtask)
-
-        assert result is True
-        mock_burst_run.assert_called_once_with(burst)
-        orch.planner.plan_steps.assert_not_called()
-
-    def test_subtask_without_burst_falls_back_to_planning_loop(self):
-        """When subtask.burst is None and detect_burst returns None,
-        _execute_subtask must fall through to the LLM planning loop.
-        """
-        orch = self._make_subtask_orch()
-        subtask = SubTask(id=1, description="click the OK button", depends_on=[])
-        # Planner returns one step then done
-        step = ActionStep(
-            id=1, subtask_id=1, action_type="key_press",
-            target=None, value=None, key="escape",
-            description="Press Escape", verification="dialog dismissed",
-        )
-        orch.planner.plan_steps = MagicMock(side_effect=[[step], None])
-
-        with patch("core.orchestrator.detect_burst", return_value=None):
-            result = orch._execute_subtask(subtask)
-
-        assert result is True
-        orch.planner.plan_steps.assert_called()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -280,15 +54,14 @@ def _sub_cmd(desc):
 def _make_orch_cmd():
     orch = TaskOrchestrator(
         router=MagicMock(),
-        planner=MagicMock(plan_next_step=MagicMock(return_value=None)),
-        grounder=MagicMock(min_confidence=0.5),
+        planner=MagicMock(plan_next_step=MagicMock(return_value=None),
+                          plan_next_step_visual=MagicMock(return_value=None)),
+        grounder=make_grounder(),
         actor=MagicMock(execute=MagicMock(return_value=True)),
-        reflector=MagicMock(min_confidence=0.75),
+        reflector=make_reflector(
+            client=make_llm(goal_check_reply(satisfied=False, confidence=0.0))),
         capturer=MagicMock(),
-        task_memory=MagicMock(
-            get_failure_hints=MagicMock(return_value=[]),
-            store_failure_pattern=MagicMock(),
-        ),
+        history=make_history(),
         config=OrchestratorConfig(max_retries_per_step=1, max_steps_per_subtask=5),
         on_step_log=lambda _: None,
     )
@@ -309,14 +82,14 @@ class TestCreateCommands:
         f = tmp_path / "notes.txt"
         started = time.time()
         f.write_text("hello agent")
-        ok, why = orch._verify_command_effect(
+        ok, why = orch.truth.command_effect(
             _sub_cmd(f"run: echo 'hello agent' > {f}"), started, typed_ok=True)
         assert ok is True
         assert str(f) in why
 
     def test_missing_file_fails(self, orch, tmp_path):
         f = tmp_path / "nope.txt"
-        ok, why = orch._verify_command_effect(
+        ok, why = orch.truth.command_effect(
             _sub_cmd(f"run: echo 'x' > {f}"), time.time(), typed_ok=True)
         assert ok is False
         assert "does not exist" in why
@@ -327,7 +100,7 @@ class TestCreateCommands:
         f.write_text("old content")
         old_mtime = time.time() - 3600
         os.utime(f, (old_mtime, old_mtime))
-        ok, why = orch._verify_command_effect(
+        ok, why = orch.truth.command_effect(
             _sub_cmd(f"run: echo 'x' > {f}"), time.time(), typed_ok=True)
         assert ok is False
         assert "stale" in why.lower() or "not modified" in why.lower()
@@ -336,7 +109,7 @@ class TestCreateCommands:
         d = tmp_path / "projects"
         started = time.time()
         d.mkdir()
-        ok, _ = orch._verify_command_effect(
+        ok, _ = orch.truth.command_effect(
             _sub_cmd(f"run: mkdir {d}"), started, typed_ok=True)
         assert ok is True
 
@@ -344,7 +117,7 @@ class TestCreateCommands:
         f = tmp_path / "my notes.txt"
         started = time.time()
         f.write_text("x")
-        ok, _ = orch._verify_command_effect(
+        ok, _ = orch.truth.command_effect(
             _sub_cmd(f"run: echo 'x' > \"{f}\""), started, typed_ok=True)
         assert ok is True
 
@@ -353,14 +126,14 @@ class TestDeleteCommands:
 
     def test_deleted_file_passes(self, orch, tmp_path):
         f = tmp_path / "gone.txt"   # never created
-        ok, _ = orch._verify_command_effect(
+        ok, _ = orch.truth.command_effect(
             _sub_cmd(f"run: del {f}"), time.time(), typed_ok=True)
         assert ok is True
 
     def test_surviving_file_fails(self, orch, tmp_path):
         f = tmp_path / "alive.txt"
         f.write_text("x")
-        ok, why = orch._verify_command_effect(
+        ok, why = orch.truth.command_effect(
             _sub_cmd(f"run: del {f}"), time.time(), typed_ok=True)
         assert ok is False
         assert "still exists" in why
@@ -369,17 +142,19 @@ class TestDeleteCommands:
 class TestGenericCommands:
 
     def _with_ocr_text(self, orch, text):
-        from agents.grounding import OCRWord
+        from desktop.ocr import OCRWord
         words = [OCRWord(t, 0, 0, 10, 10, 0.9) for t in text.split()]
-        orch._ocr = MagicMock()
-        orch._ocr.extract = MagicMock(return_value=words)
+        ocr = MagicMock()
+        ocr.extract = MagicMock(return_value=words)
+        orch._ocr = orch.truth.ocr = ocr
         img = MagicMock()
         orch.capturer.capture = MagicMock(return_value=img)
+        orch.truth.capturer = orch.capturer
         return orch
 
     def test_silence_means_success(self, orch):
         orch = self._with_ocr_text(orch, "PS C: Users sharo")
-        ok, why = orch._verify_command_effect(
+        ok, why = orch.truth.command_effect(
             _sub_cmd("run: git status"), time.time(), typed_ok=True)
         assert ok is True
         assert "silence" in why
@@ -387,12 +162,12 @@ class TestGenericCommands:
     def test_error_marker_fails(self, orch):
         orch = self._with_ocr_text(
             orch, "out-file Access to the path is denied CategoryInfo OpenError")
-        ok, why = orch._verify_command_effect(
+        ok, why = orch.truth.command_effect(
             _sub_cmd("run: git status"), time.time(), typed_ok=True)
         assert ok is False
 
     def test_enter_without_typed_command_fails(self, orch):
-        ok, why = orch._verify_command_effect(
+        ok, why = orch.truth.command_effect(
             _sub_cmd("run: git status"), time.time(), typed_ok=False)
         assert ok is False
         assert "no command was typed" in why
@@ -442,19 +217,19 @@ class TestSaveTargetExtraction:
     """_subtask_save_target parses the destination path from a save subtask."""
 
     def test_extracts_windows_path(self):
-        assert TaskOrchestrator._subtask_save_target(
+        assert subtasks.save_target(
             _sub_cmd("with text in Notepad, save the document as C:/Users/x/Desktop/haiku.txt")
         ) == "C:/Users/x/Desktop/haiku.txt"
 
     def test_no_path_returns_none(self):
-        assert TaskOrchestrator._subtask_save_target(_sub_cmd("save the document")) is None
+        assert subtasks.save_target(_sub_cmd("save the document")) is None
 
     def test_non_save_returns_none(self):
-        assert TaskOrchestrator._subtask_save_target(
+        assert subtasks.save_target(
             _sub_cmd("click in the document area and type: hello world")) is None
 
     def test_quoted_path_with_spaces(self):
-        assert TaskOrchestrator._subtask_save_target(
+        assert subtasks.save_target(
             _sub_cmd("save the report as 'D:/work/report v2.pdf'")) == "D:/work/report v2.pdf"
 
 
@@ -465,17 +240,17 @@ class TestFileSavedFresh:
         f = tmp_path / "a.txt"
         started = time.time()
         f.write_text("x")
-        assert orch._file_saved_fresh(str(f), started) is True
+        assert groundtruth.file_saved_fresh(str(f), started) is True
 
     def test_missing_file_fails(self, orch, tmp_path):
-        assert orch._file_saved_fresh(str(tmp_path / "nope.txt"), time.time()) is False
+        assert groundtruth.file_saved_fresh(str(tmp_path / "nope.txt"), time.time()) is False
 
     def test_stale_file_fails(self, orch, tmp_path):
         f = tmp_path / "old.txt"
         f.write_text("x")
         old = time.time() - 3600
         os.utime(f, (old, old))
-        assert orch._file_saved_fresh(str(f), time.time()) is False
+        assert groundtruth.file_saved_fresh(str(f), time.time()) is False
 
 
 class TestSaveSubtaskIntegration:
@@ -527,8 +302,8 @@ class TestDeterministicSaveAs:
         f = tmp_path / "haiku.txt"
         orch = _make_orch_cmd()
         # No dialog yet → ctrl+s fires; dialog visible on the confirm check.
-        orch._save_dialog_visible = MagicMock(side_effect=[False, True])
-        orch._wait_for_settle = MagicMock()
+        orch.truth.save_dialog_visible = MagicMock(side_effect=[False, True])
+        orch.truth.wait_for_settle = MagicMock()
 
         def _exec(step):
             if step.key == "enter":
@@ -551,8 +326,8 @@ class TestDeterministicSaveAs:
         f = tmp_path / "haiku.txt"
         forward = str(f).replace("\\", "/")   # as the router/sub-task emits it
         orch = _make_orch_cmd()
-        orch._save_dialog_visible = MagicMock(return_value=True)
-        orch._wait_for_settle = MagicMock()
+        orch.truth.save_dialog_visible = MagicMock(return_value=True)
+        orch.truth.wait_for_settle = MagicMock()
 
         def _exec(step):
             if step.key == "enter":
@@ -574,8 +349,8 @@ class TestDeterministicSaveAs:
         """
         f = tmp_path / "haiku.txt"   # never created
         orch = _make_orch_cmd()
-        orch._save_dialog_visible = MagicMock(return_value=False)
-        orch._wait_for_settle = MagicMock()
+        orch.truth.save_dialog_visible = MagicMock(return_value=False)
+        orch.truth.wait_for_settle = MagicMock()
         orch._execute_step = MagicMock(return_value=True)
 
         with patch("core.orchestrator.time.sleep"):
@@ -636,13 +411,11 @@ def _make_orch_idem(plan_steps, reflection):
     planner = MagicMock()
     planner.plan_steps = MagicMock(side_effect=[[s] for s in plan_steps] + [None] * 10)
 
-    memory = MagicMock()
-    memory.get_failure_hints = MagicMock(return_value=[])
-    memory.store_failure_pattern = MagicMock()
+    history = make_history()
 
     orch = TaskOrchestrator(
         router=MagicMock(), planner=planner, grounder=grounder, actor=actor,
-        reflector=reflector, capturer=MagicMock(), task_memory=memory,
+        reflector=reflector, capturer=MagicMock(), history=history,
         config=OrchestratorConfig(max_retries_per_step=3, max_steps_per_subtask=1,
                                   consecutive_failures_limit=10),
         on_step_log=lambda _: None,
@@ -723,29 +496,23 @@ def _make_orch_loop(plan_steps):
     - actor.execute always returns True.
     - grounding always finds the target.
     """
-    reflector = MagicMock()
-    reflector.min_confidence = 0.75
-    reflector.verify = MagicMock(return_value=_SUCCESS)
+    # The goal check must say "not yet", or the subtask ends before the
+    # planner is ever asked for a step.
+    reflector = make_reflector(
+        _SUCCESS, client=make_llm(goal_check_reply(satisfied=False, confidence=0.0)))
 
     actor = MagicMock()
     actor.execute = MagicMock(return_value=True)
 
-    grounder = MagicMock()
-    grounder.min_confidence = 0.5
-    grounder.ground = MagicMock(
-        return_value=GroundingResult(
-            found=True, confidence=0.9, x=100, y=200,
-            latency_ms=5.0, target="Button",
-            element_type="foreground_interactive",
-        )
-    )
+    grounder = make_grounder()
 
     planner = MagicMock()
     planner.plan_steps = MagicMock(side_effect=[[s] for s in plan_steps] + [None])
+    # When the text planner says "done" but the goal check disagrees, the loop
+    # escalates to the screenshot planner; None there means genuinely finished.
+    planner.plan_next_step_visual = MagicMock(return_value=None)
 
-    memory = MagicMock()
-    memory.get_failure_hints = MagicMock(return_value=[])
-    memory.store_failure_pattern = MagicMock()
+    history = make_history()
 
     orch = TaskOrchestrator(
         router=MagicMock(),
@@ -754,7 +521,7 @@ def _make_orch_loop(plan_steps):
         actor=actor,
         reflector=reflector,
         capturer=MagicMock(),
-        task_memory=memory,
+        history=history,
         config=OrchestratorConfig(
             max_retries_per_step=1,
             max_steps_per_subtask=25,
@@ -767,19 +534,16 @@ def _make_orch_loop(plan_steps):
 
 
 class TestDedupLimitValues:
-    """The dict must contain the exact values specified in the design document."""
+    """Repeat budgets, tightest first: a repeated type almost always means a
+    loop, while repeated navigation keys are ordinary.
+    """
 
-    def test_type_limit_is_1(self):
-        assert DEDUP_LIMIT_BY_ACTION_TYPE["type"] == 1
-
-    def test_click_limit_is_2(self):
-        assert DEDUP_LIMIT_BY_ACTION_TYPE["click"] == 2
-
-    def test_right_click_limit_is_1(self):
-        assert DEDUP_LIMIT_BY_ACTION_TYPE["right_click"] == 1
-
-    def test_key_press_limit_is_3(self):
-        assert DEDUP_LIMIT_BY_ACTION_TYPE["key_press"] == 3
+    @pytest.mark.parametrize("action, limit", [
+        ("type", 1), ("right_click", 1), ("invoke", 1), ("set_value", 1),
+        ("click", 2), ("select", 2), ("key_press", 3),
+    ])
+    def test_limit_value(self, action, limit):
+        assert DEDUP_LIMIT_BY_ACTION_TYPE[action] == limit
 
 
 class TestTypeDedupLimit:
@@ -886,46 +650,49 @@ class TestRightClickDedupLimit:
         assert last_step.key == "escape"
 
 
-class TestStreakReset:
-    """A different action signature resets the streak; subsequent runs start fresh."""
+class TestInterleavedRepeats:
+    """Repeats are counted as per-subtask TOTALS, not consecutively.
 
-    def test_type_streak_resets_after_click(self):
-        """Type × 2 → streak = 1 (at limit, but NOT >1 so not triggered).
-        click (different) → streak resets to 0.
-        type × 2 → streak = 1 again (fresh start, NOT triggered).
-        None → done normally.
-        Planner called 6 times (5 steps + None).
+    An interleaved different step must NOT launder a loop: A-B-A-B ping-pong
+    (seen live: hallucinated verifier success alternating 'click NEW' /
+    'click Schedule' for 10 minutes) trips the guard exactly like A-A-A.
+    Different signatures still count independently.
+    """
+
+    def test_type_repeat_survives_interleaved_click(self):
+        """Type ×2 allowed (limit 1 = one repeat); an interleaved click does
+        not reset the count, so the 3rd type total fires the guard.
+        Planner called 4 times (guard fires while recording step 4).
         """
         ts = _step_loop("type", target=None, value="hello")
         cs = _step_loop("click", target="Foo")
-        orch = _make_orch_loop([ts, ts, cs, ts, ts])
+        orch = _make_orch_loop([ts, ts, cs, ts])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_steps.call_count == 6
+        assert orch.planner.plan_steps.call_count == 4
 
-    def test_click_streak_resets_after_type(self):
-        """Click × 3 → streak = 2 (at limit, NOT triggered).
-        type → streak resets.
-        click × 3 → streak = 2 again (NOT triggered).
+    def test_click_repeat_survives_interleaved_type(self):
+        """Click ×3 allowed (limit 2); an interleaved type does not reset the
+        count, so the 4th click total fires the guard at step 5.
         """
         cs = _step_loop("click", target="Btn")
         ts = _step_loop("type", target=None, value="x")
-        orch = _make_orch_loop([cs, cs, cs, ts, cs, cs, cs])
+        orch = _make_orch_loop([cs, cs, cs, ts, cs])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_steps.call_count == 8  # 7 steps + None
+        assert orch.planner.plan_steps.call_count == 5
 
-    def test_different_target_same_type_resets_streak(self):
-        """Two clicks on the same target, then a click on a different target,
-        then two more clicks on the original target — streak for the original
-        resets after the different target, so no trigger.
+    def test_different_targets_count_independently(self):
+        """Clicks on Alpha and Beta have different signatures — three Alpha
+        clicks plus one Beta click stay within Alpha's allowance (3 total),
+        so no trigger: all 4 steps run, then None ends the subtask.
         """
         ca = _step_loop("click", target="Alpha")
         cb = _step_loop("click", target="Beta")
-        orch = _make_orch_loop([ca, ca, cb, ca, ca])
+        orch = _make_orch_loop([ca, ca, cb, ca])
         result = orch._execute_subtask(_subtask_loop())
         assert result is True
-        assert orch.planner.plan_steps.call_count == 6
+        assert orch.planner.plan_steps.call_count == 5  # 4 steps + None
 
     def test_only_type_no_escape_on_trigger(self):
         """Type loop guard does NOT inject Escape (only click/right_click do)."""
@@ -960,15 +727,15 @@ def _sub_nwl(desc):
 def _make_orch_nwl():
     orch = TaskOrchestrator(
         router=MagicMock(),
-        planner=MagicMock(plan_next_step=MagicMock(return_value=None)),
-        grounder=MagicMock(min_confidence=0.5),
+        planner=MagicMock(plan_steps=MagicMock(return_value=[]),
+                          plan_next_step=MagicMock(return_value=None),
+                          plan_next_step_visual=MagicMock(return_value=None)),
+        grounder=make_grounder(),
         actor=MagicMock(execute=MagicMock(return_value=True)),
-        reflector=MagicMock(min_confidence=0.75),
+        reflector=make_reflector(
+            client=make_llm(goal_check_reply(satisfied=False, confidence=0.0))),
         capturer=MagicMock(),
-        task_memory=MagicMock(
-            get_failure_hints=MagicMock(return_value=[]),
-            store_failure_pattern=MagicMock(),
-        ),
+        history=make_history(),
         config=OrchestratorConfig(max_retries_per_step=1, max_steps_per_subtask=3),
         on_step_log=lambda _: None,
     )
@@ -978,15 +745,20 @@ def _make_orch_nwl():
 
 class TestPreExistingAppNote:
 
-    def test_note_injected_when_app_already_running(self):
-        """Process pre-exists → planner's task_context gets the NEW-window NOTE."""
-        orch = _make_orch_nwl()
-        with patch.object(orch, "_is_process_running", return_value=True), \
-             patch.object(orch, "_count_process_windows", return_value=1):
-            orch._execute_subtask(_sub_nwl("open windows terminal"))
+    # The note is asserted on _setup_launch_goal's own output, not on a
+    # planner call: a known app now takes the Start-menu macro and never
+    # reaches the planner on the first cycle. The note still matters, because
+    # a macro that fails to launch falls through to the planner on the next
+    # cycle carrying this same task_context.
 
-        ctx = orch.planner.plan_steps.call_args.kwargs.get("task_context")
-        assert ctx, "task_context must be passed to the planner"
+    def test_note_injected_when_app_already_running(self):
+        """Process pre-exists → the NEW-window NOTE goes into task_context."""
+        orch = _make_orch_nwl()
+        with patch("desktop.system.is_process_running", return_value=True), \
+             patch("desktop.system.count_process_windows", return_value=1):
+            _, _, _, ctx = orch._setup_launch_goal(_sub_nwl("open windows terminal"), None)
+
+        assert ctx, "task_context must carry the note"
         joined = " ".join(ctx)
         assert "ALREADY running" in joined
         assert "NEW" in joined
@@ -995,18 +767,28 @@ class TestPreExistingAppNote:
 
     def test_no_note_when_app_not_running(self):
         orch = _make_orch_nwl()
-        with patch.object(orch, "_is_process_running", return_value=False), \
-             patch.object(orch, "_count_process_windows", return_value=0):
-            orch._execute_subtask(_sub_nwl("open windows terminal"))
+        with patch("desktop.system.is_process_running", return_value=False), \
+             patch("desktop.system.count_process_windows", return_value=0):
+            _, _, _, ctx = orch._setup_launch_goal(_sub_nwl("open windows terminal"), None)
 
-        ctx = orch.planner.plan_steps.call_args.kwargs.get("task_context")
         assert not ctx or "ALREADY running" not in " ".join(ctx)
         assert "WindowsTerminal.exe" not in orch._launch_window_baseline
 
+    def test_note_reaches_the_planner_when_the_macro_declines(self):
+        """An app the macro cannot name still goes to the planner, with the note."""
+        orch = _make_orch_nwl()
+        with patch("desktop.system.is_process_running", return_value=True), \
+             patch("desktop.system.count_process_windows", return_value=1), \
+             patch("core.apps.launch_query", return_value=None):
+            orch._execute_subtask(_sub_nwl("open windows terminal"))
+
+        ctx = orch.planner.plan_steps.call_args.kwargs.get("task_context")
+        assert ctx and "ALREADY running" in " ".join(ctx)
+
     def test_non_launch_subtask_records_no_baseline(self):
         orch = _make_orch_nwl()
-        with patch.object(orch, "_is_process_running", return_value=True), \
-             patch.object(orch, "_count_process_windows", return_value=1):
+        with patch("desktop.system.is_process_running", return_value=True), \
+             patch("desktop.system.count_process_windows", return_value=1):
             orch._execute_subtask(_sub_nwl("with the terminal already open, run: dir"))
         assert orch._launch_window_baseline == {}
 
@@ -1017,11 +799,11 @@ class TestVerifyLaunchWithBaseline:
         """Window count flat at baseline → launch NOT confirmed."""
         orch = _make_orch_nwl()
         orch._launch_window_baseline["WindowsTerminal.exe"] = 1
-        with patch.object(orch, "_count_process_windows", return_value=1), \
-             patch.object(orch, "_is_process_running", return_value=True), \
-             patch.object(orch, "_launch_confirmed", return_value=True), \
+        with patch("desktop.system.count_process_windows", return_value=1), \
+             patch("desktop.system.is_process_running", return_value=True), \
+             patch("core.groundtruth.launch_confirmed", return_value=True), \
              patch("core.orchestrator.time.sleep"):
-            assert orch._verify_launch(_sub_nwl("open windows terminal")) is False, (
+            assert orch.truth.verify_launch(_sub_nwl("open windows terminal"), orch._launch_window_baseline) is False, (
                 "bare process existence must NOT confirm a launch when the app "
                 "pre-existed the subtask"
             )
@@ -1029,15 +811,15 @@ class TestVerifyLaunchWithBaseline:
     def test_new_window_passes(self):
         orch = _make_orch_nwl()
         orch._launch_window_baseline["WindowsTerminal.exe"] = 1
-        with patch.object(orch, "_count_process_windows", return_value=2), \
+        with patch("desktop.system.count_process_windows", return_value=2), \
              patch("core.orchestrator.time.sleep"):
-            assert orch._verify_launch(_sub_nwl("open windows terminal")) is True
+            assert orch.truth.verify_launch(_sub_nwl("open windows terminal"), orch._launch_window_baseline) is True
 
     def test_no_baseline_falls_back_to_process_check(self):
         orch = _make_orch_nwl()
-        with patch.object(orch, "_launch_confirmed", return_value=True), \
+        with patch("core.groundtruth.launch_confirmed", return_value=True), \
              patch("core.orchestrator.time.sleep"):
-            assert orch._verify_launch(_sub_nwl("open windows terminal")) is True
+            assert orch.truth.verify_launch(_sub_nwl("open windows terminal"), orch._launch_window_baseline) is True
 
 
 class TestCtrlCTerminalGuard:
@@ -1047,7 +829,7 @@ class TestCtrlCTerminalGuard:
                           value=None, key="ctrl+c", description="copy error",
                           verification="")
         orch = _make_orch_nwl()
-        with patch.object(orch, "_foreground_is_terminal", return_value=True):
+        with patch("desktop.system.foreground_is_terminal", return_value=True):
             assert orch._execute_step(step) is False
         orch.actor.execute.assert_not_called()
 
@@ -1056,7 +838,7 @@ class TestCtrlCTerminalGuard:
                           value=None, key="ctrl+c", description="copy text",
                           verification="")
         orch = _make_orch_nwl()
-        with patch.object(orch, "_foreground_is_terminal", return_value=False):
+        with patch("desktop.system.foreground_is_terminal", return_value=False):
             orch._execute_step(step)
         orch.actor.execute.assert_called_once()
 
@@ -1119,8 +901,11 @@ class TestGoalCheckWithBaseline:
             found=True, confidence=0.9, x=1, y=2, latency_ms=1.0,
             target="Terminal", element_type="foreground_interactive"))
 
-        with patch.object(orch, "_is_process_running", return_value=True), \
-             patch.object(orch, "_count_process_windows", return_value=1):
+        # launch_query off, so this exercises the planner path the test was
+        # written against rather than the Start-menu macro.
+        with patch("desktop.system.is_process_running", return_value=True), \
+             patch("desktop.system.count_process_windows", return_value=1), \
+             patch("core.apps.launch_query", return_value=None):
             result = orch._execute_subtask(_sub_nwl("open windows terminal"))
 
         # Subtask still completes (planner returned None), but it must have been
@@ -1129,6 +914,24 @@ class TestGoalCheckWithBaseline:
         # must have been called a second time.
         assert result is True
         assert orch.planner.plan_steps.call_count == 2
+
+    def test_macro_steps_all_run_when_window_count_is_flat(self):
+        """Same rule for the macro path: a flat window count must not let the
+        GOAL-CHECK shortcut end the subtask after the first keypress.
+        """
+        ok = ReflectionResult(success=True, confidence=0.9, observation="ok",
+                              error_description="", should_retry=False,
+                              recovery_hint="", ocr_text="")
+        orch = _make_orch_nwl()
+        orch.reflector.verify = MagicMock(return_value=ok)
+        with patch("desktop.system.is_process_running", return_value=True), \
+             patch("desktop.system.count_process_windows", return_value=1):
+            orch._execute_subtask(_sub_nwl("open windows terminal"))
+
+        # win → type → enter: all three, not a shortcut after the first.
+        assert orch.actor.execute.call_count == 3
+        types = [c.args[0].action_type for c in orch.actor.execute.call_args_list]
+        assert types == ["key_press", "type", "key_press"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1157,7 +960,7 @@ def _make_orch_vl() -> TaskOrchestrator:
         actor=MagicMock(),
         reflector=MagicMock(),
         capturer=MagicMock(),
-        task_memory=MagicMock(),
+        history=make_history(),
         config=OrchestratorConfig(),
         on_step_log=lambda _: None,
         ocr=MagicMock(),
@@ -1166,62 +969,45 @@ def _make_orch_vl() -> TaskOrchestrator:
 
 class TestVerifyLaunchTriggerCondition:
 
-    def test_right_click_to_open_context_menu_skips_verification(self):
-        """'right click on the desktop to open the context menu' contains 'open'
-        but no known app keyword. _verify_launch must return True immediately
-        (skip verification) and never try a process/OCR check.
-        """
+    @pytest.mark.parametrize("description", [
+        # "open" as a menu/state word, with no app named: the old bare
+        # substring match fired here and sent the agent to the Start menu.
+        "right click on the desktop to open the context menu",
+        "with the context menu open, click New",
+        "with the New menu open, click Folder",
+        # explicitly already up
+        "open notepad (already open from previous step)",
+        "use the terminal already running",
+        # no launch word at all
+        "type TestFolder and press enter",
+        # Live 03:39 run, Teams: "open" + an app name inside a leading
+        # "with ...," clause, but the body is a plain click. verify_launch
+        # carried its own loose detector and demanded a NEW Teams window for
+        # this. It passed only because clicking New meeting happens to open a
+        # window; in-place, the subtask would have re-run and clicked twice.
+        "with the Calendar open in Microsoft Teams, click the New meeting button",
+        "with the schedule-meeting form open, set the title to PROJECT DISCUSSION",
+        "with Notepad open, click in the document area and type a haiku",
+    ])
+    def test_non_launch_subtasks_skip_verification(self, description):
+        """True here means "nothing to verify" — never a process or OCR check."""
         orch = _make_orch_vl()
-        subtask = _sub_vl("right click on the desktop to open the context menu")
-        result = orch._verify_launch(subtask)
-        # True = "no verification needed" (correctly skipped)
-        assert result is True
-
-    def test_context_menu_open_click_new_skips_verification(self):
-        """'with the context menu open, click New' — 'open' in desc, no app keyword.
-        Must skip verification.
-        """
-        orch = _make_orch_vl()
-        result = orch._verify_launch(_sub_vl("with the context menu open, click New"))
-        assert result is True
-
-    def test_new_menu_open_click_folder_skips_verification(self):
-        """'with the New menu open, click Folder' — same pattern, must skip."""
-        orch = _make_orch_vl()
-        result = orch._verify_launch(_sub_vl("with the New menu open, click Folder"))
-        assert result is True
-
-    def test_already_open_always_skips(self):
-        """'already open' in desc → always True regardless of other words."""
-        orch = _make_orch_vl()
-        result = orch._verify_launch(_sub_vl("open notepad (already open from previous step)"))
-        assert result is True
-
-    def test_already_running_always_skips(self):
-        """'already running' in desc → always True."""
-        orch = _make_orch_vl()
-        result = orch._verify_launch(_sub_vl("use the terminal already running"))
-        assert result is True
-
-    def test_no_launch_word_at_all_skips(self):
-        """Subtask with no 'open'/'launch'/'search launcher' — skips immediately."""
-        orch = _make_orch_vl()
-        result = orch._verify_launch(_sub_vl("type TestFolder and press enter"))
-        assert result is True
+        assert orch.truth.verify_launch(
+            _sub_vl(description), orch._launch_window_baseline) is True
 
     def test_search_launcher_always_triggers(self):
         """'search launcher' explicitly → always runs verification path.
         Mock process check to return True so the call completes.
         """
         orch = _make_orch_vl()
-        with patch.object(orch, '_is_process_running', return_value=False), \
-             patch.object(orch, '_process_has_visible_window', return_value=False), \
-             patch('core.orchestrator.capture_snapshot') as mock_snap:
+        with patch("desktop.system.is_process_running", return_value=False), \
+             patch("desktop.system.process_has_visible_window", return_value=False), \
+             patch('desktop.snapshot.capture_snapshot') as mock_snap:
             snap = MagicMock()
             snap.ocr_regions = []
             mock_snap.return_value = snap
             # 'search launcher' but no known app — signals list empty → returns True
-            result = orch._verify_launch(_sub_vl("use search launcher to open an app"))
+            result = orch.truth.verify_launch(_sub_vl("use search launcher to open an app"), orch._launch_window_baseline)
             # With no signals derived, _verify_launch returns True (nothing to check)
             assert result is True
 
@@ -1230,15 +1016,15 @@ class TestVerifyLaunchTriggerCondition:
         Mock process check to fail so we can confirm it ran.
         """
         orch = _make_orch_vl()
-        with patch.object(orch, '_is_process_running', return_value=False), \
-             patch.object(orch, '_process_has_visible_window', return_value=False), \
-             patch('core.orchestrator.capture_snapshot') as mock_snap:
+        with patch("desktop.system.is_process_running", return_value=False), \
+             patch("desktop.system.process_has_visible_window", return_value=False), \
+             patch('desktop.snapshot.capture_snapshot') as mock_snap:
             snap = MagicMock()
             # Simulate no matching OCR text on screen
             snap.ocr_regions = []
             mock_snap.return_value = snap
             # 'launch Firefox' triggers. Process not found → False.
-            result = orch._verify_launch(_sub_vl("launch Firefox browser"))
+            result = orch.truth.verify_launch(_sub_vl("launch Firefox browser"), orch._launch_window_baseline)
             # Firefox is in _PROCESS_MAP_WINDOWS and _APP_SIGNALS; process not found → False
             assert result is False
 
@@ -1253,9 +1039,9 @@ class TestVerifyLaunchAppKeywordCheck:
         """
         orch = _make_orch_vl()
         with patch('core.orchestrator.time.sleep'), \
-             patch.object(orch, '_is_process_running', return_value=False), \
-             patch.object(orch, '_process_has_visible_window', return_value=False):
-            result = orch._verify_launch(_sub_vl("open notepad"))
+             patch("desktop.system.is_process_running", return_value=False), \
+             patch("desktop.system.process_has_visible_window", return_value=False):
+            result = orch.truth.verify_launch(_sub_vl("open notepad"), orch._launch_window_baseline)
         assert result is False, (
             "'open notepad' must trigger launch verification; "
             "with process not found it should return False"
@@ -1265,27 +1051,27 @@ class TestVerifyLaunchAppKeywordCheck:
         """'open calculator' → triggers verification (process not found → False)."""
         orch = _make_orch_vl()
         with patch('core.orchestrator.time.sleep'), \
-             patch.object(orch, '_is_process_running', return_value=False), \
-             patch.object(orch, '_process_has_visible_window', return_value=False):
-            result = orch._verify_launch(_sub_vl("open calculator"))
+             patch("desktop.system.is_process_running", return_value=False), \
+             patch("desktop.system.process_has_visible_window", return_value=False):
+            result = orch.truth.verify_launch(_sub_vl("open calculator"), orch._launch_window_baseline)
         assert result is False
 
     def test_open_terminal_triggers_verification(self):
         """'open windows terminal' → triggers verification."""
         orch = _make_orch_vl()
         with patch('core.orchestrator.time.sleep'), \
-             patch.object(orch, '_is_process_running', return_value=False), \
-             patch.object(orch, '_process_has_visible_window', return_value=False):
-            result = orch._verify_launch(_sub_vl("open windows terminal"))
+             patch("desktop.system.is_process_running", return_value=False), \
+             patch("desktop.system.process_has_visible_window", return_value=False):
+            result = orch.truth.verify_launch(_sub_vl("open windows terminal"), orch._launch_window_baseline)
         assert result is False
 
     def test_open_notepad_process_found_returns_true(self):
         """'open notepad' with Notepad process running → verification passes → True."""
         orch = _make_orch_vl()
         with patch('core.orchestrator.time.sleep'), \
-             patch.object(orch, '_is_process_running', return_value=True), \
-             patch.object(orch, '_process_has_visible_window', return_value=False):
-            result = orch._verify_launch(_sub_vl("open notepad"))
+             patch("desktop.system.is_process_running", return_value=True), \
+             patch("desktop.system.process_has_visible_window", return_value=False):
+            result = orch.truth.verify_launch(_sub_vl("open notepad"), orch._launch_window_baseline)
         assert result is True
 
 
@@ -1299,7 +1085,7 @@ class TestVerifyLaunchForegroundOCR:
 
         # "libreoffice" is in _APP_SIGNALS but not in _PROCESS_MAP_WINDOWS, so
         # _verify_launch falls through to the OCR-signal check unconditionally.
-        with patch('core.orchestrator.capture_snapshot') as mock_snap:
+        with patch('desktop.snapshot.capture_snapshot') as mock_snap:
 
             # Two regions: one foreground with the signal, one background without
             fg_region = MagicMock()
@@ -1314,7 +1100,7 @@ class TestVerifyLaunchForegroundOCR:
             snap.ocr_regions = [fg_region, bg_region]
             mock_snap.return_value = snap
 
-            result = orch._verify_launch(_sub_vl("launch libreoffice"))
+            result = orch.truth.verify_launch(_sub_vl("launch libreoffice"), orch._launch_window_baseline)
             # "LibreOffice" is in _APP_SIGNALS signals; foreground region has it → True
             assert result is True
             # Confirm capture_snapshot was called (not raw self._ocr.extract)
@@ -1326,7 +1112,7 @@ class TestVerifyLaunchForegroundOCR:
         """
         orch = _make_orch_vl()
 
-        with patch('core.orchestrator.capture_snapshot') as mock_snap:
+        with patch('desktop.snapshot.capture_snapshot') as mock_snap:
 
             bg_region = MagicMock()
             bg_region.text = "LibreOffice"
@@ -1340,7 +1126,7 @@ class TestVerifyLaunchForegroundOCR:
             snap.ocr_regions = [bg_region, fg_region]
             mock_snap.return_value = snap
 
-            result = orch._verify_launch(_sub_vl("launch libreoffice"))
+            result = orch.truth.verify_launch(_sub_vl("launch libreoffice"), orch._launch_window_baseline)
             # "LibreOffice" is only in background → not confirmed → False
             assert result is False
 
@@ -1389,7 +1175,8 @@ class TestPlanQueue:
 
     def test_queue_flushed_on_uncertain_nonidempotent(self):
         """An uncertain-but-accepted type drops the queue: the 'next step
-        verifies live' guarantee requires a fresh plan."""
+        verifies live' guarantee requires a fresh plan.
+        """
         t = _step_loop("type", target=None, value="hello world")
         b = _step_loop("key_press", target=None, key="enter")
         orch = _make_orch_loop([])
@@ -1403,7 +1190,8 @@ class TestPlanQueue:
 
 class TestSaveTargetDiskGate:
     """A "save as <path>" subtask has one ground truth: the file on disk.
-    The planner's "goal achieved" must never overrule its absence."""
+    The planner's "goal achieved" must never overrule its absence.
+    """
 
     def _save_subtask(self):
         return SubTask(
@@ -1414,9 +1202,8 @@ class TestSaveTargetDiskGate:
     def test_planner_done_rejected_when_file_missing(self):
         orch = _make_orch_loop([])
         orch.planner.plan_steps = MagicMock(return_value=None)
-        orch._try_burst = MagicMock(return_value=False)
         orch._try_save_as = MagicMock(return_value=False)
-        orch._file_saved_fresh = MagicMock(return_value=False)
+        orch._file_saved_fresh_STUB = False
         orch.config.visual_replan_after = 0
         assert orch._execute_subtask(self._save_subtask()) is False
         # every "done" claim was rejected until the failure limit tripped
@@ -1427,6 +1214,782 @@ class TestSaveTargetDiskGate:
         orch = _make_orch_loop([])
         orch.planner.plan_steps = MagicMock(return_value=None)
         orch._try_save_as = MagicMock(return_value=False)
-        orch._file_saved_fresh = MagicMock(return_value=True)
-        assert orch._execute_subtask(self._save_subtask()) is True
+        with patch("core.orchestrator.groundtruth.file_saved_fresh", return_value=True):
+            assert orch._execute_subtask(self._save_subtask()) is True
         orch.planner.plan_steps.assert_not_called()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# _goal_already_satisfied — pre-plan goal check
+#
+# Live failure (AI-PC log 2026-07-05 14:25–14:34): one invoke opened the
+# Outlook event form, but the subtask "click New event to open the form" kept
+# re-planning that click for 8 more cycles — state-describing verifiers kept
+# blessing the no-ops ("the form is visible → success") and nothing ever asked
+# "is the goal already met?". The check must say yes there, and stay
+# conservative everywhere else.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+
+def _goal_check_orch(llm_reply: str):
+    orch = _make_orch_loop([])
+    resp = MagicMock()
+    resp.content = llm_reply
+    orch.reflector.client.query_llm = MagicMock(return_value=resp)
+    return orch
+
+
+def _run_state(**kw):
+    return SubtaskRun(started_at=0.0, screen_context=(
+        "CLICKABLE CONTROLS: 'New event' [Document], 'Save' [Button], "
+        "'Add title' [Edit], 'Event body' [Edit]"
+    ), **kw)
+
+
+def _subtask(desc="click the New event button to open the schedule-meeting form"):
+    return SubTask(id=1, description=desc, depends_on=[])
+
+
+class TestGoalAlreadySatisfied:
+
+    def test_confident_yes_returns_true(self):
+        orch = _goal_check_orch(
+            '{"satisfied": true, "confidence": 0.95, '
+            '"evidence": "Save button and Add title field on screen"}'
+        )
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is True
+
+    def test_low_confidence_yes_returns_false(self):
+        orch = _goal_check_orch('{"satisfied": true, "confidence": 0.5}')
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is False
+
+    def test_no_returns_false(self):
+        orch = _goal_check_orch('{"satisfied": false, "confidence": 0.9}')
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is False
+
+    def test_think_block_and_prose_around_json_tolerated(self):
+        orch = _goal_check_orch(
+            '<think>the form is open already</think>\n'
+            'Here is my verdict: {"satisfied": true, "confidence": 0.9, '
+            '"evidence": "form controls visible"}'
+        )
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is True
+
+    def test_garbage_reply_returns_false(self):
+        orch = _goal_check_orch("the goal seems achieved to me")
+        assert orch._goal_already_satisfied(_run_state(), _subtask()) is False
+
+    def test_launch_subtasks_excluded(self):
+        orch = _goal_check_orch('{"satisfied": true, "confidence": 1.0}')
+        run = _run_state(is_launch_goal=True)
+        assert orch._goal_already_satisfied(run, _subtask("open Outlook")) is False
+        orch.reflector.client.query_llm.assert_not_called()
+
+    def test_deterministic_subtask_kinds_excluded(self):
+        orch = _goal_check_orch('{"satisfied": true, "confidence": 1.0}')
+        for kw in ({"is_cmd_subtask": True}, {"save_target": "C:/x.txt"},
+                   {"type_payload": "hello"}):
+            assert orch._goal_already_satisfied(_run_state(**kw), _subtask()) is False
+        orch.reflector.client.query_llm.assert_not_called()
+
+    def test_unsatisfied_evidence_fed_to_planner_context(self):
+        """Live failure 2026-07-05 16:31+: after a replan the planner redid the
+        whole fill-details subtask (re-set the title, re-clicked the date)
+        because the goal check's "what's missing" evidence was discarded.
+        """
+        orch = _goal_check_orch(
+            '{"satisfied": false, "confidence": 0.9, '
+            '"evidence": "subject is set, but start time is not 3:00 PM"}'
+        )
+        run = _run_state()
+        assert orch._goal_already_satisfied(run, _subtask()) is False
+        assert "start time is not 3:00 PM" in run.screen_context
+        assert "GOAL CHECK (what is still missing)" in run.screen_context
+
+    def test_satisfied_verdict_leaves_context_untouched(self):
+        orch = _goal_check_orch(
+            '{"satisfied": true, "confidence": 0.95, "evidence": "form open"}'
+        )
+        run = _run_state()
+        before = run.screen_context
+        assert orch._goal_already_satisfied(run, _subtask()) is True
+        assert run.screen_context == before
+
+
+class TestStopEventHaltsAttempts:
+    """Live failure 2026-07-05 16:06: EMERGENCY STOP fired mid-step, but the
+    agent kept grounding/clicking for 38 more seconds — only the outer step
+    loop checked the stop event. The attempt loop must bail immediately.
+    """
+
+    def test_attempt_loop_exits_on_stop_event(self):
+        orch = _make_orch_loop([])
+        orch._stop_event.set()
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="click", target="New event",
+            value=None, key=None, description="click", verification="",
+        )
+        run = SubtaskRun(started_at=0.0)
+        subtask = SubTask(id=1, description="click New event", depends_on=[])
+        assert orch._run_step_attempts(run, subtask, step) == "step_failed"
+        orch.actor.execute.assert_not_called()
+
+    def test_unsatisfied_evidence_stored_for_final_report(self):
+        orch = _goal_check_orch(
+            '{"satisfied": false, "confidence": 0.9, '
+            '"evidence": "only a sign-in screen is visible"}'
+        )
+        orch._goal_already_satisfied(_run_state(), _subtask())
+        assert orch._last_goal_evidence == "only a sign-in screen is visible"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Invoke-dead blacklist
+#
+# Live failure (AI-PC 18:41-18:44): 'Invite to Teams' was pattern-invoked six
+# times with zero screen change — WebView2 providers accept Invoke/Toggle
+# without doing anything, and the coordinate blacklist never fires because no
+# pixel is involved. One failed verify must push retries onto the pixel path.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestInvokeDeadBlacklist:
+    @pytest.fixture(autouse=True)
+    def _prefer_uia_invoke(self, monkeypatch):
+        """Exercise the UIA pattern-invoke click path.
+
+        config.FORCE_MOUSE defaults to True (every grounded click is delivered
+        with the visible mouse), so the invoke path — still the more robust
+        route on WebView2 buttons that swallow synthesized clicks — must be
+        selected explicitly, exactly as a deployment would via the env var.
+        """
+        monkeypatch.setenv("AGENT_FORCE_MOUSE", "0")
+
+
+    def _orch(self):
+        orch = _make_orch_loop([])
+        orch.grounder.ground = MagicMock(return_value=GroundingResult(
+            found=True, confidence=1.0, x=533, y=752,
+            latency_ms=5.0, target="Invite to Teams", method="uia",
+            element_type="foreground_interactive",
+        ))
+        return orch
+
+    def _click_step(self):
+        return ActionStep(
+            id=1, subtask_id=1, action_type="click", target="Invite to Teams",
+            value=None, key=None, description="click invite", verification="",
+        )
+
+    def test_failed_invoke_blacklists_target_and_retry_uses_pixels(self):
+        orch = self._orch()
+        step = self._click_step()
+        with patch("desktop.uia.invoke_element", return_value=True):
+            assert orch._execute_step(step) is True
+            assert orch._last_was_invoke is True
+
+        # Reflection says the screen never changed → invoke path goes dead.
+        run = SubtaskRun(started_at=0.0)
+        run.last_error = "Screen unchanged after click"
+        reflection = MagicMock(success=False, confidence=0.98,
+                               should_retry=True, observation="unchanged")
+        orch.reflector.verify = MagicMock(return_value=reflection)
+        orch._judge_reflection(run, step, non_idempotent=False,
+                               pre_click_hash=None)
+        assert "invite to teams" in orch._invoke_dead
+
+        # Retry: invoke must be skipped; the actor performs a real click.
+        with patch("desktop.uia.invoke_element", return_value=True) as inv2:
+            assert orch._execute_step(step) is True
+            inv2.assert_not_called()
+        orch.actor.execute.assert_called()
+
+    def test_other_targets_still_invoke(self):
+        orch = self._orch()
+        orch._invoke_dead.add("invite to teams")
+        step = ActionStep(
+            id=2, subtask_id=1, action_type="click", target="Calendar",
+            value=None, key=None, description="click calendar", verification="",
+        )
+        orch.grounder.ground = MagicMock(return_value=GroundingResult(
+            found=True, confidence=1.0, x=100, y=200,
+            latency_ms=5.0, target="Calendar", method="uia",
+            element_type="foreground_interactive",
+        ))
+        with patch("desktop.uia.invoke_element", return_value=True) as inv:
+            assert orch._execute_step(step) is True
+            inv.assert_called_once()
+
+    def test_same_screen_verdict_cached_no_second_llm_call(self):
+        """Latency: identical screens must not re-pay the goal-check LLM call
+        (live: the same 'Save present but…' answer was recomputed ~10×).
+        """
+        orch = _goal_check_orch(
+            '{"satisfied": false, "confidence": 0.9, '
+            '"evidence": "attendee field is empty"}'
+        )
+        run = _run_state()
+        base_ctx = run.screen_context
+        assert orch._goal_already_satisfied(run, _subtask()) is False
+        assert orch.reflector.client.query_llm.call_count == 1
+
+        run.screen_context = base_ctx   # same screen next cycle
+        assert orch._goal_already_satisfied(run, _subtask()) is False
+        assert orch.reflector.client.query_llm.call_count == 1   # cache hit
+        assert "attendee field is empty" in run.screen_context   # evidence re-fed
+
+    def test_changed_screen_misses_cache(self):
+        orch = _goal_check_orch('{"satisfied": false, "confidence": 0.9}')
+        run = _run_state()
+        orch._goal_already_satisfied(run, _subtask())
+        run.screen_context = "completely different screen"
+        orch._goal_already_satisfied(run, _subtask())
+        assert orch.reflector.client.query_llm.call_count == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Invoke failures must not poison the pixel path, and occluded targets must
+# fail fast with the blocker's name (regression, live AI-PC run 2026-07-06
+# 07:26: Teams' 'Meeting created' popup covered the form; 'Send' invoke →
+# delta=0 → the REAL button's point was dead-marked although no pixel was
+# ever clicked → the retry's pixel click landed on a VLM title-bar guess).
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _make_orch_occl(method="uia"):
+    orch = _make_orch_loop([])
+    orch.grounder.ground = MagicMock(return_value=GroundingResult(
+        found=True, confidence=1.0, x=1404, y=168,
+        latency_ms=5.0, target="Send", method=method,
+        element_type="foreground_interactive",
+    ))
+    orch.grounder.mark_dead = MagicMock()
+    return orch
+
+
+def _send_click():
+    return ActionStep(
+        id=1, subtask_id=1, action_type="click", target="Send",
+        value=None, key=None, description="click Send", verification="",
+    )
+
+
+def _unchanged_reflection():
+    return MagicMock(
+        success=False, confidence=0.98, should_retry=True,
+        error_description="Screen unchanged after click",
+    )
+
+
+class TestInvokeFailureKeepsPixelAlive:
+    @pytest.fixture(autouse=True)
+    def _prefer_uia_invoke(self, monkeypatch):
+        """Exercise the UIA pattern-invoke click path.
+
+        config.FORCE_MOUSE defaults to True (every grounded click is delivered
+        with the visible mouse), so the invoke path — still the more robust
+        route on WebView2 buttons that swallow synthesized clicks — must be
+        selected explicitly, exactly as a deployment would via the env var.
+        """
+        monkeypatch.setenv("AGENT_FORCE_MOUSE", "0")
+
+
+    def test_failed_invoke_does_not_mark_point_dead(self):
+        orch = _make_orch_occl()
+        step = _send_click()
+        with patch("desktop.uia.covering_element", return_value=None), \
+             patch("desktop.uia.invoke_element", return_value=True):
+            assert orch._execute_step(step) is True
+        assert orch._last_was_invoke is True
+
+        run = SubtaskRun(started_at=0.0)
+        orch.reflector.verify = MagicMock(return_value=_unchanged_reflection())
+        with patch("desktop.uia.covering_element", return_value=None):
+            orch._judge_reflection(run, step, non_idempotent=False,
+                                   pre_click_hash=None)
+        orch.grounder.mark_dead.assert_not_called()   # point never clicked
+        assert "send" in orch._invoke_dead            # invoke path blacklisted
+
+    def test_failed_pixel_click_still_marks_dead(self):
+        orch = _make_orch_occl()
+        step = _send_click()
+        with patch("desktop.uia.covering_element", return_value=None), \
+             patch("desktop.uia.invoke_element", return_value=False):
+            assert orch._execute_step(step)           # falls to pixel click
+        assert orch._last_was_invoke is False
+
+        run = SubtaskRun(started_at=0.0)
+        orch.reflector.verify = MagicMock(return_value=_unchanged_reflection())
+        with patch("desktop.uia.covering_element", return_value=None):
+            orch._judge_reflection(run, step, non_idempotent=False,
+                                   pre_click_hash=None)
+        orch.grounder.mark_dead.assert_called_once_with("Send", 1404, 168)
+
+    def test_covered_point_failure_names_blocker_in_error(self):
+        orch = _make_orch_occl()
+        step = _send_click()
+        with patch("desktop.uia.covering_element", return_value=None), \
+             patch("desktop.uia.invoke_element", return_value=False):
+            orch._execute_step(step)
+
+        run = SubtaskRun(started_at=0.0)
+        orch.reflector.verify = MagicMock(return_value=_unchanged_reflection())
+        with patch("desktop.uia.covering_element",
+                   return_value="Meeting created"):
+            orch._judge_reflection(run, step, non_idempotent=False,
+                                   pre_click_hash=None)
+        assert "Meeting created" in run.last_error
+        assert "overlay" in run.last_error
+
+
+class TestOcclusionGate:
+    @pytest.fixture(autouse=True)
+    def _prefer_uia_invoke(self, monkeypatch):
+        """Exercise the UIA pattern-invoke click path.
+
+        config.FORCE_MOUSE defaults to True (every grounded click is delivered
+        with the visible mouse), so the invoke path — still the more robust
+        route on WebView2 buttons that swallow synthesized clicks — must be
+        selected explicitly, exactly as a deployment would via the env var.
+        """
+        monkeypatch.setenv("AGENT_FORCE_MOUSE", "0")
+
+
+    def test_covered_uia_point_fails_fast_with_blocker_name(self):
+        orch = _make_orch_occl(method="uia")
+        step = _send_click()
+        with patch("desktop.uia.covering_element",
+                   return_value="Meeting created") as cov, \
+             patch("desktop.uia.invoke_element") as inv:
+            assert orch._execute_step(step) is False
+            cov.assert_called_once()
+            inv.assert_not_called()
+        orch.actor.execute.assert_not_called()
+        assert "Meeting created" in orch._exec_fail_reason
+
+    def test_uncovered_point_proceeds_to_invoke(self):
+        orch = _make_orch_occl(method="uia")
+        step = _send_click()
+        with patch("desktop.uia.covering_element", return_value=None), \
+             patch("desktop.uia.invoke_element", return_value=True) as inv:
+            assert orch._execute_step(step) is True
+            inv.assert_called_once()
+
+    def test_ocr_grounded_click_skips_hit_test(self):
+        # OCR text rarely equals the accessible name — hit-testing there
+        # would false-positive, so the gate only guards UIA groundings.
+        orch = _make_orch_occl(method="ocr_fuzzy")
+        step = _send_click()
+        with patch("desktop.uia.covering_element") as cov:
+            assert orch._execute_step(step)
+            cov.assert_not_called()
+        orch.actor.execute.assert_called_once()
+
+    def test_occlusion_reason_reaches_step_failure_record(self):
+        orch = _make_orch_occl(method="uia")
+        step = _send_click()
+        run = SubtaskRun(started_at=0.0)
+        subtask = SubTask(id=1, description="click Send", depends_on=[])
+        orch.config.max_retries_per_step = 1
+        with patch("desktop.uia.covering_element",
+                   return_value="Meeting created"):
+            outcome = orch._run_step_attempts(run, subtask, step)
+        assert outcome == "step_failed"
+        assert "Meeting created" in run.last_error
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Planner-done needs evidence + typed text must land in the NAMED field
+# (regression, live AI-PC run 2026-07-06 13:05: planner returned [] "goal
+# achieved" for 'set the date to 07/08/2026' while Start date read
+# '7/6/2026'; later an attendee email was typed into the Title field and the
+# content-only type verify blessed it).
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _plan_orch(planned, goal_satisfied=False):
+    """Orchestrator whose planner returns `planned` and whose goal check
+    answers `goal_satisfied` about the live screen.
+    """
+    orch = _make_orch_loop([])
+    orch.planner.plan_steps = MagicMock(return_value=planned)
+    orch.reflector.client = make_llm(
+        goal_check_reply(satisfied=goal_satisfied,
+                         confidence=0.95 if goal_satisfied else 0.0))
+    orch.anchor.ensure_foreground = MagicMock()
+    return orch
+
+
+class TestPlannerDoneNeedsEvidence:
+    """A planner returning [] is a CLAIM, never proof.
+
+    The goal check refereeing that claim against the live screen is what
+    stopped the live 8-cycle "Goal achieved" loop on a subtask whose form had
+    never opened, which ended in a false success.
+    """
+
+    def test_empty_plan_is_rejected_when_the_screen_disagrees(self):
+        orch = _plan_orch([], goal_satisfied=False)
+        run = SubtaskRun(started_at=0.0)
+        subtask = SubTask(id=1, description="set the date to 07/08/2026",
+                          depends_on=[])
+        outcome, step = orch._plan_next_step(run, subtask, [])
+        assert outcome != "done"
+        assert step is None
+        assert any("goal state is not visible" in c for c in run.completed)
+
+    def test_goal_check_evidence_completes_the_subtask(self):
+        orch = _plan_orch([], goal_satisfied=True)
+        run = SubtaskRun(started_at=0.0)
+        run.completed = ["[set_value] date set to 07/08/2026"]
+        subtask = SubTask(id=1, description="set the date to 07/08/2026",
+                          depends_on=[])
+        outcome, _ = orch._plan_next_step(run, subtask, [])
+        assert outcome == "done"
+
+    def test_excluded_kind_gets_forced_goal_check(self):
+        orch = _plan_orch([])
+        run = SubtaskRun(started_at=0.0)
+        run.type_payload = "07/08/2026"
+        subtask = SubTask(id=1, description="set the date to 07/08/2026",
+                          depends_on=[])
+        # Pre-plan check (excluded kind) → False; forced confirm → True.
+        orch._goal_already_satisfied = MagicMock(side_effect=[False, True])
+        outcome, _ = orch._plan_next_step(run, subtask, [])
+        assert outcome == "done"
+        _, kwargs = orch._goal_already_satisfied.call_args
+        assert kwargs.get("skip_exclusions") is True
+
+    def test_skip_exclusions_reaches_the_llm(self):
+        orch = _goal_check_orch(
+            '{"satisfied": true, "confidence": 0.9, "evidence": "date shows"}'
+        )
+        run = _run_state()
+        run.type_payload = "07/08/2026"
+        # Excluded normally: no LLM call, plain False.
+        assert orch._goal_already_satisfied(run, _subtask()) is False
+        assert orch.reflector.client.query_llm.call_count == 0
+        # Forced: the LLM is consulted.
+        assert orch._goal_already_satisfied(
+            run, _subtask(), skip_exclusions=True
+        ) is True
+        assert orch.reflector.client.query_llm.call_count == 1
+
+
+class TestTypedTextTargetCheck:
+
+    def _info(self, name, value):
+        return {"name": name, "value": value,
+                "control_type": "EditControl", "rect": (0, 0, 10, 10)}
+
+    def test_wrong_field_rejected(self, monkeypatch):
+        orch = _make_orch_loop([])
+        monkeypatch.setattr(
+            "desktop.uia.focused_element_info",
+            lambda **kw: self._info(
+                "Add title", "project discussionshehrozkashif57@gmail.com"),
+        )
+        assert orch.truth.typed_text_in_focused_control(
+            "shehrozkashif57@gmail.com", "Add required attendees"
+        ) is False
+
+    def test_right_field_accepted(self, monkeypatch):
+        orch = _make_orch_loop([])
+        monkeypatch.setattr(
+            "desktop.uia.focused_element_info",
+            lambda **kw: self._info(
+                "Add required attendees", "shehrozkashif57@gmail.com"),
+        )
+        assert orch.truth.typed_text_in_focused_control(
+            "shehrozkashif57@gmail.com", "Add required attendees"
+        ) is True
+
+    def test_no_target_checks_content_only(self, monkeypatch):
+        orch = _make_orch_loop([])
+        monkeypatch.setattr(
+            "desktop.uia.focused_element_info",
+            lambda **kw: self._info("Whatever", "hello world"),
+        )
+        assert orch.truth.typed_text_in_focused_control("hello world") is True
+
+
+class TestLatencyGuards:
+    """Two pure-waste patterns from the live 13:36 run: a 10-16 s goal check
+    between every queued step (the planner is not even consulted there), and
+    3 identical retries of deterministic tree actions.
+    """
+
+    def test_goal_check_skipped_while_queue_pending(self):
+        orch = _plan_orch([])
+        orch._goal_already_satisfied = MagicMock(return_value=True)
+        run = SubtaskRun(started_at=0.0)
+        run.step_queue = [ActionStep(
+            id=9, subtask_id=1, action_type="click", target="X",
+            value=None, key=None, description="queued", verification="",
+        )]
+        outcome, step = orch._plan_next_step(
+            run, SubTask(id=1, description="fill the form", depends_on=[]), [],
+        )
+        assert outcome == "step"
+        assert step.description == "queued"
+        orch._goal_already_satisfied.assert_not_called()
+
+    def test_failed_tree_action_not_blind_retried(self):
+        orch = _make_orch_loop([])
+        orch.config.max_retries_per_step = 3
+        orch._execute_step = MagicMock(return_value=False)
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="select", target="Start time",
+            value="3:00 PM", key=None, description="set time", verification="",
+        )
+        out = orch._run_step_attempts(
+            SubtaskRun(started_at=0.0),
+            SubTask(id=1, description="set the start time", depends_on=[]),
+            step,
+        )
+        assert out == "step_failed"
+        orch._execute_step.assert_called_once()
+
+    def test_failed_click_still_gets_retries(self):
+        orch = _make_orch_loop([])
+        orch.config.max_retries_per_step = 3
+        orch._execute_step = MagicMock(return_value=False)
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="click", target="Save",
+            value=None, key=None, description="click save", verification="",
+        )
+        out = orch._run_step_attempts(
+            SubtaskRun(started_at=0.0),
+            SubTask(id=1, description="click Save", depends_on=[]),
+            step,
+        )
+        assert out == "step_failed"
+        assert orch._execute_step.call_count == 3
+
+
+class TestSelectMissReachesPlanner:
+    """Regression (live 14:12 run): 'select GST' failed with the real labels
+    visible only in the log — the planner's failure record said nothing, so
+    it retried 'GST' until the replan budget died.
+    """
+
+    def test_miss_details_land_in_last_error(self, monkeypatch):
+        orch = _make_orch_loop([])
+        orch._execute_step = MagicMock(return_value=False)
+        monkeypatch.setattr(
+            "desktop.uia.pop_select_miss",
+            lambda: {"target": "Time zone", "option": "GST",
+                     "items": ["(UTC-12:00) International Date Line West",
+                               "(UTC-08:00) Pacific Time (US & Canada)"]},
+        )
+        run = SubtaskRun(started_at=0.0)
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="select", target="Time zone",
+            value="GST", key=None, description="set tz", verification="",
+        )
+        out = orch._run_step_attempts(
+            run, SubTask(id=1, description="set tz to GST", depends_on=[]),
+            step,
+        )
+        assert out == "step_failed"
+        assert "GST" in run.last_error
+        assert "(UTC-08:00) Pacific Time (US & Canada)" in run.last_error
+
+    def test_no_miss_keeps_generic_error(self, monkeypatch):
+        orch = _make_orch_loop([])
+        orch._execute_step = MagicMock(return_value=False)
+        monkeypatch.setattr("desktop.uia.pop_select_miss", lambda: None)
+        run = SubtaskRun(started_at=0.0)
+        step = ActionStep(
+            id=1, subtask_id=1, action_type="select", target="Time zone",
+            value="GST", key=None, description="set tz", verification="",
+        )
+        orch._run_step_attempts(
+            run, SubTask(id=1, description="set tz", depends_on=[]), step,
+        )
+        assert "execution failed" in run.last_error
+
+
+class TestGoalCheckSeesLastAction:
+    """Regression (live 14:12 run): the goal check re-failed an OPEN form
+    with 'the button was not clicked' — the planner re-clicked 4x and a
+    stray Escape closed the form. The check now sees the last verified
+    action and must judge its end state.
+    """
+
+    def test_last_verified_action_named_in_prompt(self):
+        orch = _goal_check_orch(
+            '{"satisfied": true, "confidence": 0.9, "evidence": "form open"}'
+        )
+        run = _run_state()
+        run.completed = ["[FAILED: something] earlier", "[click] Click 'Schedule a meeting'"]
+        assert orch._goal_already_satisfied(run, _subtask()) is True
+        prompt = orch.reflector.client.query_llm.call_args[0][0][1]["content"]
+        assert "Last verified action" in prompt
+        assert "Click 'Schedule a meeting'" in prompt
+
+    def test_no_verified_action_no_extra_line(self):
+        orch = _goal_check_orch(
+            '{"satisfied": false, "confidence": 0.9, "evidence": "x"}'
+        )
+        run = _run_state()
+        run.completed = ["[FAILED: y] only failures"]
+        orch._goal_already_satisfied(run, _subtask())
+        prompt = orch.reflector.client.query_llm.call_args[0][0][1]["content"]
+        assert "Last verified action" not in prompt
+
+
+class TestBlockingOverlayInContext:
+    """Regression (live 15:14-15:24 run): the occlusion gate correctly
+    refused to click Save under the 'Meeting created' popup, but its hint in
+    the step-failure record was ignored for six ~60 s planning cycles while
+    'Close' sat in the controls list. The proven overlay must enter the
+    SCREEN CONTEXT, the channel the planner reliably follows.
+    """
+
+    def test_gate_records_overlay_for_context(self):
+        orch = _make_orch_occl(method="uia")
+        step = _send_click()
+        with patch("desktop.uia.covering_element",
+                   return_value="Meeting created"):
+            assert orch._execute_step(step) is False
+        assert orch._blocking_overlay == ("Send", "Meeting created")
+
+    def test_overlay_line_reaches_planner_context_once(self):
+        orch = _plan_orch([ActionStep(
+            id=1, subtask_id=1, action_type="click", target="Close",
+            value=None, key=None, description="close popup", verification="",
+        )])
+        orch._blocking_overlay = ("Save", "Meeting created")
+        run = SubtaskRun(started_at=0.0)
+        outcome, _ = orch._plan_next_step(
+            run, SubTask(id=1, description="click Save", depends_on=[]), [],
+        )
+        assert outcome == "step"
+        assert "BLOCKING OVERLAY" in run.screen_context
+        assert "Meeting created" in run.screen_context
+        assert orch._blocking_overlay is None   # one-shot until re-blocked
+
+    def test_no_overlay_no_line(self):
+        orch = _plan_orch([ActionStep(
+            id=1, subtask_id=1, action_type="click", target="Save",
+            value=None, key=None, description="save", verification="",
+        )])
+        run = SubtaskRun(started_at=0.0)
+        orch._plan_next_step(
+            run, SubTask(id=1, description="click Save", depends_on=[]), [],
+        )
+        assert "BLOCKING OVERLAY" not in run.screen_context
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Start-menu launch macro
+#
+# "open <known app>" is a question with one answer. The 8B planner spent
+# 14.4 s on it for Notepad and 14.5 s for Teams in the live runs, and both
+# times returned win → type the name → Enter — the same route the launch-retry
+# hint tells it to use anyway. The macro emits it directly.
+#
+# The guard that matters is the fallback: anything the extractor is not
+# confident about must still reach the planner, because typing the wrong words
+# into the Start menu opens the wrong app.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestLaunchQuery:
+
+    @pytest.mark.parametrize("description,expected", [
+        ("open Microsoft Teams", "microsoft teams"),
+        ("open Notepad", "notepad"),
+        ("launch Firefox browser", "firefox browser"),
+        # A trailing clause must never reach the Start menu.
+        ("open notepad and type hello", "notepad"),
+    ])
+    def test_extracts_the_app_name(self, description, expected):
+        assert apps.launch_query(description) == expected
+
+    @pytest.mark.parametrize("description", [
+        # Acts inside an app that is already up — launches nothing.
+        "with Microsoft Teams already open, click the Calendar button",
+        "with the Calendar open in Microsoft Teams, click the New meeting button",
+        # "open" as a menu word, no app.
+        "right click on the desktop to open the context menu",
+        # Unknown app: the planner knows more than we do.
+        "open the thing",
+        "open my custom internal tool",
+    ])
+    def test_declines_when_unsure(self, description):
+        assert apps.launch_query(description) is None
+
+
+class TestStartMenuLaunchMacro:
+
+    def _run(self, description: str):
+        orch = _make_orch_nwl()
+        ok = ReflectionResult(success=True, confidence=0.9, observation="ok",
+                              error_description="", should_retry=False,
+                              recovery_hint="", ocr_text="")
+        orch.reflector.verify = MagicMock(return_value=ok)
+        with patch("desktop.system.is_process_running", return_value=False), \
+             patch("desktop.system.count_process_windows", return_value=0):
+            orch._execute_subtask(_sub_nwl(description))
+        return orch
+
+    def test_known_app_never_reaches_the_planner(self):
+        orch = self._run("open notepad")
+        orch.planner.plan_steps.assert_not_called()
+
+    def test_macro_is_the_start_menu_sequence(self):
+        orch = self._run("open notepad")
+        steps = [c.args[0] for c in orch.actor.execute.call_args_list]
+        assert [s.action_type for s in steps] == ["key_press", "type", "key_press"]
+        assert steps[0].key == "winleft"
+        assert steps[1].value == "notepad"
+        assert steps[2].key == "enter"
+
+    def test_unknown_app_still_uses_the_planner(self):
+        orch = self._run("open my custom internal tool")
+        orch.planner.plan_steps.assert_called()
+
+    def test_macro_only_leads_the_subtask(self):
+        """Once steps have run, replanning goes back to the model — the macro
+        is a first guess, not a loop the subtask can never escape.
+        """
+        orch = _make_orch_nwl()
+        run = SubtaskRun(started_at=0.0)
+        run.is_launch_goal = True
+        run.completed = ["pressed win"]
+        assert orch._start_menu_launch(_sub_nwl("open notepad"), run) is None
+
+    def test_non_launch_subtask_is_not_macroed(self):
+        orch = _make_orch_nwl()
+        run = SubtaskRun(started_at=0.0)
+        run.is_launch_goal = False
+        assert orch._start_menu_launch(_sub_nwl("open notepad"), run) is None
+
+
+class TestLaunchCheckOrder:
+    """The launch check polls; it must look BEFORE it waits.
+
+    An app that is already up answers on the first look. Sleeping first paid
+    the full 1.5 s on every confirmed launch for nothing.
+    """
+
+    def test_already_running_app_confirms_without_sleeping(self):
+        orch = _make_orch_nwl()
+        with patch("core.groundtruth.launch_confirmed", return_value=True), \
+             patch("core.groundtruth.time.sleep") as slept:
+            assert orch.truth._verify_by_process("notepad.exe", None) is True
+        slept.assert_not_called()
+
+    def test_slow_app_is_still_waited_for(self):
+        orch = _make_orch_nwl()
+        with patch("core.groundtruth.launch_confirmed",
+                   side_effect=[False, True]), \
+             patch("core.groundtruth.time.sleep") as slept:
+            assert orch.truth._verify_by_process("notepad.exe", None) is True
+        assert slept.call_count == 1, "one wait between the two looks"
+
+    def test_gives_up_after_the_full_poll(self):
+        orch = _make_orch_nwl()
+        with patch("core.groundtruth.launch_confirmed", return_value=False), \
+             patch("core.groundtruth.time.sleep") as slept:
+            assert orch.truth._verify_by_process("notepad.exe", None) is False
+        assert slept.call_count == 2, "same two waits as before the reorder"

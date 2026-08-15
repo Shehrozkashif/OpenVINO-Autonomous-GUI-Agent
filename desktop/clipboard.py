@@ -1,4 +1,4 @@
-# utils/clipboard.py
+# desktop/clipboard.py
 """Windows clipboard read/write via pyperclip."""
 import threading
 import time

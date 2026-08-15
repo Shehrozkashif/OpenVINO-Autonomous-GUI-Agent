@@ -10,10 +10,11 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from agents.grounding import OCREngine, UIGroundingAgent
-from core.capture.screenshot import ScreenCapture
-from core.controller import DesktopController
-from core.ovms_client import OVMSClient
+from agents.grounding import UIGroundingAgent
+from core.inference import OVMSClient
+from desktop.capture import ScreenCapture
+from desktop.input import DesktopController
+from desktop.ocr import OCREngine
 
 
 def sep(label):

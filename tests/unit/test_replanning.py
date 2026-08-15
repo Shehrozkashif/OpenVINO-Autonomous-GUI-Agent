@@ -3,8 +3,7 @@
 
   1. Adaptive wall-clock budgets (_effective_task_deadline)
   2. Task-level replanning on subtask failure (router.replan + queue swap)
-  3. Checkpointing (save per subtask, clear on success, keep on failure)
-  4. Missing-parameter elicitation (on_ask hook enriches the instruction)
+  3. Missing-parameter elicitation (on_ask hook enriches the instruction)
 
 Live failure these guard against: a long meeting-scheduling task dies at the
 flat 600 s cap, or one failed subtask throws away 15 minutes of correct
@@ -12,13 +11,15 @@ progress, or the agent invents a meeting time the user never gave.
 """
 import json
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 sys.path.insert(0, ".")
 
 from agents.router import RouterAgent
-from core.orchestrator import OrchestratorConfig, TaskOrchestrator
-from core.protocols import SubTask
+from core.orchestrator import TaskOrchestrator
+from core.runstate import OrchestratorConfig
+from core.types import SubTask
+from tests.unit.conftest import make_history
 
 
 def _make_orch(config: OrchestratorConfig | None = None) -> TaskOrchestrator:
@@ -29,22 +30,24 @@ def _make_orch(config: OrchestratorConfig | None = None) -> TaskOrchestrator:
         actor=MagicMock(),
         reflector=MagicMock(),
         capturer=MagicMock(),
-        task_memory=MagicMock(),
+        history=make_history(),
         config=config or OrchestratorConfig(),
         on_step_log=lambda _: None,
         ocr=MagicMock(),
     )
     orch.router.summarize_completion = MagicMock(return_value="done")
-    orch.memory.find_similar = MagicMock(return_value=None)
-    orch.memory.load_checkpoint = MagicMock(return_value=None)
     orch._get_screen_context = MagicMock(return_value='"desktop"')
-    orch._verify_launch = MagicMock(return_value=True)
-    orch._wait_for_settle = MagicMock()
+    orch.truth.verify_launch = MagicMock(return_value=True)
+    orch.truth.wait_for_settle = MagicMock()
     return orch
 
 
 def _no_burst():
-    return patch("core.orchestrator.detect_burst_from_instruction", return_value=None)
+    # Historical guard: the orchestrator once had a burst fast path that could
+    # skip the router. That path is gone (the router always runs now), so this
+    # is a no-op context kept only so the call sites below read unchanged.
+    import contextlib
+    return contextlib.nullcontext()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -90,8 +93,9 @@ class TestTaskReplanning:
             SubTask(id=2, description="schedule the meeting", depends_on=[1]),
         ]
         orch.router.replan = MagicMock(return_value=recovery)
-        # First subtask fails; every recovery subtask succeeds.
-        orch._execute_subtask = MagicMock(side_effect=[False, True, True])
+        # First subtask fails; recovery subtasks AND the preserved queued
+        # subtask ("schedule the meeting") all succeed.
+        orch._execute_subtask = MagicMock(side_effect=[False, True, True, True])
 
         with _no_burst():
             result = orch.execute("schedule a zoom meeting")
@@ -102,6 +106,8 @@ class TestTaskReplanning:
         assert args[0] == "schedule a zoom meeting"
         assert args[1] == []                      # nothing completed yet
         assert args[2] == "open Zoom"             # the failed subtask
+        # The still-queued downstream work is named so the router excludes it.
+        assert kwargs["pending_descs"] == ["schedule the meeting"]
 
     def test_replanned_ids_are_renumbered_above_existing(self):
         orch = _make_orch()
@@ -115,13 +121,14 @@ class TestTaskReplanning:
             SubTask(id=2, description="b2", depends_on=[1]),
         ]
         orch.router.replan = MagicMock(return_value=recovery)
-        orch._execute_subtask = MagicMock(side_effect=[False, True, True])
+        orch._execute_subtask = MagicMock(side_effect=[False, True, True, True])
 
         with _no_burst():
             result = orch.execute("do the thing")
 
-        # Watermark is 2 (ids 1 and 2 already used) → recovery ids become 3, 4.
-        assert result["subtasks_completed"] == [3, 4]
+        # Watermark is 2 (ids 1 and 2 already used) → recovery ids become 3, 4;
+        # the preserved queued subtask "b" is renumbered above them (5).
+        assert result["subtasks_completed"] == [3, 4, 5]
 
     def test_completed_work_is_preserved_across_replan(self):
         orch = _make_orch()
@@ -192,58 +199,8 @@ class TestTaskReplanning:
         with _no_burst():
             orch.execute("do the thing")
 
-        stored = orch.memory.store_successful_task.call_args[0][1]
+        stored = orch.history.store_successful_task.call_args[0][1]
         assert [s.description for s in stored] == ["a via other route"]
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 3. Checkpointing
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestCheckpointing:
-
-    def _two_subtask_orch(self):
-        orch = _make_orch()
-        plan = [
-            SubTask(id=1, description="a", depends_on=[]),
-            SubTask(id=2, description="b", depends_on=[1]),
-        ]
-        orch.router.decompose = MagicMock(return_value=("t1", plan))
-        return orch
-
-    def test_checkpoint_saved_after_each_completed_subtask(self):
-        orch = self._two_subtask_orch()
-        orch._execute_subtask = MagicMock(return_value=True)
-        with _no_burst():
-            orch.execute("do the thing")
-        saved = [c.args[1] for c in orch.memory.save_checkpoint.call_args_list]
-        assert saved == [["a"], ["a", "b"]]
-
-    def test_checkpoint_cleared_on_success(self):
-        orch = self._two_subtask_orch()
-        orch._execute_subtask = MagicMock(return_value=True)
-        with _no_burst():
-            orch.execute("do the thing")
-        orch.memory.clear_checkpoint.assert_called_once_with("do the thing")
-
-    def test_checkpoint_kept_on_failure_for_resume(self):
-        orch = self._two_subtask_orch()
-        orch.config.max_task_replans = 0
-        orch._execute_subtask = MagicMock(side_effect=[True, False])
-        with _no_burst():
-            result = orch.execute("do the thing")
-        assert result["success"] is False
-        orch.memory.clear_checkpoint.assert_not_called()
-
-    def test_resume_hint_passed_to_router(self):
-        orch = self._two_subtask_orch()
-        orch.memory.load_checkpoint = MagicMock(return_value=["a"])
-        orch._execute_subtask = MagicMock(return_value=True)
-        with _no_burst():
-            orch.execute("do the thing")
-        _, kwargs = orch.router.decompose.call_args
-        assert "do NOT repeat" in (kwargs.get("memory_hint") or "")
-        assert "a" in kwargs["memory_hint"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -267,6 +224,30 @@ class TestElicitation:
         routed_instruction = orch.router.decompose.call_args[0][0]
         assert "details provided by the user" in routed_instruction
         assert "tomorrow at 3pm" in routed_instruction
+
+    def test_history_stores_what_the_user_typed_not_the_answers(self):
+        """The agent runs on the enriched text; history keeps the original.
+
+        Instruction is the primary key of the task table, so filing a run under
+        its own answers gives every run its own row — the same task appears
+        several times in Recent Automations, and replaying one from a chip feeds
+        last time's answers ("time zone -> PST") back into the router.
+        """
+        orch = _make_orch()
+        orch.on_ask = MagicMock(return_value="PST")
+        orch.router.missing_parameters = MagicMock(return_value=["Time zone?"])
+        orch.router.decompose = MagicMock(
+            return_value=("t1", [SubTask(id=1, description="a", depends_on=[])])
+        )
+        orch._execute_subtask = MagicMock(return_value=True)
+        with _no_burst():
+            orch.execute("schedule a zoom meeting")
+
+        # the agent still acted on the enriched instruction
+        assert "PST" in orch.router.decompose.call_args[0][0]
+        # but what got remembered is what the user actually asked for
+        stored = orch.history.store_successful_task.call_args[0][0]
+        assert stored == "schedule a zoom meeting"
 
     def test_no_handler_means_no_llm_check_and_no_change(self):
         orch = _make_orch()
@@ -355,3 +336,107 @@ class TestMissingParameters:
         assert router.missing_parameters(
             "schedule a zoom meeting tomorrow 3pm titled Sync with bob@x.com"
         ) == []
+
+
+class TestReplanPreservesDownstream:
+    """Regression (live AI-PC 08:20 run): the form was filled perfectly, then
+    a replan re-derived 'remaining work' and emitted only the fill subtask —
+    'click Save and send the invitation' vanished and the run declared success
+    with the form open and unsaved. Queued downstream subtasks must survive a
+    replan verbatim; only the failed subtask's work is rewritten.
+    """
+
+    def test_downstream_subtasks_survive_replan(self):
+        orch = _make_orch()
+        orch._clickable_controls_block = MagicMock(return_value="")
+        orch.router.replan = MagicMock(return_value=[
+            SubTask(id=1, description="fill the form via set_value", depends_on=[]),
+        ])
+        failed = SubTask(id=3, description="fill the form", depends_on=[2])
+        downstream = [
+            SubTask(id=4, description="click Save and send the invitation",
+                    depends_on=[3]),
+        ]
+        executed = [
+            SubTask(id=1, description="open Teams", depends_on=[]),
+            SubTask(id=2, description="open the form", depends_on=[1]),
+        ]
+        out = orch._replan_remaining(
+            "schedule a meeting", ["open Teams", "open the form"],
+            failed, executed, downstream,
+        )
+        assert [s.description for s in out] == [
+            "fill the form via set_value",
+            "click Save and send the invitation",
+        ]
+        # Save depends on the rewrite and keeps a higher id (ID-order safe).
+        assert out[1].depends_on == [out[0].id]
+        assert out[1].id > out[0].id
+
+    def test_empty_downstream_behaves_as_before(self):
+        orch = _make_orch()
+        orch._clickable_controls_block = MagicMock(return_value="")
+        orch.router.replan = MagicMock(return_value=[
+            SubTask(id=1, description="add attendee", depends_on=[]),
+            SubTask(id=2, description="click Save", depends_on=[1]),
+        ])
+        failed = SubTask(id=4, description="click Save", depends_on=[3])
+        out = orch._replan_remaining("instr", [], failed, [], [])
+        assert [s.description for s in out] == ["add attendee", "click Save"]
+
+    def test_router_prompt_names_queued_work_as_off_limits(self):
+        client = MagicMock()
+        client.query_llm = MagicMock(return_value=MagicMock(
+            content='[{"id":1,"description":"fix the fill","depends_on":[]}]'
+        ))
+        router = RouterAgent(client)
+        router.replan(
+            "schedule a meeting", ["open Teams"], "fill the form",
+            pending_descs=["click Save and send the invitation"],
+        )
+        prompt = client.query_llm.call_args[0][0][1]["content"]
+        assert "click Save and send the invitation" in prompt
+        assert "do NOT include them" in prompt
+
+
+class TestSkipExhaustedSubtask:
+    """Regression (live 14:12 run): the GST time-zone hunt burned the whole
+    replan budget and the task died with attendees + Save still queued — the
+    filled form was thrown away. A permanently-failed subtask with work
+    queued behind it is skipped (degraded, named in the summary); a failed
+    LAST subtask still fails the task (skipping it would fake success).
+    """
+
+    def _orch(self):
+        orch = _make_orch(OrchestratorConfig(max_task_replans=0))
+        plan = [
+            SubTask(id=1, description="set the time zone to GST", depends_on=[]),
+            SubTask(id=2, description="click Save to create the meeting",
+                    depends_on=[1]),
+        ]
+        orch.router.decompose = MagicMock(return_value=("t1", plan))
+        return orch
+
+    def test_failed_subtask_with_downstream_is_skipped(self):
+        orch = self._orch()
+        orch._execute_subtask = MagicMock(side_effect=[False, True])
+
+        with _no_burst():
+            result = orch.execute("schedule a meeting")
+
+        assert result["success"] is True          # Save ran and succeeded
+        assert result["subtasks_completed"] == [2]
+        assert orch._degraded is True             # never stored as clean
+        orch.history.store_successful_task.assert_not_called()
+        # The summary is told exactly what was skipped.
+        _, kwargs = orch.router.summarize_completion.call_args
+        assert kwargs["skipped"] == ["set the time zone to GST"]
+
+    def test_failed_last_subtask_still_fails_task(self):
+        orch = self._orch()
+        orch._execute_subtask = MagicMock(side_effect=[True, False])
+
+        with _no_burst():
+            result = orch.execute("schedule a meeting")
+
+        assert result["success"] is False
