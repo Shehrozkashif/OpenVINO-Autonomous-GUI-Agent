@@ -517,8 +517,12 @@ def _prune_stale_servables():
         print(_yellow(f"  [WARN] Could not prune stale servables: {e}"))
 
 
-def _sync_servable(model_name: str, cache_gb: int, device: str):
+def _sync_servable(model_name: str, cache_gb: int, device: str) -> bool:
     """Sync an already-exported servable with this machine and config.py.
+
+    Returns True if graph.pbtxt was rewritten. OVMS reads that file only when it
+    loads a model, so a caller that patched a servable under a running server
+    has to restart it for the change to mean anything.
 
     export_model.py bakes `cache_size: N`, the target device and the prefix
     caching flag into the servable's graph.pbtxt at export time, and exports
@@ -532,7 +536,7 @@ def _sync_servable(model_name: str, cache_gb: int, device: str):
     import re
     graph = os.path.join(_REPO, model_name, "graph.pbtxt")
     if not os.path.isfile(graph):
-        return
+        return False
     try:
         with open(graph) as f:
             original = f.read()
@@ -545,11 +549,20 @@ def _sync_servable(model_name: str, cache_gb: int, device: str):
         text = re.sub(r'("target_device":\s*")[^"]*(")', rf"\g<1>{device}\g<2>", text)
         device_changed = text != before
         before = text
-        # Only ever false -> true. Matching "true" as well would rewrite the
-        # template's own "enable_prefix_caching:  true" (two spaces) on every
-        # run and report a change that is pure whitespace.
-        text = re.sub(r"enable_prefix_caching:\s*false",
-                      "enable_prefix_caching: true", text)
+        if "enable_prefix_caching" in text:
+            # Only ever false -> true. Matching "true" as well would rewrite the
+            # template's own "enable_prefix_caching:  true" (two spaces) on every
+            # run and report a change that is pure whitespace.
+            text = re.sub(r"enable_prefix_caching:\s*false",
+                          "enable_prefix_caching: true", text)
+        else:
+            # Exported by a graph template old enough not to emit the field at
+            # all, so there is nothing to flip — add it. It belongs to the same
+            # block as cache_size, so anchor to that line and reuse its exact
+            # indentation rather than guessing at the block's shape.
+            text = re.sub(r"^([ \t]*)cache_size:.*$",
+                          r"\g<0>\n\g<1>enable_prefix_caching: true",
+                          text, count=1, flags=re.M)
         prefix_changed = text != before
         if text != original:
             with open(graph, "w") as f:
@@ -560,8 +573,25 @@ def _sync_servable(model_name: str, cache_gb: int, device: str):
                 print(_green(f"  [OK] {model_name:<24} device updated to {device}"))
             if prefix_changed:
                 print(_green(f"  [OK] {model_name:<24} prefix caching enabled"))
+            return True
     except Exception as e:
         print(_yellow(f"  [WARN] Could not update settings for {model_name}: {e}"))
+    return False
+
+
+def _sync_all_servables(device: str) -> bool:
+    """Apply config.py to every exported servable. True if any file changed.
+
+    Runs on EVERY start, including the common case where OVMS is already up and
+    the models are all present — the path that otherwise returns early and never
+    reaches ensure_models(). Skipping it there is how a config change can look
+    applied (the code ran, the tests passed) while the server keeps serving the
+    settings it was launched with.
+    """
+    changed = False
+    for name, cache in ((LLM_MODEL, LLM_KV_CACHE_GB), (VLM_MODEL, VLM_KV_CACHE_GB)):
+        changed = _sync_servable(name, cache, device) or changed
+    return changed
 
 
 def _is_partial_export(model_name: str) -> bool:
@@ -795,14 +825,19 @@ def main():
 
     # ── OVMS already running? ─────────────────────────────────────
     print(_bold("\nOpenVINO Model Server:"))
-    if check_ovms() and _both_servables_ready():
+    # Before deciding the running server can be left alone: OVMS reads each
+    # graph.pbtxt once, at load time, so a settings change only takes effect
+    # after a restart.
+    settings_changed = _sync_all_servables(device)
+    if check_ovms() and _both_servables_ready() and not settings_changed:
         print(_green(f"  [OK] OVMS already running on {OVMS_BASE_URL}"))
     else:
         if check_ovms():
             # Server is up but serving a stale model set (e.g. after a model
-            # swap in config.py) — restart it so it reloads config.json.
-            print(_yellow(f"  [..] OVMS is running but not serving "
-                          f"{LLM_MODEL} + {VLM_MODEL} — restarting it"))
+            # swap in config.py) or stale settings — restart it so it reloads.
+            why = ("its model settings just changed" if settings_changed
+                   else f"not serving {LLM_MODEL} + {VLM_MODEL}")
+            print(_yellow(f"  [..] OVMS is running but {why} — restarting it"))
             subprocess.run(["taskkill", "/F", "/IM", "ovms.exe"],
                            capture_output=True, timeout=10)
             time.sleep(2.0)
