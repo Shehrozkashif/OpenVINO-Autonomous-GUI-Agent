@@ -24,11 +24,28 @@ from PIL import Image
 from agents import coords
 from core.inference import InferenceClient
 from desktop.capture import OCR_THUMB, ScreenCapture, _screen_size
-from desktop.ocr import OCREngine, OCRWord
+from desktop.ocr import OCREngine
 from desktop.uia import find_element as _uia_find
 from desktop.uia import is_available as _uia_ok
 
 _ocr_grounding_disabled_logged = False
+
+
+def _once(fn):
+    """Wrap fn so it runs at most once, on first call, and remembers its result.
+
+    Lets an expensive value (an OCR pass, a base64 encode of the screen) be
+    handed to a cascade of stages that may never ask for it, without any stage
+    having to know whether an earlier one already paid for it.
+    """
+    box: list = []
+
+    def get():
+        if not box:
+            box.append(fn())
+        return box[0]
+
+    return get
 
 
 def _ocr_grounding_disabled() -> bool:
@@ -344,14 +361,21 @@ class UIGroundingAgent:
                                    target=target, method=f"cache/{method}",
                                    element_type=element_type)
 
-        img_b64 = self._encode(display)
-        words = self.ocr.extract(display) if self.ocr.is_available() else []
+        # Deferred, not skipped. Both of these used to run right here, before
+        # the cascade — so every grounding call paid for a full OCR pass (1-2 s
+        # of ONNX) and a base64 encode of the whole screen even when Stage 0
+        # answered from the accessibility tree in 80 ms and never looked at
+        # either. Stage 1 and Stage 2 still get exactly the same values; they
+        # are just computed at the moment a stage actually asks for them, and
+        # memoised so a retry round does not repeat the work.
+        get_b64 = _once(lambda: self._encode(display))
+        get_words = _once(lambda: self.ocr.extract(display) if self.ocr.is_available() else [])
 
         for attempt in range(max_retries + 1):
             # Stage 2 (VLM) only on the first attempt: on shared-VRAM machines a
             # VLM call costs a 30-60s model swap, and re-asking it the identical
             # question on an unchanged screen returns the same answer anyway.
-            result = self._locate(target, display, img_b64, words, scale_x, scale_y,
+            result = self._locate(target, display, get_b64, get_words, scale_x, scale_y,
                                   use_vlm=(attempt == 0), dead=dead)
             if result:
                 x, y, conf, method, element_type = result
@@ -381,7 +405,7 @@ class UIGroundingAgent:
             # wrong dialog; 'Meeting Details New' -> 'New meeting Details
             # Save' @0.79 was a dead click), while correct hits score >=0.95.
             # Fuzzy-on-top-of-fuzzy compounds into confidently-wrong clicks.
-            result = self._locate(alt, display, img_b64, words, scale_x, scale_y,
+            result = self._locate(alt, display, get_b64, get_words, scale_x, scale_y,
                                   use_vlm=False, dead=dead, ocr_threshold=0.9)
             if result:
                 x, y, conf, method, element_type = result
@@ -419,7 +443,6 @@ class UIGroundingAgent:
         """
         start = time.time()
         display, scale_x, scale_y, _screen_hash, dead = self._prepare_screen(target)
-        words = self.ocr.extract(display) if self.ocr.is_available() else []
 
         if _uia_ok():
             r = _uia_find(target)
@@ -438,6 +461,11 @@ class UIGroundingAgent:
                                            target=target, method="uia",
                                            element_type="foreground_interactive")
 
+        # OCR runs only now, past Stage 0. Every set_value/select step grounds
+        # its field label through here purely to have a pixel fallback ready in
+        # case the accessibility tree cannot focus the control — so on the
+        # normal path, where UIA does focus it, this OCR was pure waste.
+        words = self.ocr.extract(display) if self.ocr.is_available() else []
         if words and not _ocr_grounding_disabled():
             query = _strip_role_words(target)
             match = self.ocr.find_text(words, query, threshold=ocr_threshold)
@@ -468,8 +496,8 @@ class UIGroundingAgent:
         self,
         target: str,
         display: Image.Image,
-        img_b64: str,
-        words: list[OCRWord],
+        get_b64,
+        get_words,
         scale_x: float,
         scale_y: float,
         use_vlm: bool = True,
@@ -497,7 +525,9 @@ class UIGroundingAgent:
                 logger.debug(f"[GROUNDING/S0-UIA] '{target}' not found in UIA tree")
 
         # Stage 1: OCR direct fuzzy-match — carry element_type from the matched word
-        if words and not _ocr_grounding_disabled():
+        # get_words() is where OCR actually runs. Reaching this line means Stage 0
+        # had no answer, which is the only case that needs it.
+        if not _ocr_grounding_disabled() and (words := get_words()):
             query = _strip_role_words(target)
             match = self.ocr.find_text(words, query, threshold=ocr_threshold)
             if match:
@@ -513,7 +543,7 @@ class UIGroundingAgent:
         # Stage 2: VLM direct coordinate prediction
         # VLM is expected to hit interactive elements → element_type="foreground_interactive"
         if use_vlm and self.client:
-            result = self._vlm_coords(target, img_b64, int(display.width), int(display.height),
+            result = self._vlm_coords(target, get_b64(), int(display.width), int(display.height),
                                       avoid=dead)
             if result and not self._near_dead(result[0], result[1], dead):
                 return result

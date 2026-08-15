@@ -854,8 +854,23 @@ class TaskOrchestrator:
         # that window, so they skip the check.
         if not run.is_launch_goal:
             self.anchor.ensure_foreground()
-        run.screen_context = run.cached_ocr if run.cached_ocr else self._get_screen_context()
-        run.cached_ocr = ""   # consume — will be refreshed after reflection
+        if run.step_queue:
+            # A queued step is executed WITHOUT a planning call — the plan it
+            # came from was written against this same screen moments ago, which
+            # is also why the goal check below is skipped while a queue remains.
+            # OCR text feeds the planner prompt and nothing else, so on this
+            # path it was 1-2 s of ONNX per step building a prompt nobody sends.
+            # The accessibility control list appended further down is NOT
+            # skipped: it costs ~100 ms and the commit guard reads live field
+            # values out of it before it will let a Save fire.
+            run.screen_context = ""
+            # Drop rather than keep: by the time a planning call happens again
+            # the queue will have moved the screen on, so this text would be
+            # several actions out of date.
+            run.cached_ocr = ""
+        else:
+            run.screen_context = run.cached_ocr if run.cached_ocr else self._get_screen_context()
+            run.cached_ocr = ""   # consume — will be refreshed after reflection
 
         # The foreground WINDOW TITLE, read via Win32 (survives OCR/UIA being
         # disabled). The planner reasons about the title for Teams/Office view
