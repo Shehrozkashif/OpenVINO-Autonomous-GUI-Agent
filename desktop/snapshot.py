@@ -173,13 +173,22 @@ def _point_in_rect(px: int, py: int, rect: tuple[int, int, int, int]) -> bool:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
+def capture_snapshot(capturer, ocr, interactive_elements=None) -> ScreenSnapshot:
     """Build a ScreenSnapshot:
     1. Get foreground window title + process via Win32 API.
     2. Enumerate all visible window rects (front-to-back order).
     3. Run OCR on the current screenshot thumbnail.
     4. Assign each OCR word to the topmost containing window rect.
     5. Mark each region is_in_foreground based on window ownership.
+
+    This does NOT walk the accessibility tree itself. It used to, and the
+    orchestrator then walked it a second time (_clickable_controls_block) a
+    moment later on the same window: two 1.5-3 s traversals per planning cycle,
+    and BOTH lists went into the prompt, so the planner read the same control
+    names twice. The orchestrator's list is the strictly richer one (60 elements
+    instead of 40, carrying each field's current value and a (disabled) tag), so
+    that is the one kept. Callers holding an already-collected list may pass it
+    as interactive_elements to have it formatted into the planner context here.
     """
     # Imported here, not at module level: desktop.ocr imports this module's
     # sibling helpers, and a top-level import would close the cycle.
@@ -190,14 +199,6 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
     fg_hwnd, fg_title = _get_foreground_hwnd_and_title()
     fg_process = _get_foreground_process(fg_hwnd)
     windows = _enum_visible_windows()
-
-    interactive: list = []
-    if _IS_WINDOWS:
-        try:
-            from desktop.uia import get_interactive_elements  # noqa: PLC0415
-            interactive = get_interactive_elements()
-        except Exception:
-            interactive = []
 
     from desktop.capture import OCR_THUMB
 
@@ -261,5 +262,5 @@ def capture_snapshot(capturer, ocr) -> ScreenSnapshot:
         foreground_process=fg_process,
         screen_hash=screen_hash,
         ocr_regions=regions,
-        interactive_elements=interactive,
+        interactive_elements=interactive_elements or [],
     )

@@ -46,14 +46,14 @@ class ReflectionResult:
 # Sent to the LLM with OCR text. Much more reliable than asking a grounding
 # VLM to reason about conditional success criteria.
 
-_LLM_SYSTEM = "You are a desktop automation verifier. Reply with valid JSON only."
-
-_LLM_REFLECTION_PROMPT = """\
-Verify whether a desktop automation step succeeded.
-
-STEP     : {action_type} — {description}
-EXPECTED : {verification}
-SCREEN TEXT (OCR after action): {ocr_text}
+# The per-action rules used to sit BELOW the step and the OCR text, in the same
+# user turn. That is ~450 tokens of constant instructions parked behind a block
+# that is different on every single step, so the server's prefix cache could
+# never hold them and the GPU re-read them once per verification. Constant text
+# belongs in the system turn, which is identical call after call — same words to
+# the model, now read once and reused.
+_LLM_SYSTEM = """\
+You are a desktop automation verifier. Reply with valid JSON only.
 
 Rules — base your verdict on evidence in the screen text:
   click/right_click  : SUCCEED only if a new menu, dialog, window title, or
@@ -80,8 +80,16 @@ Rules — base your verdict on evidence in the screen text:
                        Do NOT default to success when uncertain.
 
 Reply JSON only:
-{{"success": true/false, "confidence": 0.0-1.0, "observation": "one sentence", \
-"error_description": "", "should_retry": true/false, "recovery_hint": ""}}"""
+{"success": true/false, "confidence": 0.0-1.0, "observation": "one sentence", \
+"error_description": "", "should_retry": true/false, "recovery_hint": ""}"""
+
+# Only the parts that change from step to step.
+_LLM_REFLECTION_PROMPT = """\
+Verify whether a desktop automation step succeeded.
+
+STEP     : {action_type} — {description}
+EXPECTED : {verification}
+SCREEN TEXT (OCR after action): {ocr_text}"""
 
 
 # ── VLM reflection prompt (fallback for icon-heavy / sparse screens) ──────────

@@ -52,14 +52,19 @@ def _make_agent(llm_response: str = "[]"):
     return PlanningAgent(client=client), client
 
 
-def _user_msg(client) -> str:
-    """Extract the user-role message content from the last query_llm call."""
+def _prompt(client) -> str:
+    """Everything the last query_llm call put in front of the model.
+
+    Deliberately role-agnostic: what these tests care about is that a rule
+    REACHES the model, not which turn carries it. The completion rules moved
+    from the tail of the user turn into the system turn so the server's prefix
+    cache can keep them, and that move must not read as a regression here.
+    """
     call_args = client.query_llm.call_args
     messages: list = call_args[0][0]   # first positional arg
-    for m in messages:
-        if m["role"] == "user":
-            return m["content"]
-    raise AssertionError("No user-role message found in query_llm call")
+    if not messages:
+        raise AssertionError("query_llm called with no messages")
+    return "\n".join(m["content"] for m in messages)
 
 
 class TestPromptBias:
@@ -68,7 +73,7 @@ class TestPromptBias:
     def test_old_act_on_doubt_instruction_removed(self):
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "when in doubt, return the action step" not in msg.lower(), (
             "Old 'When in doubt, return the action step rather than []' must be removed"
         )
@@ -77,13 +82,13 @@ class TestPromptBias:
         """Guard against the phrase being re-introduced in any capitalisation."""
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "return the action step rather than" not in msg.lower()
 
     def test_new_stop_on_doubt_instruction_present(self):
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "when in doubt" in msg.lower(), "A 'when in doubt' instruction must still exist"
         # The new instruction must direct toward stopping, not acting
         lower = msg.lower()
@@ -99,7 +104,7 @@ class TestPromptBias:
         """Bias test holds even when called with no completed steps."""
         agent, client = _make_agent()
         agent.plan_next_step(_subtask(), completed=[])
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "return the action step rather than" not in msg.lower()
 
     def test_stop_on_doubt_applies_with_history(self):
@@ -109,19 +114,19 @@ class TestPromptBias:
             _subtask(),
             completed=["click Desktop", "right_click Desktop"],
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "return the action step rather than" not in msg.lower()
 
 
 class TestLoopPrevention:
-    """The LOOP PREVENTION rule must be in every user message sent to the LLM."""
+    """The LOOP PREVENTION rule must be in every prompt sent to the LLM."""
 
     def test_loop_prevention_rule_present_no_history(self):
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower(), (
-            "LOOP PREVENTION rule must always be present in the user message"
+            "LOOP PREVENTION rule must always be present in the prompt"
         )
 
     def test_loop_prevention_rule_present_with_history(self):
@@ -130,14 +135,14 @@ class TestLoopPrevention:
             _subtask(),
             completed=["click New", "click New"],
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower()
 
     def test_loop_prevention_mentions_preceding_step(self):
         """The rule must reference the 'immediately preceding' step concept."""
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         lower = msg.lower()
         assert "preceding" in lower or "immediately" in lower, (
             "LOOP PREVENTION rule must mention the immediately preceding step"
@@ -147,7 +152,7 @@ class TestLoopPrevention:
         """The rule must tell the model to either advance or return []."""
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        msg = _user_msg(client)
+        msg = _prompt(client)
         lower = msg.lower()
         pos = lower.find("loop prevention")
         snippet = lower[pos:pos + 250]
@@ -163,7 +168,7 @@ class TestLoopPrevention:
             _subtask(),
             screen_context='"New Folder" "Rename" "Copy"',
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower()
 
     def test_loop_prevention_present_with_step_history(self):
@@ -172,7 +177,7 @@ class TestLoopPrevention:
             _subtask(),
             completed=["clicked 'New'"],
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower()
 
     def test_loop_prevention_present_with_task_context(self):
@@ -181,7 +186,7 @@ class TestLoopPrevention:
             _subtask(),
             task_context=["Opened the context menu"],
         )
-        msg = _user_msg(client)
+        msg = _prompt(client)
         assert "loop prevention" in msg.lower()
 
 
@@ -191,7 +196,7 @@ class TestExistingCriteriaPreserved:
     def _msg(self):
         agent, client = _make_agent()
         agent.plan_next_step(_subtask())
-        return _user_msg(client)
+        return _prompt(client)
 
     def test_open_terminal_criterion_present(self):
         assert "open terminal" in self._msg().lower()

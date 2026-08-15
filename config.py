@@ -70,6 +70,11 @@ TARGET_DEVICE = "GPU"
 # The LLM gets the bigger cache: router decomposition, task replanning, and
 # batch planning carry the longest prompts. The VLM only ever sees one
 # screenshot + a short instruction per request, so 2 GB is plenty.
+# Prefix caching (also enabled by start.py) shares this same budget: it parks
+# the KV of each recurring prompt prefix here so it is not recomputed every
+# call. The planning prefix is the big one at ~5.8k tokens; the goal check and
+# the verifier add a few hundred each. That is comfortably under 4 GB, but if
+# OVMS ever logs that it is evicting cache blocks, raise LLM_KV_CACHE_GB.
 # start.py applies changes here to already-exported models automatically
 # (it patches the baked cache_size in each servable's graph.pbtxt).
 LLM_KV_CACHE_GB = 4

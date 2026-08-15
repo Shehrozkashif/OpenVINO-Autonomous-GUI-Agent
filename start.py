@@ -520,13 +520,14 @@ def _prune_stale_servables():
 def _sync_servable(model_name: str, cache_gb: int, device: str):
     """Sync an already-exported servable with this machine and config.py.
 
-    export_model.py bakes both `cache_size: N` and the target device into the
-    servable's graph.pbtxt at export time, and exports are skipped once the
-    model is in the repository — so a later config change would silently never
-    apply. The device matters twice over: a models/ folder exported on an Intel
-    GPU box still says GPU when it is copied to a machine that has none, and
-    OVMS would refuse to load it. The IR itself is device-independent, so
-    patching the text protobuf is enough; no multi-GB re-export.
+    export_model.py bakes `cache_size: N`, the target device and the prefix
+    caching flag into the servable's graph.pbtxt at export time, and exports
+    are skipped once the model is in the repository — so a later config change
+    would silently never apply. The device matters twice over: a models/ folder
+    exported on an Intel GPU box still says GPU when it is copied to a machine
+    that has none, and OVMS would refuse to load it. The IR itself is
+    device-independent, so patching the text protobuf is enough; no multi-GB
+    re-export.
     """
     import re
     graph = os.path.join(_REPO, model_name, "graph.pbtxt")
@@ -543,6 +544,13 @@ def _sync_servable(model_name: str, cache_gb: int, device: str):
         text = re.sub(r'(\bdevice:\s*")[^"]*(")', rf"\g<1>{device}\g<2>", text)
         text = re.sub(r'("target_device":\s*")[^"]*(")', rf"\g<1>{device}\g<2>", text)
         device_changed = text != before
+        before = text
+        # Only ever false -> true. Matching "true" as well would rewrite the
+        # template's own "enable_prefix_caching:  true" (two spaces) on every
+        # run and report a change that is pure whitespace.
+        text = re.sub(r"enable_prefix_caching:\s*false",
+                      "enable_prefix_caching: true", text)
+        prefix_changed = text != before
         if text != original:
             with open(graph, "w") as f:
                 f.write(text)
@@ -550,6 +558,8 @@ def _sync_servable(model_name: str, cache_gb: int, device: str):
                 print(_green(f"  [OK] {model_name:<24} KV cache updated to {cache_gb} GB"))
             if device_changed:
                 print(_green(f"  [OK] {model_name:<24} device updated to {device}"))
+            if prefix_changed:
+                print(_green(f"  [OK] {model_name:<24} prefix caching enabled"))
     except Exception as e:
         print(_yellow(f"  [WARN] Could not update settings for {model_name}: {e}"))
 
@@ -600,6 +610,13 @@ def _export_model(export_tool: str, source_model: str, model_name: str,
         "--model_repository_path", repo,
         "--target_device", device,
         "--cache_size", str(cache_gb),
+        # Reuse the KV cache of any prompt prefix already seen. Every planning
+        # call re-sends the same ~5.3k-token system prompt and only the tail
+        # (screen text, step history) differs, so without this the GPU prefills
+        # those tokens from scratch every single step. The tokens the model
+        # attends to are identical either way — this changes nothing about the
+        # output, only how much of it has to be recomputed.
+        "--enable_prefix_caching",
     ]
     if _is_partial_export(model_name):
         # export_model.py skips the conversion when the target folder merely

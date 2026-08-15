@@ -19,6 +19,7 @@ from PIL import Image, ImageDraw
 
 from agents.reflection import (
     _LLM_REFLECTION_PROMPT,
+    _LLM_SYSTEM,
     _VLM_REFLECTION_PROMPT,
     ReflectionAgent,
     ReflectionResult,
@@ -27,6 +28,12 @@ from core.runstate import SubtaskRun
 from core.types import ActionStep, SubTask
 from desktop.capture import frame_phash
 from tests.unit.conftest import make_history
+
+# Everything the LLM verifier is told, across both turns. The per-action rules
+# live in the system turn (constant, so the server's prefix cache keeps them)
+# and the step's own details in the user turn, but the model reads one prompt —
+# so the stance tests below assert against the whole of it.
+_LLM_PROMPT = _LLM_SYSTEM + "\n" + _LLM_REFLECTION_PROMPT
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. Prompt safety and raw confidence pass-through
@@ -45,18 +52,18 @@ class TestPromptStance:
     """The prompts must not bias toward success on uncertain outcomes."""
 
     def test_llm_prompt_no_lenient_instruction(self):
-        assert "lenient" not in _LLM_REFLECTION_PROMPT.lower(), (
+        assert "lenient" not in _LLM_PROMPT.lower(), (
             "LLM prompt must not tell the model to be lenient"
         )
 
     def test_llm_prompt_no_ambiguous_success(self):
-        assert "ambiguous case → success=true" not in _LLM_REFLECTION_PROMPT.lower(), (
+        assert "ambiguous case → success=true" not in _LLM_PROMPT.lower(), (
             "Old 'ambiguous case → success=true' instruction must be removed"
         )
-        assert "any ambiguous" not in _LLM_REFLECTION_PROMPT.lower()
+        assert "any ambiguous" not in _LLM_PROMPT.lower()
 
     def test_llm_prompt_ambiguous_defaults_to_false(self):
-        assert "success=false" in _LLM_REFLECTION_PROMPT.lower(), (
+        assert "success=false" in _LLM_PROMPT.lower(), (
             "LLM prompt must instruct the model to return success=false for ambiguous cases"
         )
 

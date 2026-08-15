@@ -88,7 +88,12 @@ class OCREngine:
         # ── Run inference ─────────────────────────────────────────────────────
         img_np = np.array(image.convert("RGB"))
         try:
-            results, _ = self._ocr(img_np)
+            # use_cls=False skips the text-angle classifier, a third ONNX model
+            # that runs on every detected box to decide whether it is upside
+            # down. Scanned paper needs that; a desktop screenshot never does,
+            # so it only ever confirms 0°. Detection and recognition, the two
+            # stages that decide WHAT is read and WHERE, are untouched.
+            results, _ = self._ocr(img_np, use_cls=False)
         except Exception as e:
             logger.warning(f"[OCR] Inference error: {e}")
             return []

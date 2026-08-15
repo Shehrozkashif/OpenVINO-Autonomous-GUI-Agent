@@ -170,10 +170,14 @@ class OVMSClient:
         except (KeyError, IndexError, TypeError) as e:
             logger.warning(f"[VLM] Unexpected OVMS response shape ({e}): {str(data)[:200]}")
             content = ""
-        tokens = data.get("usage", {}).get("completion_tokens", 0)
+        usage = data.get("usage", {})
+        tokens = usage.get("completion_tokens", 0)
 
         latency_ms = (time.time() - start) * 1000
-        logger.debug(f"[VLM] {prompt[:60]}… → {content[:100]} ({latency_ms:.0f}ms)")
+        logger.debug(
+            f"[VLM] {prompt[:60]}… → {content[:100]} ({latency_ms:.0f}ms, "
+            f"{usage.get('prompt_tokens', 0)} prompt + {tokens} out)"
+        )
         return InferenceResponse(
             content=content,
             model=self.vlm_model,
@@ -220,9 +224,18 @@ class OVMSClient:
         except (KeyError, IndexError, TypeError) as e:
             logger.warning(f"[LLM] Unexpected OVMS response shape ({e}): {str(data)[:200]}")
             content = ""
-        tokens = data.get("usage", {}).get("completion_tokens", 0)
+        usage = data.get("usage", {})
+        tokens = usage.get("completion_tokens", 0)
         latency_ms = (time.time() - start) * 1000
-        logger.debug(f"[LLM] → {content[:100]} ({latency_ms:.0f}ms)")
+        # Prompt and completion counts, not just the clock: they are what turns
+        # "planning feels slow" into a number you can act on. A large
+        # prompt_tokens with a small completion_tokens means the time went into
+        # reading the prompt (prefill), which is what prefix caching addresses;
+        # the reverse means it went into writing the answer.
+        logger.debug(
+            f"[LLM] → {content[:100]} ({latency_ms:.0f}ms, "
+            f"{usage.get('prompt_tokens', 0)} prompt + {tokens} out)"
+        )
         return InferenceResponse(
             content=content,
             model=self.llm_model,

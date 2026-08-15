@@ -25,6 +25,13 @@ from agents.prompts import (
 from core.inference import InferenceClient
 from core.types import ActionStep, SubTask
 
+# The completion rules used to be appended to the END of the user prompt, after
+# the screen text. That put 490 fixed tokens behind a block that changes every
+# step, so OVMS's prefix cache could never reach them and the GPU re-prefilled
+# them on every planning call. They are constant instructions, so they belong in
+# the constant half of the prompt — same words to the model, now cacheable.
+_PLANNING_SYSTEM = PLANNING_SYSTEM_PROMPT + COMPLETION_RULES
+
 
 class PlanningParseError(Exception):
     """Planner LLM output could not be parsed into steps, even after a retry.
@@ -251,7 +258,7 @@ class PlanningAgent:
             screen_context = snapshot.format_for_planner()
 
         messages = [
-            {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
+            {"role": "system", "content": _PLANNING_SYSTEM},
             {"role": "user", "content": self._build_planning_prompt(
                 subtask, screen_context, completed, task_context,
             )},
@@ -269,7 +276,12 @@ class PlanningAgent:
         completed: list[str],
         task_context: list[str],
     ) -> str:
-        """Assemble the user prompt: goal + context blocks + completion rules."""
+        """Assemble the user prompt: goal + context blocks.
+
+        Everything here VARIES from step to step. Anything constant belongs in
+        the system prompt instead (see _PLANNING_SYSTEM), so the server's prefix
+        cache can keep it.
+        """
         # Inter-subtask context — what was done before this subtask
         ctx_block = ""
         if task_context:
@@ -295,7 +307,7 @@ class PlanningAgent:
         if screen_context:
             user_content += f"\nText currently visible on screen: {screen_context}"
 
-        return user_content + COMPLETION_RULES
+        return user_content
 
     def _query_with_retry(self, messages: list[dict], subtask_id: int) -> list[ActionStep]:
         """One planning call, with a single temperature-0 retry on parse errors."""
