@@ -984,6 +984,53 @@ def _wait_for_ovms(log_path: str = "") -> bool:
 
 # ── 5. Main ───────────────────────────────────────────────────────────────────
 
+_TRUTHY = ("1", "true", "yes")
+
+# Debug flags that switch OFF a verification path. Each entry is the variable,
+# and what stops working when it is set.
+_DEGRADING_ENV = {
+    "AGENT_DISABLE_UIA": (
+        "the accessibility tree: Stage 0 grounding, the planner's control "
+        "list, set_value/select/invoke, control read-back, controls-diff, "
+        "focused-control read-back and occlusion hit-testing"
+    ),
+    "AGENT_DISABLE_OCR": "OCR grounding (Stage 1)",
+}
+
+
+def _degrading_env() -> list:
+    """Debug flags currently set, as (name, what it disables) pairs."""
+    return [
+        (name, what) for name, what in _DEGRADING_ENV.items()
+        if os.environ.get(name, "").strip().lower() in _TRUTHY
+    ]
+
+
+def _warn_degraded_env() -> bool:
+    """Say loudly that a debug flag has switched off a verification path.
+
+    These are set once in a shell and then silently inherited by every later
+    run in that window. AGENT_DISABLE_UIA in particular reads like it only
+    turns off Stage 0 grounding, while it actually removes most of what the
+    agent verifies with, so runs get slower AND less honest. That deserves a
+    banner at startup, not one INFO line a hundred lines into the log.
+
+    Returns True if anything was reported.
+    """
+    flags = _degrading_env()
+    if not flags:
+        return False
+    print()
+    print(_red("  [WARNING] A debug flag is switching off a verification path:"))
+    for name, what in flags:
+        print(_yellow(f"    {name}=1  disables {what}"))
+    print(_yellow("    Expect slower, less reliable runs. Results from this "
+                  "session are not"))
+    print(_yellow("    representative. To clear it:  "
+                  "Remove-Item Env:\\" + flags[0][0]))
+    return True
+
+
 def main():
     banner()
 
@@ -1052,6 +1099,7 @@ def main():
     print(_green("  [OK] OVMS") + f"  → {OVMS_BASE_URL}/v3/chat/completions  (device {device})")
     print(_green("  [OK] LLM ") + f"  → {LLM_MODEL}")
     print(_green("  [OK] VLM ") + f"  → {VLM_MODEL}")
+    _warn_degraded_env()
 
     # ── Launch agent ──────────────────────────────────────────────
     print(_bold("\nStarting Desktop GUI Agent...\n"))

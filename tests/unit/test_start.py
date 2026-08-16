@@ -262,3 +262,41 @@ class TestCacheDir:
         out = self._patch('{"target_device": "GPU"}')
         payload = re.search(r"plugin_config: '([^']*)'", out).group(1)
         assert json.loads(payload)["CACHE_DIR"] == start._ovms_cache_dir()
+
+
+# ── Debug flags that switch off verification ──────────────────────────────────
+# Set once in a shell, then silently inherited by every later run in that
+# window. AGENT_DISABLE_UIA reads like it only turns off Stage 0 grounding,
+# while it actually removes most of what the agent verifies with.
+
+class TestDegradedEnvWarning:
+
+    def test_silent_when_no_flag_is_set(self, monkeypatch):
+        for name in ("AGENT_DISABLE_UIA", "AGENT_DISABLE_OCR"):
+            monkeypatch.delenv(name, raising=False)
+        assert start._degrading_env() == []
+        assert start._warn_degraded_env() is False
+
+    def test_reports_the_uia_flag(self, monkeypatch):
+        monkeypatch.setenv("AGENT_DISABLE_UIA", "1")
+        monkeypatch.delenv("AGENT_DISABLE_OCR", raising=False)
+        names = [n for n, _ in start._degrading_env()]
+        assert names == ["AGENT_DISABLE_UIA"]
+        assert start._warn_degraded_env() is True
+
+    def test_names_what_actually_stops_working(self, monkeypatch):
+        """The point of the banner: not just 'a flag is set'."""
+        monkeypatch.setenv("AGENT_DISABLE_UIA", "1")
+        what = dict(start._degrading_env())["AGENT_DISABLE_UIA"]
+        for expected in ("read-back", "controls-diff", "occlusion", "Stage 0"):
+            assert expected in what
+
+    def test_reports_both_flags_together(self, monkeypatch):
+        monkeypatch.setenv("AGENT_DISABLE_UIA", "true")
+        monkeypatch.setenv("AGENT_DISABLE_OCR", "yes")
+        assert len(start._degrading_env()) == 2
+
+    def test_a_falsey_value_is_not_a_flag(self, monkeypatch):
+        monkeypatch.setenv("AGENT_DISABLE_UIA", "0")
+        monkeypatch.delenv("AGENT_DISABLE_OCR", raising=False)
+        assert start._degrading_env() == []
