@@ -1824,6 +1824,24 @@ class TaskOrchestrator:
                 self.log("  [LOOP-GUARD] Recovery Escape sent")
             except Exception:
                 pass
+        # General form of the two rules above, applied after the recovery
+        # Escape so a stray menu is still dismissed either way. A loop is only
+        # benign when the work is actually done, and the goal check is the
+        # thing that knows. If it ran and NEVER once confirmed the goal, the
+        # planner was going in circles on unfinished work, so completing the
+        # subtask reports success for something that never happened: live on
+        # 'add two numbers', the planner looped typing digits, every goal check
+        # answered satisfied=false, and the run still ended '[TASK DONE] the
+        # task was successfully completed'. Only applied when goal checks
+        # actually ran, since launch and command subtasks prove themselves
+        # through the process list or the disk instead.
+        _verdicts = list(run.goal_check_cache.values())
+        if _verdicts and not any(ok for ok, _ in _verdicts):
+            self.log(
+                "  [LOOP-GUARD] The goal check never confirmed this subtask "
+                "— marking subtask FAILED"
+            )
+            return False
         return True
 
     def _record_step_failure(

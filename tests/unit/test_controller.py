@@ -84,3 +84,38 @@ def test_scroll(mock_winapi):
     mock_winapi["mouse_event"].assert_called_once_with(0x0800, data=-360)
 
 
+
+
+class TestGlideDuration:
+    """AGENT_GLIDE_MAX_S slows the cursor so a person can watch it work.
+
+    The glide is cosmetic (GDI screenshots do not capture the cursor), so the
+    only thing to pin is that the override is read, clamped, and never lets a
+    bad value break a click.
+    """
+
+    def test_default_cap_without_the_env_var(self, monkeypatch):
+        from desktop import input as di
+        monkeypatch.delenv("AGENT_GLIDE_MAX_S", raising=False)
+        assert di._glide_max_s() == di._GLIDE_MAX_S
+
+    def test_env_var_raises_the_cap(self, monkeypatch):
+        from desktop import input as di
+        monkeypatch.setenv("AGENT_GLIDE_MAX_S", "1.5")
+        assert di._glide_max_s() == 1.5
+
+    def test_absurd_value_is_clamped(self, monkeypatch):
+        """A typo must not park the cursor mid-flight for a minute."""
+        from desktop import input as di
+        monkeypatch.setenv("AGENT_GLIDE_MAX_S", "600")
+        assert di._glide_max_s() == 10.0
+
+    def test_below_the_floor_is_clamped_up(self, monkeypatch):
+        from desktop import input as di
+        monkeypatch.setenv("AGENT_GLIDE_MAX_S", "0")
+        assert di._glide_max_s() == di._GLIDE_MIN_S
+
+    def test_garbage_falls_back_to_the_default(self, monkeypatch):
+        from desktop import input as di
+        monkeypatch.setenv("AGENT_GLIDE_MAX_S", "slow please")
+        assert di._glide_max_s() == di._GLIDE_MAX_S

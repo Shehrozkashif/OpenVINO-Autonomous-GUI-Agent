@@ -570,14 +570,19 @@ class TestTypeDedupLimit:
         ts = _step_loop("type", target=None, value="hello")
         orch = _make_orch_loop([ts, ts, ts])
         result = orch._execute_subtask(_subtask_loop())
-        assert result is True
+        assert result is False   # goal check never confirmed
         assert orch.planner.plan_steps.call_count == 3
 
-    def test_type_trigger_returns_true(self):
-        """Loop guard always returns True (declares goal achieved, not failure)."""
+    def test_trigger_fails_when_the_goal_was_never_confirmed(self):
+        """A loop is only benign when the goal check agrees the work is done.
+
+        _make_orch_loop's goal check always answers satisfied=false, which is
+        exactly the live 'add two numbers' case: the planner circled on
+        unfinished work, so the subtask must not be reported complete.
+        """
         ts = _step_loop("type", target=None, value="x")
         orch = _make_orch_loop([ts, ts, ts])
-        assert orch._execute_subtask(_subtask_loop()) is True
+        assert orch._execute_subtask(_subtask_loop()) is False
 
 
 class TestClickDedupLimit:
@@ -604,7 +609,7 @@ class TestClickDedupLimit:
         cs = _step_loop("click", target="Btn")
         orch = _make_orch_loop([cs, cs, cs, cs])
         result = orch._execute_subtask(_subtask_loop())
-        assert result is True
+        assert result is False   # goal check never confirmed
         assert orch.planner.plan_steps.call_count == 4
 
     def test_click_trigger_injects_escape(self):
@@ -636,7 +641,7 @@ class TestRightClickDedupLimit:
         rc = _step_loop("right_click", target="Desktop")
         orch = _make_orch_loop([rc, rc, rc])
         result = orch._execute_subtask(_subtask_loop())
-        assert result is True
+        assert result is False   # goal check never confirmed
         assert orch.planner.plan_steps.call_count == 3
 
     def test_right_click_trigger_injects_escape(self):
@@ -668,7 +673,7 @@ class TestInterleavedRepeats:
         cs = _step_loop("click", target="Foo")
         orch = _make_orch_loop([ts, ts, cs, ts])
         result = orch._execute_subtask(_subtask_loop())
-        assert result is True
+        assert result is False   # goal check never confirmed
         assert orch.planner.plan_steps.call_count == 4
 
     def test_click_repeat_survives_interleaved_type(self):
@@ -679,7 +684,7 @@ class TestInterleavedRepeats:
         ts = _step_loop("type", target=None, value="x")
         orch = _make_orch_loop([cs, cs, cs, ts, cs])
         result = orch._execute_subtask(_subtask_loop())
-        assert result is True
+        assert result is False   # goal check never confirmed
         assert orch.planner.plan_steps.call_count == 5
 
     def test_different_targets_count_independently(self):
@@ -876,10 +881,58 @@ class TestLoopGuardCommandSubtask:
             "dependents would otherwise build on state that doesn't exist"
         )
 
-    def test_non_command_subtask_loop_still_returns_true(self):
+    def test_non_command_subtask_loop_fails_when_the_goal_is_unconfirmed(self):
+        """Not command-specific any more: an unconfirmed goal fails any subtask."""
         orch = self._looping_orch("press arrow keys")
         result = orch._execute_subtask(_sub_nwl("press arrow keys repeatedly"))
-        assert result is True
+        assert result is False
+        assert orch._degraded is True
+
+
+class TestLoopGuardGoalCheckRule:
+    """The rule that decides whether a detected loop is benign or a failure.
+
+    Exercised directly on _record_step_success so the goal-check history can be
+    set up explicitly: driving it through _execute_subtask cannot produce a
+    'goal confirmed AND still looping' run, because a confirmed goal ends the
+    subtask before the guard can fire.
+    """
+
+    def _run_at_limit(self, cache):
+        """A SubtaskRun already one step past the 'type' repeat budget."""
+        run = SubtaskRun(started_at=time.time())
+        step = _step_loop("type", target=None, value="x")
+        sig = ("type", "", "x", "")
+        run.step_sig_counts[sig] = DEDUP_LIMIT_BY_ACTION_TYPE["type"] + 1
+        run.goal_check_cache.update(cache)
+        return run, step
+
+    def _orch(self):
+        orch = _make_orch_loop([])
+        orch._execute_step = MagicMock(return_value=True)
+        return orch
+
+    def test_loop_fails_when_every_goal_check_said_no(self):
+        orch = self._orch()
+        run, step = self._run_at_limit({"a": (False, "not yet"), "b": (False, "still not")})
+        assert orch._record_step_success(run, _subtask_loop(), step) is False
+
+    def test_loop_is_benign_once_a_goal_check_said_yes(self):
+        """Guards the over-correction: a confirmed goal must not be failed."""
+        orch = self._orch()
+        run, step = self._run_at_limit({"a": (False, "not yet"), "b": (True, "form is filled")})
+        assert orch._record_step_success(run, _subtask_loop(), step) is True
+
+    def test_loop_is_benign_when_no_goal_check_ever_ran(self):
+        """Launch and command subtasks prove themselves elsewhere."""
+        orch = self._orch()
+        run, step = self._run_at_limit({})
+        assert orch._record_step_success(run, _subtask_loop(), step) is True
+
+    def test_the_run_is_marked_degraded_either_way(self):
+        orch = self._orch()
+        run, step = self._run_at_limit({"a": (True, "done")})
+        orch._record_step_success(run, _subtask_loop(), step)
         assert orch._degraded is True
 
 

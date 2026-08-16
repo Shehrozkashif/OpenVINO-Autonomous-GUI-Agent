@@ -197,6 +197,25 @@ _GLIDE_MAX_S = 0.30        # cap so long moves never slow the pipeline
 _GLIDE_SPEED_PX_S = 3500   # duration = distance / speed, clamped to the above
 
 
+def _glide_max_s() -> float:
+    """Longest a single cursor move may take, in seconds.
+
+    AGENT_GLIDE_MAX_S overrides the cap so the cursor can be slowed down to
+    watch. The 0.30 s default keeps the pipeline quick, but a jump across a
+    1852 px screen is then over in a third of a second, which is easy to miss
+    when you are trying to see what the agent is doing. Setting it to, say,
+    1.5 stretches every move; nothing else changes, since the glide is purely
+    cosmetic (screenshots do not capture the cursor).
+    """
+    raw = os.environ.get("AGENT_GLIDE_MAX_S", "").strip()
+    if not raw:
+        return _GLIDE_MAX_S
+    try:
+        return max(_GLIDE_MIN_S, min(10.0, float(raw)))
+    except ValueError:
+        return _GLIDE_MAX_S
+
+
 def _glide_cursor(x: int, y: int) -> None:
     """Move the cursor to (x, y) along a smoothstep-eased path."""
     try:
@@ -208,7 +227,7 @@ def _glide_cursor(x: int, y: int) -> None:
     if dist < 4:
         _set_cursor_pos(x, y)
         return
-    dur = max(_GLIDE_MIN_S, min(_GLIDE_MAX_S, dist / _GLIDE_SPEED_PX_S))
+    dur = max(_GLIDE_MIN_S, min(_glide_max_s(), dist / _GLIDE_SPEED_PX_S))
     steps = max(2, int(dur / 0.01))
     for i in range(1, steps):
         t = i / steps
