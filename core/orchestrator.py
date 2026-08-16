@@ -163,6 +163,20 @@ class TaskOrchestrator:
         self._extracted_data = {}
         self._launch_window_baseline = {}
         self._degraded = False
+        # No accessibility tree means no ground truth: control read-back,
+        # controls-diff, focused-control read-back and occlusion hit-testing
+        # all come from it, leaving OCR text plus the model's reading of it.
+        # That is exactly the "confidently wrong" verdict the tree exists to
+        # rule out, so whatever this run reports, it must never be filed as a
+        # reusable success that later runs and the Home page trust.
+        from desktop import uia as _uia
+        if not _uia.is_available():
+            self._degraded = True
+            self.log(
+                "[DEGRADED] The accessibility tree is unavailable, so this run "
+                "is verified from OCR alone and will not be recorded as a "
+                "reusable success."
+            )
         self.anchor.clear()         # forget the previous task's app window
         self._invoke_dead = set()   # targets whose pattern-invoke provably no-ops
         self._last_goal_evidence = ""
@@ -793,6 +807,16 @@ class TaskOrchestrator:
                         "toolbar/sidebar button — the form has OPENED and "
                         "satisfied=true. Do not read the opened form's own title "
                         "as the still-unclicked button. "
+                        "The APPLICATION being open is NEVER, on its own, "
+                        "proof of anything the goal asks to happen INSIDE it. "
+                        "A window title ('Calculator', 'Notepad') shows only "
+                        "that the app is running. If the goal is to compute, "
+                        "type, select or change something, the changed VALUE "
+                        "itself has to be readable on screen; if you cannot "
+                        "read it, satisfied=false. Live failure this guards: "
+                        "'add 2 and 3' was blessed as done on the evidence "
+                        "'the foreground window title is Calculator', while "
+                        "the display never showed 5. "
                         "In evidence, go REQUIREMENT BY "
                         "REQUIREMENT: name each value/state the goal asks for "
                         "and quote what on screen shows it present or "

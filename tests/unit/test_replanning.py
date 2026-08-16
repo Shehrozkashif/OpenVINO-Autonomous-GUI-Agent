@@ -11,7 +11,7 @@ progress, or the agent invents a meeting time the user never gave.
 """
 import json
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, ".")
 
@@ -187,7 +187,8 @@ class TestTaskReplanning:
         assert result["success"] is False
         orch.router.replan.assert_not_called()
 
-    def test_executed_subtasks_stored_in_memory_not_original_plan(self):
+    @patch("desktop.uia.is_available", return_value=True)
+    def test_executed_subtasks_stored_in_memory_not_original_plan(self, _uia):
         # After a replan, memory must record the plan that actually worked.
         orch = _make_orch()
         plan_a = [SubTask(id=1, description="a", depends_on=[])]
@@ -225,7 +226,8 @@ class TestElicitation:
         assert "details provided by the user" in routed_instruction
         assert "tomorrow at 3pm" in routed_instruction
 
-    def test_history_stores_what_the_user_typed_not_the_answers(self):
+    @patch("desktop.uia.is_available", return_value=True)
+    def test_history_stores_what_the_user_typed_not_the_answers(self, _uia):
         """The agent runs on the enriched text; history keeps the original.
 
         Instruction is the primary key of the task table, so filing a run under
@@ -495,3 +497,67 @@ class TestEmptyPlan:
             result = orch.execute("do the thing")
 
         assert result["success"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 6. A run with no accessibility tree is never a reusable success
+#
+# Live failure: with AGENT_DISABLE_UIA=1 the goal check blessed 'add 2 and 3'
+# on the evidence "the foreground window title is Calculator", two seconds
+# after reflection reported the display never showed 5. Without the tree there
+# is no ground truth behind any verdict, so the run must not be filed as a
+# success that the Home page and later runs go on to trust.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestDegradedWithoutUIA:
+
+    def _orch_with_uia(self, available: bool):
+        orch = _make_orch()
+        orch.router.decompose = MagicMock(
+            return_value=("t1", [SubTask(id=1, description="a", depends_on=[])])
+        )
+        orch._execute_subtask = MagicMock(return_value=True)
+        patcher = patch("desktop.uia.is_available", return_value=available)
+        return orch, patcher
+
+    def test_run_without_the_tree_is_not_stored(self):
+        orch, patcher = self._orch_with_uia(False)
+        with patcher, _no_burst():
+            result = orch.execute("do the thing")
+        assert result["success"] is True        # it may still have worked
+        orch.history.store_successful_task.assert_not_called()
+
+    def test_run_with_the_tree_is_stored(self):
+        orch, patcher = self._orch_with_uia(True)
+        with patcher, _no_burst():
+            orch.execute("do the thing")
+        orch.history.store_successful_task.assert_called_once()
+
+    def test_the_run_is_marked_degraded(self):
+        orch, patcher = self._orch_with_uia(False)
+        with patcher, _no_burst():
+            orch.execute("do the thing")
+        assert orch._degraded is True
+
+
+class TestGoalCheckPromptRules:
+    """The app being open is not evidence the work inside it happened."""
+
+    def test_prompt_forbids_treating_an_open_app_as_done(self):
+        import time as _t
+
+        from core.runstate import SubtaskRun
+        orch = _make_orch()
+        # A real SubtaskRun, not a mock: every exclusion attribute on a mock is
+        # truthy, so the method returns before it ever builds the prompt.
+        run = SubtaskRun(started_at=_t.time())
+        run.screen_context = "Calculator"
+        orch.reflector.client.query_llm = MagicMock(
+            return_value=MagicMock(
+                content='{"satisfied": false, "confidence": 0.9, "evidence": "x"}')
+        )
+        orch._goal_already_satisfied(
+            run, SubTask(id=1, description="add 2 and 3", depends_on=[]))
+        system = orch.reflector.client.query_llm.call_args[0][0][0]["content"]
+        assert "APPLICATION being open is NEVER" in system
+        assert "window title" in system
