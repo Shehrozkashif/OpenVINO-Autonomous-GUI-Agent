@@ -561,3 +561,55 @@ class TestGoalCheckPromptRules:
         system = orch.reflector.client.query_llm.call_args[0][0][0]["content"]
         assert "APPLICATION being open is NEVER" in system
         assert "window title" in system
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 7. A replan must not re-queue work it already rewrote
+#
+# Live failure: 'add any two numbers using calculator'. The failed subtask WAS
+# the remaining work, so the router's rewrite (click 5 / plus / 7 / equals) and
+# the preserved queue held the same four steps. The agent completed the sum in
+# subtasks 13-16, re-attempted the identical steps in 9-12, skipped them, and
+# reported "partially succeeded, with some sub-tasks skipped" for a run that
+# had worked.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestReplanDoesNotDuplicateWork:
+
+    def _replan(self, fresh_descs, pending_descs):
+        orch = _make_orch()
+        orch.router.replan = MagicMock(return_value=[
+            SubTask(id=i + 1, description=d, depends_on=([i] if i else []))
+            for i, d in enumerate(fresh_descs)
+        ])
+        old_queue = [
+            SubTask(id=50 + i, description=d, depends_on=[])
+            for i, d in enumerate(pending_descs)
+        ]
+        return orch._replan_remaining(
+            "add two numbers", [],
+            SubTask(id=2, description="add the numbers", depends_on=[]),
+            [], old_queue,
+        )
+
+    def test_queued_duplicate_is_dropped(self):
+        queue = self._replan(["click 5", "click plus", "click equals"],
+                             ["click 5", "click plus", "click equals"])
+        assert [s.description for s in queue] == ["click 5", "click plus", "click equals"]
+
+    def test_genuinely_remaining_work_is_kept(self):
+        """The whole point of preserving the queue: don't lose the final step."""
+        queue = self._replan(["click 5", "click plus"], ["click equals"])
+        assert "click equals" in [s.description for s in queue]
+
+    def test_matching_ignores_case_and_punctuation(self):
+        queue = self._replan(["click the plus sign (+)"],
+                             ["Click the plus sign +"])
+        assert len(queue) == 1
+
+    def test_partial_overlap_keeps_only_the_new_work(self):
+        queue = self._replan(["click 5", "click plus", "click 7"],
+                             ["click 5", "click equals"])
+        descs = [s.description for s in queue]
+        assert descs.count("click 5") == 1
+        assert "click equals" in descs

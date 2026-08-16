@@ -463,6 +463,27 @@ class TaskOrchestrator:
             for st in fresh
         ]
         last_new = max(s.id for s in renumbered)
+        # Drop preserved work the rewrite already covers. The router is handed
+        # pending_descs, but when the subtask that failed WAS the remaining
+        # work it re-emits that work anyway: 'add the numbers 5 and 7' came
+        # back as click-5, click-plus, click-7, click-equals, which is exactly
+        # what the queue still held. Appending the preserved copies then runs
+        # the whole calculation twice — live, subtasks 13-16 completed 5+7=
+        # and 9-12 re-attempted the identical steps, got skipped, and a run
+        # that had actually worked reported "partially succeeded, with some
+        # sub-tasks skipped".
+        def _norm_desc(d: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", (d or "").lower())
+
+        _fresh_descs = {_norm_desc(s.description) for s in renumbered}
+        _dupes = [s for s in old_queue if _norm_desc(s.description) in _fresh_descs]
+        if _dupes:
+            for s in _dupes:
+                self.log(
+                    f"  [REPLAN] Dropping queued '{s.description}' — the new "
+                    f"plan already covers it"
+                )
+            old_queue = [s for s in old_queue if s not in _dupes]
         # Re-append the untouched downstream queue after the rewrite, deps
         # rewired: the failed id now means "the rewrite finished", and ids
         # stay above every new one so the ID-order fallback keeps the order.
