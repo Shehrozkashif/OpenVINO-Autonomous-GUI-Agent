@@ -267,6 +267,24 @@ _VK_MAP: dict = {
     "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73,
     "f5": 0x74, "f6": 0x75, "f7": 0x76, "f8": 0x77,
     "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
+    # Numpad / arithmetic. A planner driving a calculator emits key_press
+    # "add" between the operands, which is the obvious thing to write and was
+    # an "Unknown key — skipping" that failed the step three times over and
+    # sent the whole run off to re-plan (live: 'add any two numbers using
+    # calculator' never got past the first operator). Numpad virtual keys
+    # deliberately: they carry no shift state, so they do not depend on the
+    # keyboard layout the way OEM_PLUS and friends do.
+    "add": 0x6B, "plus": 0x6B,
+    "subtract": 0x6D, "minus": 0x6D,
+    "multiply": 0x6A, "asterisk": 0x6A, "star": 0x6A,
+    "divide": 0x6F, "slash": 0x6F,
+    "decimal": 0x6E,
+    # A calculator commits with Enter; "=" as a plain character still works
+    # through the single-character path for text fields.
+    "equals": 0x0D, "equal": 0x0D,
+    "numpad0": 0x60, "numpad1": 0x61, "numpad2": 0x62, "numpad3": 0x63,
+    "numpad4": 0x64, "numpad5": 0x65, "numpad6": 0x66, "numpad7": 0x67,
+    "numpad8": 0x68, "numpad9": 0x69,
 }
 
 # Keys that must set KEYEVENTF_EXTENDEDKEY to be interpreted correctly

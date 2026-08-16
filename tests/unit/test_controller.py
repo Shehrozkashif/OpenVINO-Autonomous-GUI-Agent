@@ -119,3 +119,53 @@ class TestGlideDuration:
         from desktop import input as di
         monkeypatch.setenv("AGENT_GLIDE_MAX_S", "slow please")
         assert di._glide_max_s() == di._GLIDE_MAX_S
+
+
+class TestArithmeticKeyNames:
+    """Live failure: 'add any two numbers using calculator'.
+
+    The planner emitted key_press "add" between the operands. The key table had
+    no arithmetic keys, so every attempt logged "Unknown key 'add' - skipping",
+    failed three times, and pushed the run into a task-level re-plan. It never
+    got past the first operator.
+    """
+
+    @pytest.mark.parametrize("name, vk", [
+        ("add", 0x6B), ("plus", 0x6B),
+        ("subtract", 0x6D), ("minus", 0x6D),
+        ("multiply", 0x6A), ("asterisk", 0x6A), ("star", 0x6A),
+        ("divide", 0x6F), ("slash", 0x6F),
+        ("decimal", 0x6E),
+        ("equals", 0x0D), ("equal", 0x0D),
+    ])
+    def test_operator_resolves(self, name, vk):
+        from desktop.input import _resolve_key
+        assert _resolve_key(name) is not None, f"{name!r} is still unknown"
+        assert _resolve_key(name)[0] == vk
+
+    @pytest.mark.parametrize("digit", range(10))
+    def test_numpad_digits_resolve(self, digit):
+        from desktop.input import _resolve_key
+        assert _resolve_key(f"numpad{digit}")[0] == 0x60 + digit
+
+    def test_names_are_case_insensitive(self):
+        from desktop.input import _resolve_key
+        assert _resolve_key("ADD") == _resolve_key("add")
+
+    def test_operators_need_no_shift(self):
+        """Numpad codes were chosen so layout and shift state cannot matter."""
+        from desktop.input import _resolve_key
+        for name in ("add", "subtract", "multiply", "divide", "decimal"):
+            _vk, _extended, needs_shift = _resolve_key(name)
+            assert needs_shift is False, name
+
+    def test_a_genuinely_unknown_key_still_fails(self):
+        """The honest-failure path must survive the additions."""
+        from desktop.input import _resolve_key, _send_key_name
+        assert _resolve_key("frobnicate") is None
+        assert _send_key_name("frobnicate") is False
+
+    def test_plus_as_a_character_is_not_split_as_a_chord(self, mock_winapi):
+        """press_key routes 'a+b' to the hotkey path; a bare '+' must not go there."""
+        c = DesktopController()
+        assert c.press_key("+") is True
