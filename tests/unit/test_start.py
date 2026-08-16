@@ -215,3 +215,50 @@ class TestEnsureGenerationConfig:
         d = self._model(repo, "vlm", None)
         (d / "config.json").write_text("{ this is not json")
         assert not start._ensure_generation_config("vlm")
+
+
+# ── Compiled-model cache ──────────────────────────────────────────────────────
+# Without CACHE_DIR the GPU plugin recompiles both models from IR on every start,
+# which is most of the wait before the app is usable.
+
+class TestCacheDir:
+
+    def _patch(self, plugin_config: str) -> str:
+        import re
+        return re.sub(r"plugin_config:\s*'([^']*)'",
+                      start._with_cache_dir,
+                      f"plugin_config: '{plugin_config}'")
+
+    def test_cache_dir_is_added_to_an_empty_config(self, repo):
+        out = self._patch("{}")
+        assert '"CACHE_DIR"' in out
+        assert start._ovms_cache_dir() in out
+
+    def test_existing_settings_survive(self, repo):
+        """plugin_config already carries device and decoding settings."""
+        out = self._patch('{"target_device": "GPU", "prompt_lookup": true}')
+        assert '"target_device": "GPU"' in out
+        assert '"prompt_lookup": true' in out
+        assert '"CACHE_DIR"' in out
+
+    def test_rewriting_twice_changes_nothing(self, repo):
+        """_sync_servable runs on every start; it must not report a fake change."""
+        once = self._patch("{}")
+        import re
+        twice = re.sub(r"plugin_config:\s*'([^']*)'", start._with_cache_dir, once)
+        assert once == twice
+
+    def test_unparseable_config_is_left_alone(self, repo):
+        out = self._patch("{not json")
+        assert out == "plugin_config: '{not json'"
+
+    def test_path_has_no_backslashes(self, repo):
+        r"""A Windows '\' would not survive protobuf unescaping into valid JSON."""
+        assert "\\" not in start._ovms_cache_dir()
+
+    def test_the_written_config_is_valid_json(self, repo):
+        """The whole point: OVMS has to be able to parse it back."""
+        import re
+        out = self._patch('{"target_device": "GPU"}')
+        payload = re.search(r"plugin_config: '([^']*)'", out).group(1)
+        assert json.loads(payload)["CACHE_DIR"] == start._ovms_cache_dir()

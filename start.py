@@ -548,6 +548,38 @@ def _with_prompt_lookup(match) -> str:
     return "plugin_config: '" + json.dumps(cfg) + "'"
 
 
+def _ovms_cache_dir() -> str:
+    """Directory OpenVINO keeps compiled model blobs in, as a JSON-safe path.
+
+    Forward slashes deliberately. plugin_config is JSON living inside a
+    single-quoted text-protobuf field, so a Windows backslash has to survive
+    two unescaping passes: protobuf turns '\\\\' back into '\\', and the JSON
+    parser then meets a lone backslash and rejects the whole config. Windows
+    accepts '/' in paths everywhere, so sidestep it.
+    """
+    return os.path.join(_REPO, ".ovms_cache").replace("\\", "/")
+
+
+def _with_cache_dir(match) -> str:
+    """Point a graph.pbtxt plugin_config at that persistent compile cache.
+
+    Without CACHE_DIR the GPU plugin recompiles both models from IR on every
+    single start, which is most of the wait before the app is usable. With it,
+    the first start pays that cost once and later starts load the cached blobs.
+    Parsed rather than pattern-matched for the same reason as prompt lookup:
+    the field already carries other settings that must survive untouched.
+    """
+    try:
+        cfg = json.loads(match.group(1) or "{}")
+    except ValueError:
+        return match.group(0)   # unparseable: leave it exactly as it is
+    path = _ovms_cache_dir()
+    if cfg.get("CACHE_DIR") == path:
+        return match.group(0)
+    cfg["CACHE_DIR"] = path
+    return "plugin_config: '" + json.dumps(cfg) + "'"
+
+
 def _sync_servable(model_name: str, cache_gb: int, device: str) -> bool:
     """Sync an already-exported servable with this machine and config.py.
 
@@ -611,7 +643,12 @@ def _sync_servable(model_name: str, cache_gb: int, device: str) -> bool:
             # too short for guessing ahead to pay for itself.
             text = re.sub(r"plugin_config:\s*'([^']*)'", _with_prompt_lookup, text)
         lookup_changed = text != before
+        before = text
+        # Both models: the VLM is the slower of the two to compile.
+        text = re.sub(r"plugin_config:\s*'([^']*)'", _with_cache_dir, text)
+        cache_dir_changed = text != before
         if text != original:
+            os.makedirs(_ovms_cache_dir(), exist_ok=True)
             with open(graph, "w") as f:
                 f.write(text)
             if cache_changed:
@@ -622,6 +659,9 @@ def _sync_servable(model_name: str, cache_gb: int, device: str) -> bool:
                 print(_green(f"  [OK] {model_name:<24} prefix caching enabled"))
             if lookup_changed:
                 print(_green(f"  [OK] {model_name:<24} prompt lookup decoding enabled"))
+            if cache_dir_changed:
+                print(_green(f"  [OK] {model_name:<24} compile cache enabled "
+                             f"(first start compiles, later ones reuse it)"))
             return True
     except Exception as e:
         print(_yellow(f"  [WARN] Could not update settings for {model_name}: {e}"))

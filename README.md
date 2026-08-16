@@ -14,12 +14,13 @@ OpenVINO™ Model Server. No cloud. No API keys. No data ever leaves your desk.
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 [![Backend](https://img.shields.io/badge/inference-OpenVINO%E2%84%A2%20Model%20Server-0068b5)](https://github.com/openvinotoolkit/model_server)
 [![GUI](https://img.shields.io/badge/GUI-PyQt6-41cd52)](https://www.riverbankcomputing.com/software/pyqt/)
-[![Tests](https://img.shields.io/badge/tests-533%20passing-brightgreen)](#running-tests)
+[![Tests](https://img.shields.io/badge/tests-529%20passing-brightgreen)](#running-tests)
 
 [How It Works](#how-it-works) •
 [Architecture](#architecture) •
 [Installation](#installation) •
 [Safety](#safety) •
+[Env Vars](#environment-variables) •
 [Contributing](CONTRIBUTING.md)
 
 </div>
@@ -406,7 +407,7 @@ intel-openvino-desktop-agent/
 │
 ├── ui/                        # PyQt6 command-center GUI
 ├── tests/
-│   ├── unit/                  # 533 tests: fast, no backend or desktop required
+│   ├── unit/                  # 529 tests: fast, no backend or desktop required
 │   └── live/                  # real-desktop suites (require OVMS + display)
 ├── requirements.txt           # runtime deps (no ML framework, HTTP to OVMS)
 ├── requirements-export.txt    # one-time model-conversion toolchain
@@ -445,12 +446,35 @@ intel-openvino-desktop-agent/
 
 ---
 
+## Environment Variables
+
+All optional. Every one is read fresh on each run, so setting it in the shell
+before `python start.py` is enough.
+
+| Variable | Effect |
+|---|---|
+| `AGENT_DISABLE_UIA=1` | Turns off **every** Windows UIA path: Stage 0 grounding, the planner's clickable-controls list, `set_value` / `select` / `invoke`, and occlusion hit-testing. Grounding falls to OCR then the VLM. **This also removes most of the verification in [Safety](#safety)** — control read-back, controls-diff and focused-control read-back all come from the same tree, so runs get markedly less reliable. Intended for exercising the OCR/VLM path, not for normal use. |
+| `AGENT_DISABLE_OCR=1` | Turns off OCR grounding (Stage 1) only, so grounding falls to the VLM. OCR still runs for planner screen context and reflection. Set together with `AGENT_DISABLE_UIA=1` to force every grounding call through UI-TARS. |
+| `AGENT_FORCE_MOUSE=1` / `0` | Overrides `FORCE_MOUSE` in `config.py` (default on). On, every grounded click is delivered by the real cursor; off prefers the UIA pattern-invoke, which is more robust on WebView2 buttons that swallow synthesized clicks. |
+| `AGENT_GLIDE_MAX_S=1.5` | Longest a single cursor move may take, in seconds (default `0.30`, clamped to `10`). Raise it to actually watch the pointer travel during a demo. Cosmetic only: screenshots never capture the cursor. |
+| `AGENT_LOG_DIR=<path>` | Where run logs are written. |
+| `AGENT_LOG_LEVEL=DEBUG` | Console log level. `DEBUG` adds per-call model timings and OCR region counts. |
+| `AGENT_LOG_RETENTION=<n>` | How many past run logs to keep. |
+
+> **A note on `AGENT_DISABLE_UIA`.** The accessibility tree is where this agent
+> gets its ground truth. With it off, a verdict rests on OCR text plus the
+> model's reading of it, which is exactly the "confidently wrong" failure the
+> tree exists to prevent. Expect worse results, and do not judge the agent by a
+> run made with this set.
+
+---
+
 ## Running Tests
 
 ```powershell
 venv\Scripts\activate
 
-# Unit tests: 533 without PyQt6, 568 with it (the GUI suite). Fast, no backend
+# Unit tests: 529 without PyQt6, 564 with it (the GUI suite). Fast, no backend
 # or desktop required.
 pytest
 
