@@ -248,3 +248,56 @@ class TestFailureSummaryCarriesBlocker:
         router, client = self._router()
         out = router.summarize_completion("t1", [1], False)
         assert isinstance(out, str) and out
+
+
+class TestEmptyPlanIsRetried:
+    """Live failure: 'add two numbers' returned '[]' in two output tokens.
+
+    An empty array is valid JSON, so it never raised, and every backstop below
+    only inspects sub-tasks that exist. The bad generation therefore reached the
+    orchestrator untouched and the run was reported complete without executing
+    anything. An empty plan now retries exactly like a parse failure.
+    """
+
+    def _router(self, *replies):
+        client = MagicMock()
+        client.query_llm = MagicMock(
+            side_effect=[MagicMock(content=r) for r in replies]
+        )
+        return RouterAgent(client), client
+
+    def test_empty_array_triggers_a_retry(self):
+        good = json.dumps([{"id": 1, "description": "open Calculator", "depends_on": []}])
+        router, client = self._router("[]", good)
+
+        _, subs = router.decompose("add two numbers")
+
+        assert client.query_llm.call_count == 2
+        assert [s.description for s in subs] == ["open Calculator"]
+
+    def test_the_retry_demands_json_only(self):
+        good = json.dumps([{"id": 1, "description": "open Calculator", "depends_on": []}])
+        router, client = self._router("[]", good)
+
+        router.decompose("add two numbers")
+
+        retry_system = client.query_llm.call_args[0][0][0]["content"]
+        assert "Output ONLY the JSON array" in retry_system
+
+    def test_a_non_empty_plan_is_not_retried(self):
+        good = json.dumps([{"id": 1, "description": "open Calculator", "depends_on": []}])
+        router, client = self._router(good)
+
+        _, subs = router.decompose("add two numbers")
+
+        assert client.query_llm.call_count == 1
+        assert len(subs) == 1
+
+    def test_an_empty_retry_still_returns_empty(self):
+        """The orchestrator refuses an empty plan; the router must not pretend."""
+        router, client = self._router("[]", "[]")
+
+        _, subs = router.decompose("add two numbers")
+
+        assert subs == []
+        assert client.query_llm.call_count == 2

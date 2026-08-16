@@ -212,6 +212,20 @@ class TaskOrchestrator:
         failed = False
         replans_used = 0
 
+        # An empty decomposition is a routing failure, not a finished task.
+        # Nothing below catches it: the loop simply never runs, `failed` stays
+        # False, and the run is summarised as a success for work that never
+        # happened. Worse, store_successful_task() then files the empty plan
+        # under this instruction, so every later replay of it "succeeds"
+        # instantly against a plan with no steps. Seen live on 'add two
+        # numbers', where the router answered '[]' in two tokens.
+        if not queue:
+            self.log(
+                "[ROUTER] Empty plan: the instruction could not be decomposed "
+                "into any sub-task, so there is nothing to run."
+            )
+            failed = True
+
         while queue:
             subtask = queue.pop(0)
             if self._stop_event.is_set():

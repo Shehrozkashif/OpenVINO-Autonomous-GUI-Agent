@@ -103,6 +103,19 @@ class RouterAgent:
             subtasks = self._parse_subtasks(resp.content)
         except (ValueError, json.JSONDecodeError):
             logger.warning("[ROUTER] Parse failed — retrying with JSON-only reminder")
+            subtasks = []
+        else:
+            # A syntactically valid but EMPTY array parses cleanly and then
+            # sails through every backstop below, because they only inspect
+            # sub-tasks that exist. Retry it like a parse failure: an 8B router
+            # answering '[]' to a real instruction is a bad generation, not a
+            # verdict that the task needs no work.
+            if not subtasks:
+                logger.warning(
+                    "[ROUTER] Empty plan returned — retrying with JSON-only reminder"
+                )
+
+        if not subtasks:
             # Keep the FULL router system prompt: a bare "output JSON" retry
             # (no decomposition rules) returns conversational to-do items
             # ("Confirm the date with X") that no planner can act on.

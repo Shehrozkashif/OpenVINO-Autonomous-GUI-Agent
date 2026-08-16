@@ -440,3 +440,58 @@ class TestSkipExhaustedSubtask:
             result = orch.execute("schedule a meeting")
 
         assert result["success"] is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. An empty decomposition is a failure, not a finished task
+#
+# Live failure this guards against: 'add two numbers' made the 8B router answer
+# '[]' in two output tokens. The execution loop never ran, nothing set `failed`,
+# and the run was reported as "successfully completed with all sub-tasks
+# completed" — then stored as a reusable success, so replaying that instruction
+# from history would keep succeeding against a plan with no steps.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestEmptyPlan:
+
+    def test_empty_decomposition_fails_the_task(self):
+        orch = _make_orch()
+        orch.router.decompose = MagicMock(return_value=("t1", []))
+
+        with _no_burst():
+            result = orch.execute("add two numbers")
+
+        assert result["success"] is False
+
+    def test_empty_decomposition_runs_no_subtask(self):
+        orch = _make_orch()
+        orch.router.decompose = MagicMock(return_value=("t1", []))
+        orch._execute_subtask = MagicMock(return_value=True)
+
+        with _no_burst():
+            orch.execute("add two numbers")
+
+        orch._execute_subtask.assert_not_called()
+
+    def test_empty_decomposition_is_never_stored_as_a_success(self):
+        """The poisoning half: a stored empty plan replays as an instant win."""
+        orch = _make_orch()
+        orch.router.decompose = MagicMock(return_value=("t1", []))
+
+        with _no_burst():
+            orch.execute("add two numbers")
+
+        orch.history.store_successful_task.assert_not_called()
+
+    def test_a_real_plan_still_succeeds(self):
+        """The guard must not fire on an ordinary one-subtask plan."""
+        orch = _make_orch()
+        orch.router.decompose = MagicMock(
+            return_value=("t1", [SubTask(id=1, description="a", depends_on=[])])
+        )
+        orch._execute_subtask = MagicMock(return_value=True)
+
+        with _no_burst():
+            result = orch.execute("do the thing")
+
+        assert result["success"] is True
